@@ -1,0 +1,141 @@
+cmake_minimum_required(VERSION 3.20)
+project(grpc-asr VERSION 0.1.0 LANGUAGES C CXX)
+
+include(CTest)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# gRPC's CMake flips BUILD_SHARED_LIBS-adjacent defaults between releases;
+# pin static explicitly so a green build cannot produce an unbootable image.
+set(BUILD_SHARED_LIBS OFF)
+
+option(GRPC_ASR_WERROR "Treat warnings as errors for first-party targets" OFF)
+option(GRPC_ASR_CUDA "Build whisper.cpp with the CUDA (GGML) backend" OFF)
+option(GRPC_ASR_OPENVINO "Build whisper.cpp with the OpenVINO encoder" OFF)
+set(GRPC_ASR_SANITIZE "" CACHE STRING "Comma list for -fsanitize on first-party targets")
+
+# Warnings apply to first-party targets only; fetched dependencies use -I
+# (not -isystem) includes and would poison a global -Werror.
+add_library(asr_flags INTERFACE)
+target_compile_options(asr_flags INTERFACE -Wall -Wextra -Wnon-virtual-dtor)
+if(GRPC_ASR_WERROR)
+  target_compile_options(asr_flags INTERFACE -Werror -Wno-error=deprecated-declarations)
+endif()
+if(GRPC_ASR_SANITIZE)
+  target_compile_options(asr_flags INTERFACE -fsanitize=${GRPC_ASR_SANITIZE} -fno-omit-frame-pointer -g)
+  target_link_options(asr_flags INTERFACE -fsanitize=${GRPC_ASR_SANITIZE})
+endif()
+
+find_package(Threads REQUIRED)
+
+include(FetchContent)
+
+set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
+set(gRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(grpc
+  GIT_REPOSITORY https://github.com/grpc/grpc.git
+  GIT_TAG v1.83.0
+  GIT_SHALLOW TRUE
+  GIT_SUBMODULES_RECURSE TRUE)
+FetchContent_MakeAvailable(grpc)
+
+# whisper.cpp is the ASR system of record. Examples/tests/server are the
+# upstream demo surface, not this service.
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+if(GRPC_ASR_CUDA)
+  set(GGML_CUDA ON CACHE BOOL "" FORCE)
+endif()
+if(GRPC_ASR_OPENVINO)
+  set(WHISPER_OPENVINO ON CACHE BOOL "" FORCE)
+endif()
+FetchContent_Declare(whisper
+  GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+  GIT_TAG v1.9.2
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(whisper)
+
+# ---------------------------------------------------------------------------
+# Generated proto code. protoc and grpc_cpp_plugin are the fetched targets,
+# so no host protoc is required (buf handles lint only).
+# ---------------------------------------------------------------------------
+set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto")
+set(ASR_PROTO "${PROTO_DIR}/ai/pipestream/asr/v1/asr_service.proto")
+
+add_custom_command(
+  OUTPUT
+    "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.pb.cc"
+    "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.pb.h"
+    "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.cc"
+    "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.h"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${GENERATED_DIR}"
+  COMMAND $<TARGET_FILE:protoc>
+  ARGS --proto_path=${PROTO_DIR}
+       --proto_path=${protobuf_SOURCE_DIR}/src
+       --cpp_out=${GENERATED_DIR}
+       --grpc_out=${GENERATED_DIR}
+       --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
+       ${ASR_PROTO}
+  DEPENDS ${ASR_PROTO} protoc grpc_cpp_plugin
+  VERBATIM)
+
+add_library(asr_proto STATIC
+  "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.pb.cc"
+  "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.cc")
+target_include_directories(asr_proto PUBLIC "${GENERATED_DIR}")
+target_link_libraries(asr_proto PUBLIC grpc++)
+
+# ---------------------------------------------------------------------------
+# First-party code
+# ---------------------------------------------------------------------------
+add_library(asr_core STATIC
+  src/config.cpp
+  src/media/sniff.cpp
+  src/media/audio_decoder.cpp
+  src/media/video_demux.cpp
+  src/engine/model_pool.cpp
+  src/engine/transcriber.cpp
+  src/service/asr_service.cpp)
+target_include_directories(asr_core PUBLIC src)
+target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
+target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}")
+target_link_libraries(asr_core
+  PUBLIC asr_proto whisper Threads::Threads
+  PRIVATE asr_flags)
+
+add_executable(grpc-asr-server src/main.cpp)
+target_link_libraries(grpc-asr-server PRIVATE asr_core asr_flags grpc++_reflection)
+
+install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# Tests: plain int main() executables under CTest, fleet style. Tests that
+# need model weights or the ffmpeg binary skip with 77 when absent so the
+# suite stays green on a bare checkout and asserts for real when provisioned.
+# ---------------------------------------------------------------------------
+if(BUILD_TESTING)
+  set(GRPC_ASR_TESTS
+    sniff-test
+    audio-decoder-test
+    transcriber-test
+    video-demux-test
+    asr-service-test)
+  foreach(test_name IN LISTS GRPC_ASR_TESTS)
+    string(REPLACE "-" "_" test_source "${test_name}")
+    add_executable(${test_name} "tests/${test_source}.cpp")
+    target_link_libraries(${test_name} PRIVATE asr_core asr_flags)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+  add_custom_target(grpc-asr-tests DEPENDS ${GRPC_ASR_TESTS})
+  set_tests_properties(${GRPC_ASR_TESTS} PROPERTIES TIMEOUT 300 LABELS asr)
+  set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
+endif()
