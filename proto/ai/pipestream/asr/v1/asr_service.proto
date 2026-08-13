@@ -1,0 +1,207 @@
+// grpc-asr wire contract: streaming ASR over whisper.cpp for audio and
+// video media, projecting timed transcript segments (and optional video
+// keyframes) that gRParse maps into the Document data plane.
+syntax = "proto3";
+
+package ai.pipestream.asr.v1;
+
+// Streaming speech-to-text service backed by whisper.cpp.
+//
+// The product is the live event stream: segments are emitted as the
+// decoder commits them so a client can render a growing transcript on a
+// two-hour file. TranscriptComplete is a trailer with counts, not the
+// payload.
+service AsrService {
+  // Bidirectional transcription stream.
+  //
+  // The client sends exactly one TranscribeOptions as the first message,
+  // then the encoded media as MediaChunk messages, then half-closes.
+  // The server replies with MediaInfo once the container is understood,
+  // PartialSegment/FinalSegment events as the decoder commits text,
+  // Keyframe events when requested for video, and a single
+  // TranscriptComplete trailer.
+  //
+  // Errors: media above the configured byte or duration cap is
+  // RESOURCE_EXHAUSTED; undecodable or truncated media is
+  // INVALID_ARGUMENT (including video without an audio track); an
+  // unknown model name is INVALID_ARGUMENT; an internal decoder fault is
+  // INTERNAL.
+  rpc Transcribe(stream TranscribeRequest) returns (stream TranscribeResponse);
+
+  // Reports the server build, the available backend, and the models the
+  // process loaded at startup.
+  rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
+}
+
+// One client-to-server message on the Transcribe stream.
+message TranscribeRequest {
+  // Exactly one payload kind per message.
+  oneof payload {
+    // Must be the first message on the stream and must not repeat.
+    TranscribeOptions options = 1;
+    // A chunk of the encoded media file, in file order.
+    MediaChunk chunk = 2;
+  }
+}
+
+// Per-stream transcription options, sent once as the first message.
+message TranscribeOptions {
+  // Whisper model identifier, e.g. "tiny", "tiny.en", "small", "medium",
+  // "large-v3", "distil-large-v3". Must be one of the models this
+  // process was configured to serve; unknown names fail with
+  // INVALID_ARGUMENT rather than triggering a download.
+  string model = 1;
+
+  // ISO 639-1 hint for the spoken language, e.g. "en". Empty means
+  // autodetect.
+  string language = 2;
+
+  // Whether to transcribe in the source language or translate to
+  // English.
+  Task task = 3;
+
+  // When true, FinalSegment events carry per-word timings.
+  bool word_timestamps = 4;
+
+  // When true and the media has a video stream, the server emits
+  // Keyframe events with PNG stills. Ignored for audio-only media.
+  bool emit_keyframes = 5;
+
+  // Minimum spacing between keyframes in seconds. Zero means the server
+  // default. Only meaningful when emit_keyframes is true.
+  uint32 keyframe_interval_seconds = 6;
+}
+
+// Whisper decoding task.
+enum Task {
+  // Defaults to TASK_TRANSCRIBE.
+  TASK_UNSPECIFIED = 0;
+  // Transcribe in the language spoken in the media.
+  TASK_TRANSCRIBE = 1;
+  // Translate the speech to English while transcribing.
+  TASK_TRANSLATE = 2;
+}
+
+// A chunk of the encoded input media (the bytes of the file as stored,
+// not PCM). Chunks arrive in order; the server buffers only the encoded
+// form and decodes in bounded windows.
+message MediaChunk {
+  // Raw bytes of the media file, in order.
+  bytes data = 1;
+}
+
+// One server-to-client event on the Transcribe stream.
+message TranscribeResponse {
+  // Exactly one event kind per message.
+  oneof event {
+    // First event: what the demuxer found in the container.
+    MediaInfo media_info = 1;
+    // A segment the decoder may still revise; replaced by a
+    // FinalSegment with the same index.
+    Segment partial_segment = 2;
+    // A committed segment. Final segments for a given index supersede
+    // any partial with that index and are never revised.
+    Segment final_segment = 3;
+    // A video still, only when TranscribeOptions.emit_keyframes was set
+    // and the media has video.
+    Keyframe keyframe = 4;
+    // Trailer: aggregate counts for the finished transcript.
+    TranscriptComplete complete = 5;
+  }
+}
+
+// Container-level facts discovered before transcription starts.
+message MediaInfo {
+  // Total media duration in milliseconds, zero when the container does
+  // not declare it.
+  uint64 duration_ms = 1;
+  // Audio codec name as reported by the demuxer, e.g. "pcm_s16le",
+  // "aac", "mp3".
+  string audio_codec = 2;
+  // Source sample rate in hertz, before resampling to the model rate.
+  uint32 sample_rate_hz = 3;
+  // Number of audio channels in the source.
+  uint32 channels = 4;
+  // True when the container also has a video stream.
+  bool has_video = 5;
+  // Video codec name when has_video is true, empty otherwise.
+  string video_codec = 6;
+}
+
+// A timed span of transcribed text.
+message Segment {
+  // Zero-based segment index; finals replace partials by this index.
+  uint32 index = 1;
+  // Segment start in milliseconds from the beginning of the media.
+  uint64 start_ms = 2;
+  // Segment end in milliseconds from the beginning of the media.
+  uint64 end_ms = 3;
+  // Transcribed (or translated) text for the span.
+  string text = 4;
+  // Per-word timings, present only on final segments when
+  // TranscribeOptions.word_timestamps was set.
+  repeated Word words = 5;
+  // Mean log-probability of the segment's tokens; 0 when unknown.
+  float avg_logprob = 6;
+}
+
+// A single word with its timing inside a segment.
+message Word {
+  // The word text, including leading whitespace as whisper emits it.
+  string text = 1;
+  // Word start in milliseconds from the beginning of the media.
+  uint64 start_ms = 2;
+  // Word end in milliseconds from the beginning of the media.
+  uint64 end_ms = 3;
+  // Token-level probability for the word; 0 when unknown.
+  float probability = 4;
+}
+
+// A still frame extracted from the video stream.
+message Keyframe {
+  // Frame timestamp in milliseconds from the beginning of the media.
+  uint64 timestamp_ms = 1;
+  // PNG-encoded frame bytes.
+  bytes png = 2;
+  // Frame width in pixels.
+  uint32 width = 3;
+  // Frame height in pixels.
+  uint32 height = 4;
+}
+
+// Trailer summarizing the finished transcription.
+message TranscriptComplete {
+  // Detected or requested language as ISO 639-1, e.g. "en".
+  string language = 1;
+  // Transcribed media duration in milliseconds.
+  uint64 duration_ms = 2;
+  // Total number of final segments emitted.
+  uint32 segment_count = 3;
+  // Total decoded token count across all final segments.
+  uint64 token_count = 4;
+  // Total keyframes emitted; zero for audio-only media or when
+  // keyframes were not requested.
+  uint32 keyframe_count = 5;
+}
+
+// Request for GetServiceInfo. Empty by design.
+message GetServiceInfoRequest {}
+
+// Build and capability facts for this server process.
+message GetServiceInfoResponse {
+  // Semantic version of this server build.
+  string version = 1;
+  // whisper.cpp revision compiled into the binary.
+  string whisper_version = 2;
+  // Active compute backend: "cuda", "openvino", or "cpu". The backend
+  // is fixed at startup and never silently substituted.
+  string backend = 3;
+  // Model identifiers this process loaded at startup, e.g. "tiny.en".
+  repeated string models = 4;
+  // Maximum accepted encoded media size in bytes; larger inputs fail
+  // with RESOURCE_EXHAUSTED.
+  uint64 max_media_bytes = 5;
+  // Maximum accepted media duration in milliseconds; longer inputs fail
+  // with RESOURCE_EXHAUSTED.
+  uint64 max_duration_ms = 6;
+}
