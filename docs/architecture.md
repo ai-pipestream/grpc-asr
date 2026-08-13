@@ -26,6 +26,14 @@ wav/mp3/flac  or  mp4/mkv/webm
 Keep ASR **out of gRParse**. OCR/layout session pools and Whisper
 weights do not share a device arena.
 
+## Live results (vs Docling)
+
+Docling's ASR pipeline transcribes the file and then builds a
+document. We emit **segments as the decoder commits them** (and
+keyframes as they are extracted) so a UI can show the transcript
+growing, including on a two-hour file. Partial segments are allowed;
+finals replace them by index. `TranscriptComplete` is a trailer.
+
 ## What this process owns
 
 - Audio decode and transcription. Runtime is **whisper.cpp** (GGML /

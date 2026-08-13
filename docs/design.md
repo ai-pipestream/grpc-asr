@@ -5,7 +5,9 @@
 - Feature parity with Docling `InputFormat.AUDIO` and `VIDEO` plus the
   ASR pipeline (Whisper family, including Distil-Whisper).
 - Stream partial segments as they decode. A two-hour file must not
-  buffer the whole transcript until the end.
+  buffer the whole transcript until the end. UIs subscribe to the
+  event stream; they do not wait for `TranscriptComplete`. That is
+  the difference from Docling's batch ASR convert, not a socket trick.
 - Bounded memory: encoded bytes in RAM, decode in chunks, drop PCM
   after the window is transcribed.
 - Diskless hot path. Model weights are the only files, mounted
