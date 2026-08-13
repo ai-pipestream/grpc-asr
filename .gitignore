@@ -1,0 +1,9 @@
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+.cache/
+*.o
+*.a
+models/*.bin
+models/*.ggml
