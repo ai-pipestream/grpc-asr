@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+# grpc-asr — CPU-only image. Same layout as the CUDA Dockerfile without
+# the GGML CUDA backend; run it with GRPC_ASR_BACKEND=cpu (the backend is
+# never silently substituted, so the default of cuda would refuse to boot
+# in this image — the env below makes cpu the image's explicit choice).
+
+FROM ubuntu:24.04 AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates cmake g++ git make ninja-build pkg-config ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-cpu-grpc1.83.0-whisper1.9.2,target=/build \
+    cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+        -DGRPC_ASR_WERROR=ON \
+    && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
+    && ctest --test-dir /build -L asr --output-on-failure \
+    && mkdir -p /out && cp /build/grpc-asr-server /out/
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
+
+ENV GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
+    GRPC_ASR_BACKEND=cpu \
+    GRPC_ASR_MODELS_DIR=/models
+
+USER 65532:65532
+EXPOSE 50055
+ENTRYPOINT ["/usr/local/bin/grpc-asr-server"]

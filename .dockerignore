@@ -1,0 +1,6 @@
+# Keep models/ IN the context on purpose: a local image build then runs
+# the real transcription tests inside the build. CI checkouts have no
+# models, so those tests skip (77) and the image still builds.
+build/
+.git/
+.cache/

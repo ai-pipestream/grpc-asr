@@ -73,6 +73,29 @@ never emit keyframes.
 - `RESOURCE_EXHAUSTED` above a configured media byte cap and above a
   configured duration cap.
 
+## 5a. Implementation notes (v1, as built)
+
+- **Streaming input**: for the audio families the decoder pulls from the
+  growing upload buffer, so `MediaInfo` and the first segments are
+  emitted **before the client half-closes**. The e2e test holds back the
+  last half second of the fixture until a `FinalSegment` arrives.
+- **Windowing**: PCM is decoded into `GRPC_ASR_WINDOW_SECONDS` windows.
+  Segments wholly inside a window finalize immediately after it; the
+  window's last segment is emitted as a partial and re-decoded from its
+  own start in the next window (finals replace partials by index). PCM
+  behind a final is dropped, so resident memory never grows with media
+  length.
+- **Video** is demuxed via ffmpeg reading a sealed memfd through
+  `/dev/fd` — classic mp4 puts its moov index at the end, so the input
+  must be complete and seekable; nothing touches a filesystem. Keyframes
+  stream from a second ffmpeg child concurrently with transcription.
+- **Live feeds (follow-up)**: streamable containers (MPEG-TS, fragmented
+  MP4/CMAF, mkv/webm) can be demuxed from a pipe as bytes arrive; routing
+  those through a pipe-fed ffmpeg while keeping the memfd path for
+  classic mp4 would extend transcribe-during-upload to video, and an edge
+  relay (`ffmpeg -i rtsp://… -f mpegts -` into a gRPC client) bridges
+  RTSP/RTMP sources without this server speaking those protocols.
+
 ## 6. Tests
 
 - Fixture wav with known transcript (assert substring + timestamp
