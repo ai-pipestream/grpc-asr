@@ -59,7 +59,7 @@ trailer.
 | ASR | Document |
 |---|---|
 | final segment | `TextItem` (label TEXT) under `#/body`, in wire order |
-| segment timing | `TrackSource{start_time, end_time}` in seconds — media has no pages, so no `ProvenanceItem` is invented |
+| segment timing | `TrackSource{start_time, end_time}` in seconds — media has no pages, so no `ProvenanceItem` is invented. Docling's validator requires `end > start` strictly, so zero-duration spans (keyframe instants, degenerate segments) get docling's own 1 ms epsilon |
 | words | typed stream only (no docling slot; `Word` events remain the source) |
 | keyframe | `PictureItem` + `ImageRef{mimetype, size, uri: "keyframe:<timestamp_ms>"}` — a pointer at the typed event; PNG bytes are never embedded so the Document stays one bounded message |
 | MediaInfo / language | `body.meta` (`asr.*` custom fields, `language.code_raw`) |

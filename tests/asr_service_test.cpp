@@ -230,7 +230,8 @@ void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::s
                 "source order is track then collector");
         const docv1::TrackSource& track = base.source(0).track();
         require(track.start_time() >= last_start, "track times monotonic");
-        require(track.end_time() >= track.start_time(), "track range well-formed");
+        require(track.end_time() > track.start_time(),
+                "track range strictly positive (docling TrackSource validator)");
         last_start = track.start_time();
         const docv1::CollectorSource& collector = base.source(1).collector();
         require(collector.collector() == "asr" && collector.model() == "tiny.en",

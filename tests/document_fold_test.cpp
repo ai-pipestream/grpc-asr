@@ -111,8 +111,8 @@ void verify_fold() {
                 picture.image().size().height() == 360.0,
             "image ref carries the frame facts");
     require(picture.source_size() == 2 && picture.source(0).track().start_time() == 5.0 &&
-                picture.source(0).track().end_time() == 5.0,
-            "keyframe track source is the instant");
+                picture.source(0).track().end_time() == 5.001,
+            "keyframe track gets docling's 1 ms zero-duration epsilon");
     require(!picture.source(1).collector().has_confidence(),
             "keyframes claim no model confidence");
 

@@ -73,7 +73,11 @@ void AsrDocumentFold::stamp_sources(
     double end_seconds, float avg_logprob) {
     docv1::TrackSource* track = source->Add()->mutable_track();
     track->set_start_time(start_seconds);
-    track->set_end_time(end_seconds);
+    // Docling's TrackSource validator requires end > start strictly, so a
+    // zero-duration span (a keyframe instant, a degenerate segment) gets the
+    // same 1 ms epsilon docling itself applies (ZERO_DURATION_SEGMENT_EPS in
+    // the ASR transcriber, timestamp + 0.001 in the video pipeline).
+    track->set_end_time(end_seconds > start_seconds ? end_seconds : start_seconds + 0.001);
     // Every item this fold creates is attributable: additive merges with
     // other collectors' output rely on the tag to never collide silently.
     docv1::CollectorSource* collector = source->Add()->mutable_collector();
