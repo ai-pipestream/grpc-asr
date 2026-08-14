@@ -3,9 +3,11 @@
 #include <atomic>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
+#include "document/document_fold.h"
 #include "engine/transcriber.h"
 #include "media/audio_decoder.h"
 #include "media/byte_stream.h"
@@ -25,15 +27,43 @@ namespace {
 
 // gRPC stream Write is not thread-safe; the transcription worker and the
 // keyframe thread share the stream through this lock. write() returning
-// false means the client is gone and the producer should stop.
+// false means the client is gone and the producer should stop. The same
+// lock feeds the optional Document fold, so segment and keyframe events
+// fold in exactly the order they hit the wire.
 class LockedWriter {
   public:
-    explicit LockedWriter(
-        grpc::ServerReaderWriter<asrv1::TranscribeResponse, asrv1::TranscribeRequest>* stream)
-        : stream_(stream) {}
+    LockedWriter(
+        grpc::ServerReaderWriter<asrv1::TranscribeResponse, asrv1::TranscribeRequest>* stream,
+        doc::AsrDocumentFold* fold)
+        : stream_(stream), fold_(fold) {}
 
     bool write(const asrv1::TranscribeResponse& response) {
         std::lock_guard<std::mutex> lock(mutex_);
+        return write_locked(response);
+    }
+
+    // Ends the stream: folds the trailer, emits the Document event when a
+    // fold is active (the trailer's counts and language belong in it), and
+    // writes the trailer last so it stays the final event.
+    bool finish(const asrv1::TranscribeResponse& trailer) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (fold_ != nullptr) {
+            fold_->consume(trailer);
+            asrv1::TranscribeResponse document_event;
+            *document_event.mutable_document() = fold_->take();
+            fold_ = nullptr;
+            if (!write_locked(document_event)) {
+                return false;
+            }
+        }
+        return write_locked(trailer);
+    }
+
+  private:
+    bool write_locked(const asrv1::TranscribeResponse& response) {
+        if (fold_ != nullptr) {
+            fold_->consume(response);
+        }
         if (dead_) {
             return false;
         }
@@ -44,8 +74,8 @@ class LockedWriter {
         return true;
     }
 
-  private:
     grpc::ServerReaderWriter<asrv1::TranscribeResponse, asrv1::TranscribeRequest>* stream_;
+    doc::AsrDocumentFold* fold_;
     std::mutex mutex_;
     bool dead_ = false;
 };
@@ -228,7 +258,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         complete->set_segment_count(result.final_segments);
         complete->set_token_count(result.tokens);
         complete->set_keyframe_count(keyframe_count.load());
-        writer.write(trailer);
+        writer.finish(trailer);
 
         audio_ms += static_cast<long>(result.duration_ms);
         return grpc::Status::OK;
@@ -282,7 +312,13 @@ grpc::Status AsrServiceImpl::Transcribe(
     }
 
     media::ByteStream upload;
-    LockedWriter writer(stream);
+    // The fold only exists when the client asked for the Document
+    // projection; otherwise the hot path never touches it.
+    std::optional<doc::AsrDocumentFold> fold;
+    if (options.emit_document()) {
+        fold.emplace(options.model(), GRPC_ASR_VERSION);
+    }
+    LockedWriter writer(stream, fold.has_value() ? &*fold : nullptr);
     grpc::Status worker_status = grpc::Status::OK;
     std::thread worker([&] {
         worker_status = process_stream(config_, pool_, options, upload, writer, audio_ms);

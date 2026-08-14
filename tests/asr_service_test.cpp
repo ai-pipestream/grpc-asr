@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "config.h"
+#include "document/document_fold.h"
 #include "engine/model_pool.h"
 #include "fixture.h"
 #include "ggml-backend.h"
@@ -48,6 +49,8 @@ struct StreamResult {
     bool got_complete = false;
     bool complete_last = true;
     asrv1::TranscriptComplete complete;
+    size_t documents = 0;
+    ai::pipestream::document::v1::Document document;
     // Set when a final segment was received before the upload finished —
     // the wire-level proof the server is not batching.
     bool final_before_upload_done = false;
@@ -83,6 +86,10 @@ void consume_event(StreamResult& result, const asrv1::TranscribeResponse& respon
         case asrv1::TranscribeResponse::kComplete:
             result.got_complete = true;
             result.complete = response.complete();
+            break;
+        case asrv1::TranscribeResponse::kDocument:
+            result.documents++;
+            result.document = response.document();
             break;
         default:
             break;
@@ -191,6 +198,51 @@ void verify_wav(const std::shared_ptr<grpc::Channel>& channel, const std::string
     require(result.complete.language() == "en", "language in the trailer");
     require(result.keyframes == 0 && result.complete.keyframe_count() == 0,
             "audio-only media never emits keyframes");
+    require(result.documents == 0, "no document event unless emit_document was set");
+}
+
+void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk) {
+    namespace docv1 = ai::pipestream::document::v1;
+    asrv1::TranscribeOptions options = options_for("tiny.en");
+    options.set_emit_document(true);
+    StreamResult result = transcribe(channel, options, jfk);
+    require(result.status.ok(), "document run transcribes OK: " + result.status.error_message());
+    require(result.documents == 1, "exactly one document event");
+    require(result.got_complete && result.complete_last,
+            "the document precedes Complete, which stays the trailer");
+
+    const docv1::Document& document = result.document;
+    std::vector<std::string> errors = asr::doc::document_integrity_errors(document);
+    require(errors.empty(), "document integrity: " + (errors.empty() ? "" : errors.front()));
+    require(document.schema_name() == "docling_document_v2", "docling schema name");
+    require(static_cast<size_t>(document.texts_size()) == result.finals.size(),
+            "one text item per final segment");
+    require(document.body().children_size() == document.texts_size(),
+            "body children mirror the text arena");
+
+    std::string all_text;
+    double last_start = -1.0;
+    for (const docv1::BaseTextItem& item : document.texts()) {
+        const docv1::TextItemBase& base = item.text().base();
+        all_text += base.text() + " ";
+        require(base.source_size() == 2, "every text item carries track + collector sources");
+        require(base.source(0).has_track() && base.source(1).has_collector(),
+                "source order is track then collector");
+        const docv1::TrackSource& track = base.source(0).track();
+        require(track.start_time() >= last_start, "track times monotonic");
+        require(track.end_time() >= track.start_time(), "track range well-formed");
+        last_start = track.start_time();
+        const docv1::CollectorSource& collector = base.source(1).collector();
+        require(collector.collector() == "asr" && collector.model() == "tiny.en",
+                "collector attribution names asr and the model");
+        require(collector.confidence() > 0.0 && collector.confidence() <= 1.0,
+                "confidence derived from the segment's avg logprob");
+        require(base.prov_size() == 0, "no invented page provenance on media items");
+    }
+    require(lower(all_text).find("country") != std::string::npos,
+            "document text matches the transcript, got: " + all_text);
+    require(document.body().meta().language().code_raw() == "en",
+            "trailer language folded into body meta");
 }
 
 void verify_streaming_during_upload(const std::shared_ptr<grpc::Channel>& channel,
@@ -381,6 +433,7 @@ int main() {
 
         verify_wav(channel, jfk);
         verify_streaming_during_upload(channel, jfk);
+        verify_document(channel, jfk);
         verify_silence(channel);
         verify_error_matrix(channel);
         verify_byte_cap(config, pool);

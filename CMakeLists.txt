@@ -68,6 +68,10 @@ FetchContent_MakeAvailable(whisper)
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto")
 set(ASR_PROTO "${PROTO_DIR}/ai/pipestream/asr/v1/asr_service.proto")
+# Vendored verbatim from gRParse (the canonical copy); message-only, but one
+# protoc run generates both files so the grpc plugin emits its (empty) stubs
+# for it too rather than needing a second command.
+set(DOC_PROTO "${PROTO_DIR}/ai/pipestream/document/v1/document.proto")
 
 add_custom_command(
   OUTPUT
@@ -75,6 +79,10 @@ add_custom_command(
     "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.pb.h"
     "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.cc"
     "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.h"
+    "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.cc"
+    "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.h"
+    "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.cc"
+    "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.h"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${GENERATED_DIR}"
   COMMAND $<TARGET_FILE:protoc>
   ARGS --proto_path=${PROTO_DIR}
@@ -82,13 +90,15 @@ add_custom_command(
        --cpp_out=${GENERATED_DIR}
        --grpc_out=${GENERATED_DIR}
        --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
-       ${ASR_PROTO}
-  DEPENDS ${ASR_PROTO} protoc grpc_cpp_plugin
+       ${ASR_PROTO} ${DOC_PROTO}
+  DEPENDS ${ASR_PROTO} ${DOC_PROTO} protoc grpc_cpp_plugin
   VERBATIM)
 
 add_library(asr_proto STATIC
   "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.pb.cc"
-  "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.cc")
+  "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.cc"
+  "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.cc"
+  "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.cc")
 target_include_directories(asr_proto PUBLIC "${GENERATED_DIR}")
 target_link_libraries(asr_proto PUBLIC grpc++)
 
@@ -102,6 +112,7 @@ add_library(asr_core STATIC
   src/media/video_demux.cpp
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
+  src/document/document_fold.cpp
   src/service/asr_service.cpp)
 target_include_directories(asr_core PUBLIC src)
 target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
@@ -124,6 +135,7 @@ if(BUILD_TESTING)
   set(GRPC_ASR_TESTS
     sniff-test
     audio-decoder-test
+    document-fold-test
     transcriber-test
     video-demux-test
     asr-service-test)

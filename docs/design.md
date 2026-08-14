@@ -47,18 +47,29 @@ Events:
 3. `Keyframe` — timestamp + PNG bytes (only if `emit_keyframes`)
 4. `TranscriptComplete` — language, duration, token counts
 
-## 4. Mapping to Document
+## 4. Mapping to Document (implemented in-repo)
+
+The fold lives here (`src/document/document_fold.{h,cpp}`), the
+DoclingMapper precedent: each collector produces its own source-tagged
+Document and the merge heuristic stays downstream. Opt in with
+`TranscribeOptions.emit_document`; the server folds its own event stream
+and emits the Document immediately before the `TranscriptComplete`
+trailer.
 
 | ASR | Document |
 |---|---|
-| full text | concatenated `TextItem`s in time order |
-| segment | `TextItem` with a time range in provenance (no page bbox) |
-| words | optional child spans / `TextOffset` |
-| keyframe | `PictureItem` + `ImageRef`, page_no synthetic from time |
+| final segment | `TextItem` (label TEXT) under `#/body`, in wire order |
+| segment timing | `TrackSource{start_time, end_time}` in seconds — media has no pages, so no `ProvenanceItem` is invented |
+| words | typed stream only (no docling slot; `Word` events remain the source) |
+| keyframe | `PictureItem` + `ImageRef{mimetype, size, uri: "keyframe:<timestamp_ms>"}` — a pointer at the typed event; PNG bytes are never embedded so the Document stays one bounded message |
+| MediaInfo / language | `body.meta` (`asr.*` custom fields, `language.code_raw`) |
 | VTT | not produced here; sink renders it from segment timestamps |
 
-`CollectorSource.collector = "asr"`, `model` = the whisper.cpp model
-id, `confidence` from avg logprob when present.
+Every item carries `CollectorSource{collector: "asr", model: <whisper
+model id>, version: <server build>, confidence: exp(avg_logprob) when the
+segment reports one}` alongside the `TrackSource`. Partial segments are
+not folded (their finals supersede them). The schema is vendored verbatim
+from gRParse; gRParse `COLLECTOR_ASR` wiring is a follow-up in that repo.
 
 Video without an audio track is `INVALID_ARGUMENT`. Audio-only files
 never emit keyframes.

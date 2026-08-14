@@ -5,6 +5,8 @@ syntax = "proto3";
 
 package ai.pipestream.asr.v1;
 
+import "ai/pipestream/document/v1/document.proto";
+
 // Streaming speech-to-text service backed by whisper.cpp.
 //
 // The product is the live event stream: segments are emitted as the
@@ -70,6 +72,14 @@ message TranscribeOptions {
   // Minimum spacing between keyframes in seconds. Zero means the server
   // default. Only meaningful when emit_keyframes is true.
   uint32 keyframe_interval_seconds = 6;
+
+  // When true, the server folds its own event stream into one
+  // ai.pipestream.document.v1.Document and emits it as a document event
+  // immediately before the TranscriptComplete trailer. The typed event
+  // stream stays the lossless wire; the Document is the structural
+  // projection every collector in the fleet offers, tagged with a
+  // CollectorSource so downstream merges stay additive.
+  bool emit_document = 7;
 }
 
 // Whisper decoding task.
@@ -107,6 +117,15 @@ message TranscribeResponse {
     Keyframe keyframe = 4;
     // Trailer: aggregate counts for the finished transcript.
     TranscriptComplete complete = 5;
+    // The transcript folded into the Document data plane: one per stream,
+    // emitted immediately before the complete trailer, only when
+    // TranscribeOptions.emit_document was set. Final segments become text
+    // items whose sources carry the media time range (TrackSource) and the
+    // collector attribution (CollectorSource, collector "asr"); keyframes
+    // become picture items whose ImageRef.uri points back at the typed
+    // Keyframe event ("keyframe:<timestamp_ms>") instead of embedding PNG
+    // bytes, so the Document stays one bounded message.
+    ai.pipestream.document.v1.Document document = 6;
   }
 }
 

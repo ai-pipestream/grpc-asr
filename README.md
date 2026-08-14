@@ -17,10 +17,20 @@ alongside the transcript.
 
 - `Transcribe(stream TranscribeRequest) returns (stream TranscribeResponse)`
   — first message carries `TranscribeOptions` (model, language, task,
-  word_timestamps, emit_keyframes, keyframe_interval_seconds), then the
-  encoded media as chunks. Events: `MediaInfo`, then
-  `PartialSegment`/`FinalSegment` (finals replace partials by index),
+  word_timestamps, emit_keyframes, keyframe_interval_seconds,
+  emit_document), then the encoded media as chunks. Events: `MediaInfo`,
+  then `PartialSegment`/`FinalSegment` (finals replace partials by index),
   optional `Keyframe` PNGs, and a `TranscriptComplete` trailer.
+- With `emit_document`, one `ai.pipestream.document.v1.Document` event is
+  emitted immediately before the trailer: the collector-side fold of the
+  transcript (final segments → text items with `TrackSource` time ranges +
+  `CollectorSource{collector: "asr", model, confidence: exp(avg_logprob)}`;
+  keyframes → picture items whose `ImageRef.uri` is
+  `keyframe:<timestamp_ms>` — a pointer back at the typed event, never
+  embedded PNG bytes, so the Document stays one bounded message). The
+  typed event stream remains the lossless wire. The schema is vendored
+  verbatim from gRParse (`proto/ai/pipestream/document/v1/document.proto`);
+  do not edit it here.
 - `GetServiceInfo` — build, backend, loaded models, caps.
 - Standard `grpc.health.v1.Health` and server reflection are registered.
 
