@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.26
 # grpc-asr — CUDA image (the default; CPU-only image: Dockerfile.cpu).
 #
 # The build stage compiles whisper.cpp with the GGML CUDA backend and runs
@@ -9,9 +9,9 @@
 # models/ in the context, see .dockerignore) assert the real transcription
 # path.
 
-ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04
+ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu22.04
 
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS build
+FROM nvidia/cuda:12.9.2-devel-ubuntu22.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git make ninja-build pkg-config ffmpeg \
