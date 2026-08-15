@@ -1,4 +1,4 @@
-# AGENTS.md — grpc-asr
+# AGENTS.md: grpc-asr
 
 You are implementing **grpc-asr** from scratch in this repo. There is no
 application code yet. Specs are the source of truth.
@@ -6,9 +6,9 @@ application code yet. Specs are the source of truth.
 ## Read this first, in order
 
 1. This file
-2. `docs/architecture.md` — fleet boundary, language, what we refuse to own
-3. `docs/design.md` — wire API sketch, Document mapping, tests
-4. `docs/guidelines.md` — fleet rules (streaming, proto, git, tests)
+2. `docs/architecture.md`: fleet boundary, language, what we refuse to own
+3. `docs/design.md`: wire API sketch, Document mapping, tests
+4. `docs/guidelines.md`: fleet rules (streaming, proto, git, tests)
 
 Do not start coding until those four are in your context. If architecture
 and an existing sibling disagree on *process* (diskless, health, buf),
