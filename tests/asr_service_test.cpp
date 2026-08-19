@@ -366,6 +366,9 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel) {
     require(info.backend() == "cpu", "backend reported");
     require(info.models_size() == 1 && info.models(0) == "tiny.en", "models reported");
     require(info.max_media_bytes() > 0 && info.max_duration_ms() > 0, "caps reported");
+    require(info.ui().title() == "ASR" && info.ui().path() == "/ui/asr" &&
+                !info.ui().description().empty(),
+            "ui advertisement reported for the demo shell");
 }
 
 void verify_startup_fails_loud(const std::string& models_dir) {

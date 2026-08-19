@@ -381,6 +381,12 @@ grpc::Status AsrServiceImpl::GetServiceInfo(grpc::ServerContext* /*context*/,
     }
     response->set_max_media_bytes(config_.max_media_bytes);
     response->set_max_duration_ms(static_cast<uint64_t>(config_.max_duration_seconds) * 1000ULL);
+    // The shared demo shell discovers tabs through this block; the values
+    // are the service's identity there, so they are constants, not config.
+    asrv1::UiInfo* ui = response->mutable_ui();
+    ui->set_title("ASR");
+    ui->set_path("/ui/asr");
+    ui->set_description("Speech-to-text via embedded whisper.cpp");
     return grpc::Status::OK;
 }
 

@@ -223,4 +223,18 @@ message GetServiceInfoResponse {
   // Maximum accepted media duration in milliseconds; longer inputs fail
   // with RESOURCE_EXHAUSTED.
   uint64 max_duration_ms = 6;
+  // Frontend advertisement for the shared demo shell, which reads it to
+  // build its tab bar.
+  UiInfo ui = 7;
+}
+
+// Frontend advertisement. Same shape in every ai-pipestream grpc service:
+// the demo shell reads it to build its tab bar.
+message UiInfo {
+  // Tab title, e.g. "ASR".
+  string title = 1;
+  // Shell mount path, e.g. "/ui/asr".
+  string path = 2;
+  // One line, used as the tab tooltip.
+  string description = 3;
 }

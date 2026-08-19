@@ -52,7 +52,8 @@ event stream remains the lossless wire. The document schema is vendored
 verbatim from gRParse (`proto/ai/pipestream/document/v1/document.proto`); do
 not edit it here.
 
-`GetServiceInfo` reports the build, backend, loaded models, and caps.
+`GetServiceInfo` reports the build, backend, loaded models, and caps, plus
+the `UiInfo` block the shared demo shell reads to build its tab bar.
 Standard `grpc.health.v1.Health` and server reflection are registered.
 
 Containers: wav, mp3, flac, ogg decode in process; mp4/mov and mkv/webm are
