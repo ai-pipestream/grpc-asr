@@ -7,7 +7,9 @@
 # skip cleanly (exit 77) when the build context lacks them, so CI contexts
 # without models still build an image while local builds (which keep
 # models/ in the context, see .dockerignore) assert the real transcription
-# path.
+# path. Tests linked against the CUDA backend need the driver library at
+# load time, which a docker build never has; CMake disables those two at
+# configure time when libcuda.so.1 is absent (GPU hosts still run them).
 
 ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu22.04
 

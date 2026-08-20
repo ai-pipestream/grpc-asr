@@ -51,6 +51,14 @@ set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 if(GRPC_ASR_CUDA)
   set(GGML_CUDA ON CACHE BOOL "" FORCE)
+  # The CUDA-linked tests need the driver library (libcuda.so.1) at load
+  # time. A container build has the toolkit but no driver, so the loader
+  # kills them before main() can exit 77 to skip; gate at configure time
+  # instead. Deliberately exclude the toolkit stub directory: the stub
+  # links but never runs.
+  find_library(GRPC_ASR_CUDA_DRIVER
+    NAMES cuda libcuda.so.1
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib64 /lib64 /usr/lib/wsl/lib)
 endif()
 if(GRPC_ASR_OPENVINO)
   set(WHISPER_OPENVINO ON CACHE BOOL "" FORCE)
@@ -150,4 +158,12 @@ if(BUILD_TESTING)
   set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
+  # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
+  # they carry a load-time dependency on the driver library. video-demux-test
+  # never references whisper symbols and links clean without it.
+  if(GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER)
+    set_tests_properties(transcriber-test asr-service-test PROPERTIES DISABLED TRUE)
+    message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
+      "disabling transcriber-test and asr-service-test. GPU hosts with the driver installed still run them.")
+  endif()
 endif()
