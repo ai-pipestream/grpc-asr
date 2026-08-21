@@ -12,6 +12,13 @@ struct whisper_state;
 
 namespace asr::engine {
 
+// Lists the model names a models directory serves with zero configuration:
+// every ggml-*.bin weight file, minus the OpenVINO encoder IR payloads
+// (ggml-<name>-encoder-openvino.bin) that live next to converted weights.
+// Throws std::invalid_argument when the directory cannot be listed or holds
+// no weight files.
+std::vector<std::string> discover_models(const std::string& models_dir);
+
 // Loads every configured whisper model once at startup (weights are shared
 // per model via one whisper_context) and hands out per-transcription
 // whisper_states from a bounded free-list. Any load or backend failure

@@ -155,6 +155,7 @@ if(BUILD_TESTING)
     sniff-test
     audio-decoder-test
     document-fold-test
+    model-discovery-test
     transcriber-test
     video-demux-test
     asr-service-test)
@@ -172,17 +173,19 @@ if(BUILD_TESTING)
   # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
   # they carry a load-time dependency on the driver library. video-demux-test
   # never references whisper symbols and links clean without it.
+  # model-discovery-test links model_pool.o, which references the whisper and
+  # ggml backend symbols, so it shares the same load-time exposure.
   if(GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER)
-    set_tests_properties(transcriber-test asr-service-test PROPERTIES DISABLED TRUE)
+    set_tests_properties(transcriber-test asr-service-test model-discovery-test PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
-      "disabling transcriber-test and asr-service-test. GPU hosts with the driver installed still run them.")
+      "disabling transcriber-test, asr-service-test, and model-discovery-test. GPU hosts with the driver installed still run them.")
   endif()
-  # Same shape for OpenVINO: the two whisper-linked tests carry a load-time
+  # Same shape for OpenVINO: the whisper-linked tests carry a load-time
   # dependency on libopenvino.so through the encoder objects. Hosts with the
   # OpenVINO runtime installed run them exactly as before.
   if(GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME)
-    set_tests_properties(transcriber-test asr-service-test PROPERTIES DISABLED TRUE)
+    set_tests_properties(transcriber-test asr-service-test model-discovery-test PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: OpenVINO runtime library (libopenvino.so) not found; "
-      "disabling transcriber-test and asr-service-test. Hosts with the OpenVINO runtime installed still run them.")
+      "disabling transcriber-test, asr-service-test, and model-discovery-test. Hosts with the OpenVINO runtime installed still run them.")
   endif()
 endif()

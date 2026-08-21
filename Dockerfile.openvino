@@ -5,10 +5,13 @@
 # the image. No CUDA anywhere in this image.
 #
 # OpenVINO 2025.4.1 comes from Intel's APT repo (the ubuntu24
-# distribution). That pins this image to the same ubuntu:24.04 lineage as
-# Dockerfile.cpu: the debs require glibc >= 2.38 and 24.04 ships 2.39, so
-# no base bump is needed (gRParse's OpenVINO image is on ubuntu:26.04 for
-# its own dependency reasons, not OpenVINO's).
+# distribution; the debs only require glibc >= 2.38, so they install fine
+# on newer bases). The base is ubuntu:26.04 because Ubuntu's own archive
+# there ships intel-opencl-icd 26.05 (NEO) with libigc2 2.28.4, the
+# Battlemage-capable compute runtime the OpenVINO GPU plugin needs for
+# Arc B-series cards; noble's intel-opencl-icd 23.43 predates Battlemage
+# and the GPU plugin finds no device with it. Same base and NEO source as
+# gRParse's OpenVINO image, so both images run the same driver stack.
 #
 # The whisper-linked tests carry a load-time dependency on libopenvino.so,
 # which the toolkit in this stage provides, so the in-build ctest gate runs
@@ -22,7 +25,7 @@
 #     --group-add $(getent group render | cut -d: -f3) \
 #     -v ./models:/models:ro -p 50055:50055 grpc-asr:openvino
 # (--group-add render because the image runs as the unprivileged user.)
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake curl g++ git gpg make ninja-build pkg-config ffmpeg \
@@ -42,19 +45,20 @@ COPY . .
 
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
 # whisper.cpp, OpenVINO, or the toolchain moves.
-RUN --mount=type=cache,id=grpc-asr-ubuntu24-openvino2025.4.1-grpc1.83.0-whisper1.9.2,target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-grpc1.83.0-whisper1.9.2,target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # Runtime half of the same repo: the OpenVINO runtime, the IR frontend the
 # encoder model is read through, the Intel GPU plugin, and the NEO compute
-# runtime (intel-opencl-icd) that the plugin drives. The repo is removed
-# again once the debs are in.
+# runtime (intel-opencl-icd) that the plugin drives. The OpenVINO debs come
+# from Intel's repo; intel-opencl-icd comes from Ubuntu's own 26.04 archive
+# (26.05, Battlemage-capable). The repo is removed again once the debs are in.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gpg ffmpeg \
     && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \

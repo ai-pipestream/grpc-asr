@@ -30,7 +30,38 @@ std::filesystem::path model_path(const std::string& models_dir, const std::strin
     return std::filesystem::path(models_dir) / ("ggml-" + name + ".bin");
 }
 
+// Suffix of the OpenVINO encoder IR payload that sits next to converted
+// weights (ggml-<name>-encoder-openvino.bin plus its .xml). Not a model.
+constexpr const char* kOpenvinoEncoderSuffix = "-encoder-openvino.bin";
+
 }  // namespace
+
+std::vector<std::string> discover_models(const std::string& models_dir) {
+    std::error_code listing_error;
+    std::filesystem::directory_iterator dir(models_dir, listing_error);
+    if (listing_error) {
+        throw std::invalid_argument("GRPC_ASR_MODELS_DIR=" + models_dir +
+                                    " cannot be listed: " + listing_error.message());
+    }
+    std::vector<std::string> names;
+    for (const auto& file : dir) {
+        const std::string filename = file.path().filename().string();
+        if (filename.rfind("ggml-", 0) != 0 || file.path().extension() != ".bin") {
+            continue;
+        }
+        if (filename.size() >= std::string(kOpenvinoEncoderSuffix).size() &&
+            filename.compare(filename.size() - std::string(kOpenvinoEncoderSuffix).size(),
+                             std::string::npos, kOpenvinoEncoderSuffix) == 0) {
+            continue;
+        }
+        names.push_back(filename.substr(5, filename.size() - 5 - 4));
+    }
+    if (names.empty()) {
+        throw std::invalid_argument("no ggml-*.bin model files in " + models_dir +
+                                    " and GRPC_ASR_MODELS is unset");
+    }
+    return names;
+}
 
 struct ModelPool::Entry {
     whisper_context* ctx = nullptr;
@@ -70,22 +101,7 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
     if (names.empty()) {
         // Discover every ggml-*.bin so a mounted model directory works
         // with zero configuration.
-        std::error_code listing_error;
-        std::filesystem::directory_iterator dir(config.models_dir, listing_error);
-        if (listing_error) {
-            throw std::invalid_argument("GRPC_ASR_MODELS_DIR=" + config.models_dir +
-                                        " cannot be listed: " + listing_error.message());
-        }
-        for (const auto& file : dir) {
-            std::string stem = file.path().filename().string();
-            if (stem.rfind("ggml-", 0) == 0 && file.path().extension() == ".bin") {
-                names.push_back(stem.substr(5, stem.size() - 5 - 4));
-            }
-        }
-        if (names.empty()) {
-            throw std::invalid_argument("no ggml-*.bin model files in " + config.models_dir +
-                                        " and GRPC_ASR_MODELS is unset");
-        }
+        names = discover_models(config.models_dir);
     }
 
     for (const std::string& name : names) {

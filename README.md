@@ -125,8 +125,9 @@ The hot path is diskless: media lives in memory and memfds, so run the
 container `--read-only`.
 
 The OpenVINO image carries OpenVINO 2025.4.1 (Intel APT repo, ubuntu24
-distribution), the Intel GPU plugin, and the NEO compute runtime
-(`intel-opencl-icd`); it defaults to `GRPC_ASR_BACKEND=openvino`. The
+distribution, on an ubuntu:26.04 base), the Intel GPU plugin, and the NEO
+compute runtime (`intel-opencl-icd` 26.05 from Ubuntu's 26.04 archive,
+Battlemage-capable); it defaults to `GRPC_ASR_BACKEND=openvino`. The
 whisper OpenVINO encoder targets an Intel GPU, so the container needs the
 render device, and the models mount needs the converted encoder IR
 (`ggml-<name>-encoder-openvino.xml` / `.bin`, produced by whisper.cpp's
