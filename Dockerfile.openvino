@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.26
+# grpc-asr — Intel OpenVINO image. Same layout as the CUDA Dockerfile and
+# Dockerfile.cpu: the build stage compiles whisper.cpp with the OpenVINO
+# encoder (WHISPER_OPENVINO) and runs the test suite, and the tests gate
+# the image. No CUDA anywhere in this image.
+#
+# OpenVINO 2025.4.1 comes from Intel's APT repo (the ubuntu24
+# distribution). That pins this image to the same ubuntu:24.04 lineage as
+# Dockerfile.cpu: the debs require glibc >= 2.38 and 24.04 ships 2.39, so
+# no base bump is needed (gRParse's OpenVINO image is on ubuntu:26.04 for
+# its own dependency reasons, not OpenVINO's).
+#
+# The whisper-linked tests carry a load-time dependency on libopenvino.so,
+# which the toolkit in this stage provides, so the in-build ctest gate runs
+# them; CMake disables them at configure time on hosts that configure with
+# GRPC_ASR_OPENVINO=ON but lack the runtime library.
+#
+# The OpenVINO encoder targets an Intel GPU and needs the render device,
+# plus a converted encoder model (ggml-<name>-encoder-openvino.xml/.bin)
+# next to the ggml weights in the models mount:
+#   docker run --rm --read-only --tmpfs /tmp --device /dev/dri \
+#     --group-add $(getent group render | cut -d: -f3) \
+#     -v ./models:/models:ro -p 50055:50055 grpc-asr:openvino
+# (--group-add render because the image runs as the unprivileged user.)
+FROM ubuntu:24.04 AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates cmake curl g++ git gpg make ninja-build pkg-config ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Intel's OpenVINO APT repo, 2025 stream, ubuntu24 (noble) distribution.
+RUN curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+        | gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu24 main" \
+        > /etc/apt/sources.list.d/intel-openvino.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libopenvino-dev-2025.4.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
+# whisper.cpp, OpenVINO, or the toolchain moves.
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-openvino2025.4.1-grpc1.83.0-whisper1.9.2,target=/build \
+    cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+        -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON \
+    && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
+    && ctest --test-dir /build -L asr --output-on-failure \
+    && mkdir -p /out && cp /build/grpc-asr-server /out/
+
+FROM ubuntu:24.04
+
+# Runtime half of the same repo: the OpenVINO runtime, the IR frontend the
+# encoder model is read through, the Intel GPU plugin, and the NEO compute
+# runtime (intel-opencl-icd) that the plugin drives. The repo is removed
+# again once the debs are in.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gpg ffmpeg \
+    && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+        | gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu24 main" \
+        > /etc/apt/sources.list.d/intel-openvino.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libopenvino-2025.4.1 libopenvino-ir-frontend-2025.4.1 \
+        libopenvino-intel-gpu-plugin-2025.4.1 \
+        ocl-icd-libopencl1 intel-opencl-icd \
+    && apt-get purge -y curl gpg && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/intel-openvino.list \
+        /usr/share/keyrings/intel-openvino.gpg
+
+COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
+
+ENV GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
+    GRPC_ASR_BACKEND=openvino \
+    GRPC_ASR_MODELS_DIR=/models
+
+USER 65532:65532
+EXPOSE 50055
+ENTRYPOINT ["/usr/local/bin/grpc-asr-server"]

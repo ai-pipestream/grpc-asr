@@ -78,7 +78,7 @@ and the video cases need `ffmpeg` and `ffprobe` on PATH.
 
 Backend variants: `-DGRPC_ASR_CUDA=ON` (GGML CUDA) and
 `-DGRPC_ASR_OPENVINO=ON` (whisper OpenVINO encoder; needs the OpenVINO SDK
-at build time, and no image ships for it yet).
+at build time and ships as `Dockerfile.openvino`).
 
 ## Run
 
@@ -110,15 +110,38 @@ picks a subset, unset discovers all.
 
 ## Docker
 
+Three image variants, one per backend; tests run inside every image build
+and gate it:
+
 ```bash
-docker build -t grpc-asr .                      # CUDA (default)
-docker build -f Dockerfile.cpu -t grpc-asr:cpu .
+docker build -t grpc-asr .                                # CUDA (default)
+docker build -f Dockerfile.cpu -t grpc-asr:cpu .          # CPU only
+docker build -f Dockerfile.openvino -t grpc-asr:openvino . # Intel OpenVINO
 docker run --rm --read-only --tmpfs /tmp --gpus all \
   -v ./models:/models:ro -p 50055:50055 grpc-asr
 ```
 
-Tests run inside the image build and gate it. The hot path is diskless:
-media lives in memory and memfds, so run the container `--read-only`.
+The hot path is diskless: media lives in memory and memfds, so run the
+container `--read-only`.
+
+The OpenVINO image carries OpenVINO 2025.4.1 (Intel APT repo, ubuntu24
+distribution), the Intel GPU plugin, and the NEO compute runtime
+(`intel-opencl-icd`); it defaults to `GRPC_ASR_BACKEND=openvino`. The
+whisper OpenVINO encoder targets an Intel GPU, so the container needs the
+render device, and the models mount needs the converted encoder IR
+(`ggml-<name>-encoder-openvino.xml` / `.bin`, produced by whisper.cpp's
+`convert-whisper-to-openvino` tooling) next to the ggml weights:
+
+```bash
+docker run --rm --read-only --tmpfs /tmp --device /dev/dri \
+  --group-add $(getent group render | cut -d: -f3) \
+  -v ./models:/models:ro -p 50055:50055 grpc-asr:openvino
+```
+
+`--group-add render` because the image runs as the unprivileged user, which
+has no render-node access otherwise. Without `/dev/dri` or without the
+converted encoder files the server refuses to boot: OpenVINO encoder init
+fails loud at startup, never on the first RPC.
 
 ## Remotes
 

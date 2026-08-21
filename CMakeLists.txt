@@ -62,6 +62,17 @@ if(GRPC_ASR_CUDA)
 endif()
 if(GRPC_ASR_OPENVINO)
   set(WHISPER_OPENVINO ON CACHE BOOL "" FORCE)
+  # The OpenVINO-linked tests need the OpenVINO runtime (libopenvino.so)
+  # at load time: they reference whisper symbols, so the linker pulls the
+  # OpenVINO encoder objects and the loader resolves libopenvino before
+  # main() can exit 77 to skip. A container build installs the toolkit, but
+  # a build tree configured against headers alone would fail the in-build
+  # ctest gate at load time; gate at configure time instead, same as the
+  # CUDA driver probe above.
+  find_library(GRPC_ASR_OPENVINO_RUNTIME
+    NAMES openvino libopenvino.so
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib64
+      /opt/intel/openvino/runtime/lib/intel64)
 endif()
 FetchContent_Declare(whisper
   GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
@@ -165,5 +176,13 @@ if(BUILD_TESTING)
     set_tests_properties(transcriber-test asr-service-test PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
       "disabling transcriber-test and asr-service-test. GPU hosts with the driver installed still run them.")
+  endif()
+  # Same shape for OpenVINO: the two whisper-linked tests carry a load-time
+  # dependency on libopenvino.so through the encoder objects. Hosts with the
+  # OpenVINO runtime installed run them exactly as before.
+  if(GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME)
+    set_tests_properties(transcriber-test asr-service-test PROPERTIES DISABLED TRUE)
+    message(STATUS "grpc-asr: OpenVINO runtime library (libopenvino.so) not found; "
+      "disabling transcriber-test and asr-service-test. Hosts with the OpenVINO runtime installed still run them.")
   endif()
 endif()
