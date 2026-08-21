@@ -139,9 +139,10 @@ docker run --rm --read-only --tmpfs /tmp --device /dev/dri \
 ```
 
 `--group-add render` because the image runs as the unprivileged user, which
-has no render-node access otherwise. Without `/dev/dri` or without the
-converted encoder files the server refuses to boot: OpenVINO encoder init
-fails loud at startup, never on the first RPC.
+has no render-node access otherwise. The OpenVINO compile cache lives under
+`/tmp` (tmpfs in the documented run) because the models mount is read-only.
+Without `/dev/dri` or without the converted encoder files the server refuses
+to boot: OpenVINO encoder init fails loud at startup, never on the first RPC.
 
 ## Remotes
 

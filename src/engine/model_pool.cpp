@@ -107,12 +107,19 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                                          " for model '" + name + "' failed");
             }
             if (backend_ == "openvino") {
-                // Returns non-zero both when the media fails to convert
-                // and when this binary was built without the OpenVINO
-                // encoder; either way the operator asked for something
-                // this process cannot do.
-                if (whisper_ctx_init_openvino_encoder_with_state(entry->ctx, state, path.c_str(),
-                                                                 "GPU", nullptr) != 0) {
+                // nullptr model_path: whisper then derives the encoder IR as
+                // <stem>-encoder-openvino.xml next to the ggml weights.
+                // Passing the ggml path here makes OpenVINO read the ggml
+                // bin as its IR, which can never work. The compile cache
+                // cannot live next to the weights either (the models mount
+                // is read-only), so point it at tmpfs /tmp.
+                // Returns non-zero both when the converted encoder is
+                // missing, when the device is unavailable, and when this
+                // binary was built without the OpenVINO encoder; either way
+                // the operator asked for something this process cannot do.
+                static const std::string openvino_cache_dir = "/tmp/grpc-asr-openvino-cache";
+                if (whisper_ctx_init_openvino_encoder_with_state(entry->ctx, state, nullptr,
+                                                                 "GPU", openvino_cache_dir.c_str()) != 0) {
                     throw std::runtime_error(
                         "GRPC_ASR_BACKEND=openvino: OpenVINO encoder init failed for model '" +
                         name +
