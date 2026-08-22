@@ -5,6 +5,7 @@
 # in this image — the env below makes cpu the image's explicit choice).
 
 FROM ubuntu:24.04 AS build
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git make ninja-build pkg-config ffmpeg \
@@ -13,11 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-# The r2 suffix retires a poisoned cache: a /build dir carried over from an
-# older ggml source layout left duplicate repack.cpp.o members inside
-# libggml-cpu.a, failing the link with multiple-definition plus missing
-# *_generic symbols. Bump the suffix again if that signature ever returns.
-RUN --mount=type=cache,id=grpc-asr-ubuntu24-cpu-grpc1.83.0-whisper1.9.2-r2,target=/build \
+# The id carries ${TARGETARCH} because a multi-platform buildx build runs
+# every platform concurrently and cache mounts are keyed by id alone: with a
+# shared id both platforms mount the same /build and corrupt each other's
+# CMake state and archives (mixed-arch or duplicated members in
+# libggml-cpu.a, or a configure that reads the other platform's
+# half-written CMakeCache). The r2 suffix retires the poisoned pre-split
+# cache.
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-cpu-grpc1.83.0-whisper1.9.2-r2-${TARGETARCH},target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_WERROR=ON \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
