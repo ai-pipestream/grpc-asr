@@ -166,7 +166,13 @@ if(BUILD_TESTING)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
   add_custom_target(grpc-asr-tests DEPENDS ${GRPC_ASR_TESTS})
-  set_tests_properties(${GRPC_ASR_TESTS} PROPERTIES TIMEOUT 300 LABELS asr)
+  # 300 is generous on native hardware (asr-service-test finishes in ~3s);
+  # QEMU-emulated arm64 image builds override it, whisper inference there
+  # runs two orders of magnitude slower.
+  set(GRPC_ASR_TEST_TIMEOUT 300 CACHE STRING
+    "Per-test ctest timeout in seconds for the asr suite")
+  set_tests_properties(${GRPC_ASR_TESTS} PROPERTIES
+    TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr)
   set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")

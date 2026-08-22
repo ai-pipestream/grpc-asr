@@ -50,7 +50,7 @@ COPY . .
 # Dockerfile.cpu for the failure mode that causes).
 RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-grpc1.83.0-whisper1.9.2-${TARGETARCH},target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-        -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON \
+        -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/
