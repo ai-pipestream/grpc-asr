@@ -13,7 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-RUN --mount=type=cache,id=grpc-asr-ubuntu24-cpu-grpc1.83.0-whisper1.9.2,target=/build \
+# The r2 suffix retires a poisoned cache: a /build dir carried over from an
+# older ggml source layout left duplicate repack.cpp.o members inside
+# libggml-cpu.a, failing the link with multiple-definition plus missing
+# *_generic symbols. Bump the suffix again if that signature ever returns.
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-cpu-grpc1.83.0-whisper1.9.2-r2,target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_WERROR=ON \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
