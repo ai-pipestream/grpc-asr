@@ -158,6 +158,8 @@ install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
 if(BUILD_TESTING)
   set(GRPC_ASR_TESTS
     sniff-test
+    byte-stream-test
+    config-test
     audio-decoder-test
     document-fold-test
     model-discovery-test
