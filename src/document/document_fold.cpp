@@ -243,7 +243,7 @@ std::vector<std::string> document_integrity_errors(const docv1::Document& docume
     for (const ItemView& view : views) {
         if (view.children != nullptr) {
             for (const docv1::RefItem& child : *view.children) {
-                if (refs.count(child.ref()) == 0) {
+                if (!refs.contains(child.ref())) {
                     errors.push_back(view.self_ref + " lists unresolvable child " + child.ref());
                 }
             }
@@ -251,9 +251,9 @@ std::vector<std::string> document_integrity_errors(const docv1::Document& docume
         if (view.parent_ref.empty()) {
             continue;
         }
-        if (refs.count(view.parent_ref) == 0) {
+        if (!refs.contains(view.parent_ref)) {
             errors.push_back(view.self_ref + " has unresolvable parent " + view.parent_ref);
-        } else if (children_of[view.parent_ref].count(view.self_ref) == 0) {
+        } else if (!children_of[view.parent_ref].contains(view.self_ref)) {
             errors.push_back(view.parent_ref + " does not list child " + view.self_ref);
         }
     }

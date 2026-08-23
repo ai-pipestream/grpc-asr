@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -40,11 +40,9 @@ int main() {
 
         const std::vector<std::string> names = asr::engine::discover_models(dir.string());
         require(names.size() == 2, "discovers exactly the two weight files");
-        require(std::find(names.begin(), names.end(), "tiny.en") != names.end(),
-                "tiny.en discovered");
-        require(std::find(names.begin(), names.end(), "base") != names.end(),
-                "base discovered");
-        require(std::find(names.begin(), names.end(), "tiny.en-encoder-openvino") == names.end(),
+        require(std::ranges::contains(names, "tiny.en"), "tiny.en discovered");
+        require(std::ranges::contains(names, "base"), "base discovered");
+        require(!std::ranges::contains(names, "tiny.en-encoder-openvino"),
                 "encoder IR payload is not a model");
 
         std::filesystem::remove_all(dir);
@@ -62,9 +60,9 @@ int main() {
         std::filesystem::remove_all(empty_dir);
         require(threw, "empty models dir fails loud");
     } catch (const std::exception& e) {
-        std::cerr << e.what() << std::endl;
+        std::println(stderr, "{}", e.what());
         return 1;
     }
-    std::cout << "model-discovery-test OK" << std::endl;
+    std::println("model-discovery-test OK");
     return 0;
 }

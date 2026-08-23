@@ -5,9 +5,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
-#include <iostream>
+#include <cstdio>
 #include <memory>
 #include <mutex>
+#include <print>
 #include <thread>
 
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
@@ -46,13 +47,15 @@ void install_shutdown_pipe() {
 // per-inference chatter.
 void quiet_whisper_log(ggml_log_level level, const char* text, void* /*user_data*/) {
     if (level >= GGML_LOG_LEVEL_WARN) {
-        std::cerr << text;
+        std::print(stderr, "{}", text);
     }
 }
 
 }  // namespace
 
 int main() {
+    // Container stdout is a pipe; println does not flush like endl.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     try {
         whisper_log_set(quiet_whisper_log, nullptr);
         install_shutdown_pipe();
@@ -73,7 +76,7 @@ int main() {
         builder.RegisterService(&service);
         std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
         if (server == nullptr) {
-            std::cerr << "Unable to listen on " << config.listen_address << '\n';
+            std::println(stderr, "Unable to listen on {}", config.listen_address);
             return 1;
         }
 
@@ -95,18 +98,16 @@ int main() {
                 while (!metrics_stop.wait_for(
                     lock, std::chrono::seconds(config.metrics_interval_seconds),
                     [&] { return stopping; })) {
-                    std::cout << "grpc-asr metrics: media{transcribed="
-                              << service.transcribed.load()
-                              << ",rejected=" << service.rejected.load()
-                              << ",failed=" << service.failed.load()
-                              << "} audio_seconds=" << service.audio_ms.load() / 1000
-                              << std::endl;
+                    std::println("grpc-asr metrics: media{{transcribed={},rejected={},failed={}}}"
+                                 " audio_seconds={}",
+                                 service.transcribed.load(), service.rejected.load(),
+                                 service.failed.load(), service.audio_ms.load() / 1000);
                 }
             });
         }
 
-        std::cout << "grpc-asr listening on " << config.listen_address << " (whisper.cpp "
-                  << whisper_version() << ", backend " << pool.backend() << ")" << std::endl;
+        std::println("grpc-asr listening on {} (whisper.cpp {}, backend {})",
+                     config.listen_address, whisper_version(), pool.backend());
         server->Wait();
 
         // Wake the shutdown thread if Wait() returned for another reason.
@@ -122,7 +123,7 @@ int main() {
         }
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "Startup failed: " << error.what() << '\n';
+        std::println(stderr, "Startup failed: {}", error.what());
         return 1;
     }
 }

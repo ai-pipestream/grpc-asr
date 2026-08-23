@@ -3,9 +3,11 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
-#include <iostream>
 #include <mutex>
+#include <print>
+#include <ranges>
 #include <stdexcept>
+#include <string_view>
 
 #include "ggml-backend.h"
 #include "whisper.h"
@@ -32,7 +34,7 @@ std::filesystem::path model_path(const std::string& models_dir, const std::strin
 
 // Suffix of the OpenVINO encoder IR payload that sits next to converted
 // weights (ggml-<name>-encoder-openvino.bin plus its .xml). Not a model.
-constexpr const char* kOpenvinoEncoderSuffix = "-encoder-openvino.bin";
+constexpr std::string_view kOpenvinoEncoderSuffix = "-encoder-openvino.bin";
 
 }  // namespace
 
@@ -46,12 +48,10 @@ std::vector<std::string> discover_models(const std::string& models_dir) {
     std::vector<std::string> names;
     for (const auto& file : dir) {
         const std::string filename = file.path().filename().string();
-        if (filename.rfind("ggml-", 0) != 0 || file.path().extension() != ".bin") {
+        if (!filename.starts_with("ggml-") || file.path().extension() != ".bin") {
             continue;
         }
-        if (filename.size() >= std::string(kOpenvinoEncoderSuffix).size() &&
-            filename.compare(filename.size() - std::string(kOpenvinoEncoderSuffix).size(),
-                             std::string::npos, kOpenvinoEncoderSuffix) == 0) {
+        if (filename.ends_with(kOpenvinoEncoderSuffix)) {
             continue;
         }
         names.push_back(filename.substr(5, filename.size() - 5 - 4));
@@ -147,11 +147,10 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
             entry->all_states.push_back(state);
         }
         entries_[name] = std::move(entry);
-        std::cout << "grpc-asr model loaded: " << name << " (" << config.concurrency
-                  << " state(s), backend " << backend_ << ")" << std::endl;
+        std::println("grpc-asr model loaded: {} ({} state(s), backend {})", name,
+                     config.concurrency, backend_);
     }
-    std::cout << "grpc-asr backend: " << backend_ << " (GRPC_ASR_BACKEND=" << backend_ << ")"
-              << std::endl;
+    std::println("grpc-asr backend: {} (GRPC_ASR_BACKEND={})", backend_, backend_);
 }
 
 ModelPool::~ModelPool() = default;
@@ -163,7 +162,7 @@ ModelPool::Lease::~Lease() {
 }
 
 bool ModelPool::has_model(const std::string& model) const {
-    return entries_.count(model) != 0;
+    return entries_.contains(model);
 }
 
 ModelPool::Lease ModelPool::acquire(const std::string& model) {
@@ -180,13 +179,7 @@ ModelPool::Lease ModelPool::acquire(const std::string& model) {
 }
 
 std::vector<std::string> ModelPool::model_names() const {
-    std::vector<std::string> names;
-    names.reserve(entries_.size());
-    for (const auto& [name, entry] : entries_) {
-        (void)entry;
-        names.push_back(name);
-    }
-    return names;
+    return std::views::keys(entries_) | std::ranges::to<std::vector>();
 }
 
 void ModelPool::release(const std::string& model, whisper_state* state) {

@@ -9,7 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <iostream>
+#include <print>
 #include <vector>
 
 #include "fixture.h"
@@ -102,7 +102,7 @@ void verify_keyframes(const std::string& media) {
                                    std::string png) {
         require(width == 320 && height == 240, "keyframe dimensions match the fixture");
         require(png.size() > 100, "keyframe has PNG bytes");
-        require(png.compare(0, 4, "\x89PNG") == 0, "keyframe is a PNG");
+        require(png.starts_with("\x89PNG"), "keyframe is a PNG");
         require(count == 0 || timestamp_ms > last_ts, "keyframe timestamps advance");
         last_ts = timestamp_ms;
         count++;
@@ -160,9 +160,9 @@ int main() {
         verify_garbage_rejected();
         verify_png_dimensions();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "video-demux-test passed\n";
+    std::println("video-demux-test passed");
     return 0;
 }

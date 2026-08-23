@@ -5,7 +5,7 @@
 #include "document/document_fold.h"
 
 #include <cmath>
-#include <iostream>
+#include <print>
 
 #include "fixture.h"
 
@@ -159,9 +159,9 @@ int main() {
         verify_integrity_checker_catches_breakage();
         verify_unknown_logprob_omits_confidence();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "document-fold-test passed\n";
+    std::println("document-fold-test passed");
     return 0;
 }

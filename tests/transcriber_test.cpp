@@ -10,7 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <iostream>
+#include <print>
 #include <vector>
 
 #include "fixture.h"
@@ -197,11 +197,11 @@ int main() {
         verify_silence();
         verify_duration_cap();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
     whisper_free_state(g_state);
     whisper_free(g_ctx);
-    std::cout << "transcriber-test passed\n";
+    std::println("transcriber-test passed");
     return 0;
 }

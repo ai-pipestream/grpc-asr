@@ -105,10 +105,7 @@ bool on_abort(void* user_data) {
 EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
                               const EngineOptions& options, const PcmRead& read,
                               const SegmentSink& sink) {
-    RunState run;
-    run.ctx = ctx;
-    run.options = &options;
-    run.sink = &sink;
+    RunState run{.ctx = ctx, .options = &options, .sink = &sink};
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.print_progress = false;

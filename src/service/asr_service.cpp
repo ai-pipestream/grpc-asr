@@ -104,13 +104,14 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
     const uint64_t max_duration_ms =
         static_cast<uint64_t>(config_.max_duration_seconds) * 1000ULL;
 
-    engine::EngineOptions engine_options;
-    engine_options.language = options.language();
-    engine_options.translate = options.task() == asrv1::TASK_TRANSLATE;
-    engine_options.word_timestamps = options.word_timestamps();
-    engine_options.threads = static_cast<int>(config_.threads);
-    engine_options.window_seconds = config_.window_seconds;
-    engine_options.max_duration_seconds = config_.max_duration_seconds;
+    const engine::EngineOptions engine_options{
+        .language = options.language(),
+        .translate = options.task() == asrv1::TASK_TRANSLATE,
+        .word_timestamps = options.word_timestamps(),
+        .threads = static_cast<int>(config_.threads),
+        .window_seconds = config_.window_seconds,
+        .max_duration_seconds = config_.max_duration_seconds,
+    };
 
     try {
         // Sniff the container from the first bytes; blocks only until the

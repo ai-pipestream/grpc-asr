@@ -4,11 +4,13 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 #include "media/audio_decoder.h"
@@ -124,19 +126,31 @@ class ToolProcess {
     int wait_exit() {
         // Drain any stderr the child wrote after our last poll.
         drain_stderr();
+        // A pidfd makes "wait with a deadline" one poll: the descriptor
+        // turns readable the moment the child exits, no sleep loop. Raw
+        // syscall because glibc's sys/pidfd.h lacks extern "C" guards.
+        if (int pidfd = static_cast<int>(::syscall(SYS_pidfd_open, pid_, 0)); pidfd >= 0) {
+            auto deadline = std::chrono::steady_clock::now() + kReapGrace;
+            while (true) {
+                auto left = std::chrono::ceil<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                if (left.count() <= 0) {
+                    break;
+                }
+                struct pollfd fd = {pidfd, POLLIN, 0};
+                if (::poll(&fd, 1, static_cast<int>(left.count())) >= 0) {
+                    break;
+                }
+                if (errno != EINTR) {
+                    break;
+                }
+            }
+            ::close(pidfd);
+        }
         int status = 0;
-        auto deadline = std::chrono::steady_clock::now() + kReapGrace;
-        while (true) {
-            pid_t done = ::waitpid(pid_, &status, WNOHANG);
-            if (done == pid_) {
-                break;
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                ::kill(pid_, SIGKILL);
-                ::waitpid(pid_, &status, 0);
-                break;
-            }
-            ::usleep(20 * 1000);
+        if (::waitpid(pid_, &status, WNOHANG) != pid_) {
+            ::kill(pid_, SIGKILL);
+            ::waitpid(pid_, &status, 0);
         }
         reaped_ = true;
         if (WIFSIGNALED(status)) {
@@ -369,7 +383,7 @@ void VideoDemux::extract_keyframes(
          "pipe:1"},
         impl_->media_fd, impl_->inactivity_timeout);
 
-    static const char kSignature[] = "\x89PNG\r\n\x1a\n";
+    constexpr std::string_view kSignature{"\x89PNG\r\n\x1a\n", 8};
     std::string buffer;
     uint64_t frame_index = 0;
     uint8_t chunk[64 * 1024];
@@ -381,7 +395,7 @@ void VideoDemux::extract_keyframes(
             if (buffer.size() < 8) {
                 return;
             }
-            if (buffer.compare(0, 8, kSignature, 8) != 0) {
+            if (!buffer.starts_with(kSignature)) {
                 throw DecodeError("keyframe stream lost PNG framing");
             }
             size_t offset = 8;

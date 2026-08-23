@@ -15,8 +15,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
-#include <iostream>
 #include <memory>
+#include <print>
 #include <thread>
 #include <vector>
 
@@ -339,7 +339,7 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
             "trailer counts the keyframes");
     for (const asrv1::Keyframe& frame : result.keyframe_samples) {
         require(frame.width() == 320 && frame.height() == 240, "keyframe dimensions");
-        require(frame.png().compare(0, 4, "\x89PNG") == 0, "keyframe is a PNG");
+        require(frame.png().starts_with("\x89PNG"), "keyframe is a PNG");
     }
 
     // Same media without opting in: zero keyframes.
@@ -394,8 +394,8 @@ void verify_startup_fails_loud(const std::string& models_dir) {
         require(WIFEXITED(code) && WEXITSTATUS(code) == 1,
                 "unavailable backend exits 1 at startup");
     } else {
-        std::cout << "note: CUDA backend present in this build; skipping the "
-                     "missing-backend sub-case\n";
+        std::println("note: CUDA backend present in this build; skipping the "
+                     "missing-backend sub-case");
     }
 }
 
@@ -445,7 +445,7 @@ int main() {
         if (have_ffmpeg()) {
             verify_video(channel, sample);
         } else {
-            std::cout << "note: ffmpeg not on PATH; video cases not run\n";
+            std::println("note: ffmpeg not on PATH; video cases not run");
         }
         verify_startup_fails_loud(config.models_dir);
 
@@ -453,9 +453,9 @@ int main() {
         require(service.rejected.load() > 0, "rejected counter moved");
         server->Shutdown();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "asr-service-test passed\n";
+    std::println("asr-service-test passed");
     return 0;
 }

@@ -5,7 +5,7 @@
 #include "media/audio_decoder.h"
 
 #include <cmath>
-#include <iostream>
+#include <print>
 #include <thread>
 #include <vector>
 
@@ -154,9 +154,9 @@ int main() {
         verify_silence();
         verify_bad_input();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::println(stderr, "{}", error.what());
         return 1;
     }
-    std::cout << "audio-decoder-test passed\n";
+    std::println("audio-decoder-test passed");
     return 0;
 }
