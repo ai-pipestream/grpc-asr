@@ -4,7 +4,9 @@
 # never silently substituted, so the default of cuda would refuse to boot
 # in this image — the env below makes cpu the image's explicit choice).
 
-FROM ubuntu:24.04 AS build
+# ubuntu:26.04 for GCC 15: the project builds as C++23 (std::println needs
+# libstdc++ 14+). Same base family as the OpenVINO image and gRParse.
+FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,14 +23,14 @@ COPY . .
 # libggml-cpu.a, or a configure that reads the other platform's
 # half-written CMakeCache). The r2 suffix retires the poisoned pre-split
 # cache.
-RUN --mount=type=cache,id=grpc-asr-ubuntu24-cpu-grpc1.83.0-whisper1.9.3-r2-${TARGETARCH},target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu26-cpu-cxx23-grpc1.83.0-whisper1.9.3-r2-${TARGETARCH},target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*

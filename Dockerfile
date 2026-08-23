@@ -11,12 +11,15 @@
 # load time, which a docker build never has; CMake disables those two at
 # configure time when libcuda.so.1 is absent (GPU hosts still run them).
 
-ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu22.04
+ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu24.04
 
-FROM nvidia/cuda:12.9.2-devel-ubuntu22.04 AS build
+# ubuntu24.04 base with g++-14: the project builds as C++23 (std::println
+# needs libstdc++ 14+) and GCC 14 is nvcc 12.9's host-compiler ceiling, so
+# this image cannot follow the CPU/OpenVINO images to GCC 15.
+FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake g++ git make ninja-build pkg-config ffmpeg \
+        ca-certificates cmake gcc-14 g++-14 git make ninja-build pkg-config ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -24,8 +27,9 @@ COPY . .
 
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
 # whisper.cpp, CUDA, or the toolchain moves.
-RUN --mount=type=cache,id=grpc-asr-ubuntu22-cuda124-grpc1.83.0-whisper1.9.3,target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda12.9-gcc14-cxx23-grpc1.83.0-whisper1.9.3,target=/build \
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+        -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_CUDA=ON \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && ctest --test-dir /build -L asr --output-on-failure \

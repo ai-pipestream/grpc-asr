@@ -3,7 +3,12 @@ project(grpc-asr VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++23 for first-party code (gRParse parity). ggml pins its own targets to
+# C++17 at directory scope ("don't bump" upstream), so nvcc never sees this
+# value; nvcc's host-compiler ceiling for CUDA 12.9 is GCC 14, which is why
+# the CUDA image builds with g++-14 while the CPU/OpenVINO images use the
+# ubuntu:26.04 default GCC 15.
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
