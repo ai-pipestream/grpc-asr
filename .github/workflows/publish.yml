@@ -1,0 +1,63 @@
+name: Publish Images
+
+# Builds the CUDA and CPU service images and pushes them to
+# docker.io/pipestreamai. Every push to main republishes :latest and
+# :latest-cpu; a manual dispatch with a version input also tags that
+# version. Docker Hub credentials come from the DOCKER_USER / DOCKER_TOKEN
+# org secrets.
+#
+# amd64-only: the CUDA family has no arm64 consumers, so no QEMU setup and
+# a single linux/amd64 platform for both builds.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Extra version tag (for example 0.1.0); optional'
+        required: false
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub (docker.io)
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Compute tags
+        id: tags
+        run: |
+          cuda="docker.io/pipestreamai/grpc-asr:latest"
+          cpu="docker.io/pipestreamai/grpc-asr:latest-cpu"
+          if [ -n "${{ inputs.version }}" ]; then
+            cuda="$cuda,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}"
+            cpu="$cpu,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}-cpu"
+          fi
+          echo "cuda=$cuda" >> "$GITHUB_OUTPUT"
+          echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
+      - name: Build and push the CUDA service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.cuda }}
+      - name: Build and push the CPU service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cpu
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.cpu }}
