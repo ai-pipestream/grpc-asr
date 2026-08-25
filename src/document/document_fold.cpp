@@ -1,5 +1,6 @@
 #include "document/document_fold.h"
 
+#include <cctype>
 #include <cmath>
 #include <map>
 #include <set>
@@ -14,6 +15,11 @@ namespace {
 
 constexpr char kSchemaName[] = "docling_document_v2";
 constexpr char kCollector[] = "asr";
+// The producer's own unrescaled score, kept next to the rescaled
+// CollectorSource.confidence so a consumer can rerank without inverting an
+// exp(). The pipestream__ prefix is the fleet's channel for own-model data
+// that must survive the render boundary.
+constexpr char kAvgLogprobField[] = "pipestream__avg_logprob";
 
 std::string trimmed(const std::string& text) {
     const char* whitespace = " \t\r\n";
@@ -35,10 +41,52 @@ void set_string(google::protobuf::Map<std::string, google::protobuf::Value>* fie
     (*fields)[key].set_string_value(value);
 }
 
+// Unicode code points in [from, to): every byte that is not a UTF-8
+// continuation byte starts one. Charspans are code point offsets, not byte
+// offsets, so a transcript with accents or CJK still highlights correctly.
+int32_t code_points(const std::string& text, size_t from, size_t to) {
+    int32_t count = 0;
+    for (size_t i = from; i < to && i < text.size(); i++) {
+        if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Fills a provenance entry's media span. Media has no pages, so page_no
+// stays 0 and no bounding box is invented; the time range is the real
+// locator. Zero-length spans are legal here (a keyframe is an instant) and
+// are not widened.
+void time_span(docv1::ProvenanceItem* prov, uint64_t start_ms, uint64_t end_ms,
+               const std::string& speaker) {
+    docv1::TimeSpan* span = prov->mutable_time();
+    span->set_start_ms(static_cast<double>(start_ms));
+    span->set_end_ms(static_cast<double>(end_ms));
+    if (!speaker.empty()) {
+        span->set_speaker(speaker);
+    }
+}
+
+// Maps an ISO 639-1 code onto the schema's language enum by name; the enum
+// value names are the uppercased codes. A code the enum does not know
+// (whisper also emits three-letter codes such as "yue") leaves the enum
+// unspecified, and code_raw keeps the string either way.
+docv1::HumanLanguageLabel language_label(const std::string& code) {
+    std::string primary = code.substr(0, code.find('-'));
+    std::string name = "HUMAN_LANGUAGE_LABEL_";
+    for (char c : primary) {
+        name += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    docv1::HumanLanguageLabel label = docv1::HUMAN_LANGUAGE_LABEL_UNSPECIFIED;
+    return docv1::HumanLanguageLabel_Parse(name, &label) ? label
+                                                         : docv1::HUMAN_LANGUAGE_LABEL_UNSPECIFIED;
+}
+
 }  // namespace
 
-AsrDocumentFold::AsrDocumentFold(std::string model, std::string version)
-    : model_(std::move(model)), version_(std::move(version)) {
+AsrDocumentFold::AsrDocumentFold(std::string model, std::string version, FoldOptions options)
+    : model_(std::move(model)), version_(std::move(version)), options_(options) {
     document_.set_schema_name(kSchemaName);
     docv1::GroupItem* body = document_.mutable_body();
     body->set_self_ref("#/body");
@@ -46,6 +94,15 @@ AsrDocumentFold::AsrDocumentFold(std::string model, std::string version)
     docv1::GroupItem* furniture = document_.mutable_furniture();
     furniture->set_self_ref("#/furniture");
     furniture->set_content_layer(docv1::CONTENT_LAYER_FURNITURE);
+}
+
+void AsrDocumentFold::set_source(std::string filename, std::string mimetype,
+                                 uint64_t binary_hash) {
+    document_.set_name(filename);
+    docv1::DocumentOrigin* origin = document_.mutable_origin();
+    origin->set_filename(std::move(filename));
+    origin->set_mimetype(std::move(mimetype));
+    origin->set_binary_hash(binary_hash);
 }
 
 void AsrDocumentFold::consume(const asrv1::TranscribeResponse& event) {
@@ -70,13 +127,13 @@ void AsrDocumentFold::consume(const asrv1::TranscribeResponse& event) {
 
 void AsrDocumentFold::stamp_sources(
     google::protobuf::RepeatedPtrField<docv1::SourceType>* source, double start_seconds,
-    double end_seconds, float avg_logprob) {
+    double end_seconds, std::optional<float> avg_logprob) {
     docv1::TrackSource* track = source->Add()->mutable_track();
     track->set_start_time(start_seconds);
-    // Docling's TrackSource validator requires end > start strictly, so a
-    // zero-duration span (a keyframe instant, a degenerate segment) gets the
-    // same 1 ms epsilon docling itself applies (ZERO_DURATION_SEGMENT_EPS in
-    // the ASR transcriber, timestamp + 0.001 in the video pipeline).
+    // The upstream TrackSource validator requires end > start strictly, so
+    // a zero-duration span (a keyframe instant, a degenerate segment) gets
+    // a 1 ms epsilon here. The item's own provenance carries the true
+    // instant unwidened, so nothing has to trust this number.
     track->set_end_time(end_seconds > start_seconds ? end_seconds : start_seconds + 0.001);
     // Every item this fold creates is attributable: additive merges with
     // other collectors' output rely on the tag to never collide silently.
@@ -84,13 +141,24 @@ void AsrDocumentFold::stamp_sources(
     collector->set_collector(kCollector);
     collector->set_model(model_);
     collector->set_version(version_);
-    // avg logprob 0 means "unknown" on the wire; a real mean token
-    // logprob is negative and exp() maps it onto the schema's 0..1 range
-    // (the vlm-convert precedent).
-    if (avg_logprob != 0.0F) {
-        double confidence = std::exp(static_cast<double>(avg_logprob));
+    // A mean token logprob is at most 0 and exp() maps it onto the
+    // schema's 0..1 range. This is a rescaled decoder score, not a
+    // calibrated probability, which is why the raw value also rides the
+    // item's meta; an absent score means the decoder scored no token, and
+    // a present 0 is a real one.
+    if (avg_logprob.has_value()) {
+        double confidence = std::exp(static_cast<double>(*avg_logprob));
         collector->set_confidence(confidence > 1.0 ? 1.0 : confidence);
     }
+}
+
+void AsrDocumentFold::register_speaker(const std::string& speaker) {
+    for (const std::string& known : document_.media().speakers()) {
+        if (known == speaker) {
+            return;
+        }
+    }
+    document_.mutable_media()->add_speakers(speaker);
 }
 
 void AsrDocumentFold::on_media_info(const asrv1::MediaInfo& info) {
@@ -105,6 +173,44 @@ void AsrDocumentFold::on_media_info(const asrv1::MediaInfo& info) {
     if (info.duration_ms() != 0) {
         set_number(fields, "asr.declared_duration_ms", static_cast<double>(info.duration_ms()));
     }
+    // The typed media facts the schema has slots for. The container's
+    // declared duration seeds it; the trailer replaces it with what was
+    // actually decoded, which is the authoritative number.
+    docv1::MediaMeta* media = document_.mutable_media();
+    if (!info.audio_codec().empty()) {
+        media->set_codec(info.audio_codec());
+    }
+    if (info.duration_ms() != 0) {
+        media->set_duration_ms(static_cast<double>(info.duration_ms()));
+    }
+}
+
+void AsrDocumentFold::add_word_provenance(docv1::TextItemBase* base, const asrv1::Segment& segment,
+                                          const std::string& text) {
+    // Words arrive in reading order, so their charspans are found by
+    // walking one cursor forward through the item text. A word the trim
+    // moved or the decoder spelled differently simply gets no charspan;
+    // its time span still stands.
+    size_t byte_cursor = 0;
+    int32_t point_cursor = 0;
+    for (const asrv1::Word& word : segment.words()) {
+        docv1::ProvenanceItem* prov = base->add_prov();
+        time_span(prov, word.start_ms(), word.end_ms(), segment.speaker_id());
+        const std::string needle = trimmed(word.text());
+        if (needle.empty()) {
+            continue;
+        }
+        size_t at = text.find(needle, byte_cursor);
+        if (at == std::string::npos) {
+            continue;
+        }
+        point_cursor += code_points(text, byte_cursor, at);
+        docv1::IntSpan* charspan = prov->mutable_charspan();
+        charspan->set_start(point_cursor);
+        point_cursor += code_points(text, at, at + needle.size());
+        charspan->set_end(point_cursor);
+        byte_cursor = at + needle.size();
+    }
 }
 
 void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
@@ -115,9 +221,31 @@ void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
     base->set_label(docv1::DOC_ITEM_LABEL_TEXT);
     base->set_content_layer(docv1::CONTENT_LAYER_BODY);
     base->set_orig(segment.text());
-    base->set_text(trimmed(segment.text()));
+    const std::string text = trimmed(segment.text());
+    base->set_text(text);
+
+    if (!segment.speaker_id().empty()) {
+        register_speaker(segment.speaker_id());
+    }
+
+    // prov[0] locates the whole item; the word entries that may follow
+    // locate its parts, each against this same text.
+    docv1::ProvenanceItem* prov = base->add_prov();
+    time_span(prov, segment.start_ms(), segment.end_ms(), segment.speaker_id());
+    prov->mutable_charspan()->set_start(0);
+    prov->mutable_charspan()->set_end(code_points(text, 0, text.size()));
+    if (options_.word_provenance) {
+        add_word_provenance(base, segment, text);
+    }
+
+    if (segment.has_avg_logprob()) {
+        set_number(base->mutable_meta()->mutable_custom_fields(), kAvgLogprobField,
+                   static_cast<double>(segment.avg_logprob()));
+    }
     stamp_sources(base->mutable_source(), static_cast<double>(segment.start_ms()) / 1000.0,
-                  static_cast<double>(segment.end_ms()) / 1000.0, segment.avg_logprob());
+                  static_cast<double>(segment.end_ms()) / 1000.0,
+                  segment.has_avg_logprob() ? std::optional<float>(segment.avg_logprob())
+                                            : std::nullopt);
     document_.mutable_body()->add_children()->set_ref(ref);
 }
 
@@ -135,19 +263,32 @@ void AsrDocumentFold::on_keyframe(const asrv1::Keyframe& keyframe) {
     // Pointer back into the typed stream, never embedded PNG bytes: the
     // Document is one gRPC message and must stay bounded.
     image->set_uri("keyframe:" + std::to_string(keyframe.timestamp_ms()));
+    // The frame's true instant, as a zero-length span: the URI is a fetch
+    // handle, not the carrier of when the frame is.
+    time_span(picture->add_prov(), keyframe.timestamp_ms(), keyframe.timestamp_ms(), "");
     double seconds = static_cast<double>(keyframe.timestamp_ms()) / 1000.0;
-    stamp_sources(picture->mutable_source(), seconds, seconds, 0.0F);
+    stamp_sources(picture->mutable_source(), seconds, seconds, std::nullopt);
     document_.mutable_body()->add_children()->set_ref(ref);
 }
 
 void AsrDocumentFold::on_complete(const asrv1::TranscriptComplete& complete) {
     docv1::BaseMeta* meta = document_.mutable_body()->mutable_meta();
     if (!complete.language().empty()) {
-        meta->mutable_language()->set_code_raw(complete.language());
+        // The detected language belongs in the slots the schema already
+        // has: the enum for consumers that switch on it, the raw string
+        // for codes the enum does not know, and the document-level tag.
+        docv1::LanguageMetaField* language = meta->mutable_language();
+        language->set_code(language_label(complete.language()));
+        language->set_code_raw(complete.language());
+        language->set_created_by(kCollector);
+        document_.mutable_source_meta()->set_language(complete.language());
     }
     auto* fields = meta->mutable_custom_fields();
     set_number(fields, "asr.duration_ms", static_cast<double>(complete.duration_ms()));
     set_number(fields, "asr.token_count", static_cast<double>(complete.token_count()));
+    if (complete.duration_ms() != 0) {
+        document_.mutable_media()->set_duration_ms(static_cast<double>(complete.duration_ms()));
+    }
     finished_ = true;
 }
 

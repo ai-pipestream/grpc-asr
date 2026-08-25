@@ -32,6 +32,17 @@ namespace {
 
 constexpr size_t kChunk = 64 * 1024;
 
+// FNV-1a 64, written out here so the origin hash is checked against a
+// second implementation rather than the server's own.
+uint64_t content_hash(const std::string& bytes) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 std::string lower(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(),
                    [](unsigned char c) { return std::tolower(c); });
@@ -205,6 +216,8 @@ void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::s
     namespace docv1 = ai::pipestream::document::v1;
     asrv1::TranscribeOptions options = options_for("tiny.en");
     options.set_emit_document(true);
+    options.set_word_timestamps(true);
+    options.set_filename("/uploads/address.wav");
     StreamResult result = transcribe(channel, options, jfk);
     require(result.status.ok(), "document run transcribes OK: " + result.status.error_message());
     require(result.documents == 1, "exactly one document event");
@@ -214,16 +227,25 @@ void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::s
     const docv1::Document& document = result.document;
     std::vector<std::string> errors = asr::doc::document_integrity_errors(document);
     require(errors.empty(), "document integrity: " + (errors.empty() ? "" : errors.front()));
-    require(document.schema_name() == "docling_document_v2", "docling schema name");
+    require(document.schema_name() == "docling_document_v2", "schema name");
     require(static_cast<size_t>(document.texts_size()) == result.finals.size(),
             "one text item per final segment");
     require(document.body().children_size() == document.texts_size(),
             "body children mirror the text arena");
 
+    // Source identity: the client named the media, the server sniffed the
+    // container, and the hash is over the bytes that arrived.
+    require(document.name() == "address.wav" && document.origin().filename() == "address.wav",
+            "the document is named after the upload, basename only");
+    require(document.origin().mimetype() == "audio/wav", "origin mimetype from the sniff");
+    require(document.origin().binary_hash() == content_hash(jfk),
+            "origin hash is the content hash of the uploaded bytes");
+
     std::string all_text;
     double last_start = -1.0;
-    for (const docv1::BaseTextItem& item : document.texts()) {
-        const docv1::TextItemBase& base = item.text().base();
+    size_t items_with_words = 0;
+    for (size_t i = 0; i < static_cast<size_t>(document.texts_size()); i++) {
+        const docv1::TextItemBase& base = document.texts(i).text().base();
         all_text += base.text() + " ";
         require(base.source_size() == 2, "every text item carries track + collector sources");
         require(base.source(0).has_track() && base.source(1).has_collector(),
@@ -231,19 +253,49 @@ void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::s
         const docv1::TrackSource& track = base.source(0).track();
         require(track.start_time() >= last_start, "track times monotonic");
         require(track.end_time() > track.start_time(),
-                "track range strictly positive (docling TrackSource validator)");
+                "track range strictly positive (the upstream TrackSource validator)");
         last_start = track.start_time();
         const docv1::CollectorSource& collector = base.source(1).collector();
         require(collector.collector() == "asr" && collector.model() == "tiny.en",
                 "collector attribution names asr and the model");
         require(collector.confidence() > 0.0 && collector.confidence() <= 1.0,
                 "confidence derived from the segment's avg logprob");
-        require(base.prov_size() == 0, "no invented page provenance on media items");
+        require(base.meta().custom_fields().at("pipestream__avg_logprob").number_value() <= 0.0,
+                "the raw decoder score rides the item meta");
+
+        // Time provenance: the segment entry, then one entry per word the
+        // decoder aligned.
+        const asrv1::Segment& segment = result.finals[i];
+        require(base.prov_size() == 1 + segment.words_size(),
+                "one provenance entry for the segment plus one per word");
+        const docv1::ProvenanceItem& span = base.prov(0);
+        require(span.time().start_ms() == static_cast<double>(segment.start_ms()) &&
+                    span.time().end_ms() == static_cast<double>(segment.end_ms()),
+                "segment provenance matches the typed segment, in milliseconds");
+        require(span.charspan().start() == 0 && span.charspan().end() > 0,
+                "segment charspan covers the item text");
+        items_with_words += segment.words_size() > 0 ? 1 : 0;
+        int32_t last_word_start = -1;
+        for (int w = 0; w < segment.words_size(); w++) {
+            const docv1::ProvenanceItem& word = base.prov(w + 1);
+            require(word.time().start_ms() == static_cast<double>(segment.words(w).start_ms()),
+                    "word provenance keeps the typed word timing");
+            require(word.has_charspan(), "every aligned word is located in the item text");
+            require(word.charspan().start() >= last_word_start &&
+                        word.charspan().end() <= span.charspan().end(),
+                    "word charspans advance and stay inside the item text");
+            last_word_start = word.charspan().start();
+        }
     }
+    require(items_with_words > 0, "the run actually produced word timings to locate");
     require(lower(all_text).find("country") != std::string::npos,
             "document text matches the transcript, got: " + all_text);
-    require(document.body().meta().language().code_raw() == "en",
-            "trailer language folded into body meta");
+    require(document.body().meta().language().code_raw() == "en" &&
+                document.body().meta().language().code() == docv1::HUMAN_LANGUAGE_LABEL_EN,
+            "trailer language folded into the body meta language slots");
+    require(document.source_meta().language() == "en", "and into the document meta");
+    require(document.media().duration_ms() > 10000.0 && document.media().duration_ms() < 12000.0,
+            "media meta carries the decoded duration");
 }
 
 void verify_streaming_during_upload(const std::shared_ptr<grpc::Channel>& channel,

@@ -36,21 +36,46 @@ sequenceDiagram
 `Transcribe(stream TranscribeRequest) returns (stream TranscribeResponse)`:
 the first request message carries `TranscribeOptions` (`model`, `language`,
 `task`, `word_timestamps`, `emit_keyframes`, `keyframe_interval_seconds`,
-`emit_document`), the rest carry the encoded media as `MediaChunk` messages.
-Response events arrive in order: `MediaInfo`, then `PartialSegment` and
-`FinalSegment` events (finals replace partials by index), optional `Keyframe`
-PNGs, and a `TranscriptComplete` trailer with counts.
+`emit_document`, `diarize`, `filename`), the rest carry the encoded media as
+`MediaChunk` messages. Response events arrive in order: `MediaInfo`, then
+`PartialSegment` and `FinalSegment` events (finals replace partials by
+index), optional `Keyframe` PNGs, and a `TranscriptComplete` trailer with
+counts.
+
+`diarize` asks the decoder for speaker turns; segments then carry a
+stream-local `speaker_id` ("S1", "S2", ...). A model without speaker-turn
+training never predicts a turn, so everything stays on the first speaker.
 
 With `emit_document`, one `ai.pipestream.document.v1.Document` event is
 emitted immediately before the trailer: the collector-side fold of the
-transcript. Final segments become text items with `TrackSource` time ranges
-and `CollectorSource{collector: "asr", model, confidence:
-exp(avg_logprob)}`; keyframes become picture items whose `ImageRef.uri` is
-`keyframe:<timestamp_ms>`, a pointer back at the typed event rather than
-embedded PNG bytes, so the Document stays one bounded message. The typed
-event stream remains the lossless wire. The document schema is vendored
-verbatim from gRParse (`proto/ai/pipestream/document/v1/document.proto`); do
-not edit it here.
+transcript.
+
+- Final segments become text items located by **time provenance**:
+  `prov[0].time` is the segment's span in milliseconds, and with
+  `word_timestamps` one further entry per word carries that word's span
+  plus its charspan (Unicode code points) inside the item text. Speakers,
+  when diarizing, ride the spans and are registered once in
+  `Document.media.speakers`.
+- Every item keeps `TrackSource` (seconds) and
+  `CollectorSource{collector: "asr", model, version, confidence}` for
+  consumers that already read them. The confidence is a rescaled decoder
+  score, not a calibrated probability, so the raw mean token logprob also
+  rides the item meta as `pipestream__avg_logprob`. A segment that scored
+  no token claims no confidence at all; a score of exactly 0 is a real
+  value.
+- The detected language lands in `body.meta.language` (enum plus raw code)
+  and in `Document.source_meta.language`; the decoded duration and codec in
+  `Document.media`; the filename, sniffed mimetype, and FNV-1a content hash
+  in `Document.name` and `Document.origin`.
+- Keyframes become picture items whose `ImageRef.uri` is
+  `keyframe:<timestamp_ms>`, a pointer back at the typed event rather than
+  embedded PNG bytes, so the Document stays one bounded message; the frame's
+  true instant is its own zero-length time span.
+
+The typed event stream remains the lossless wire: per-word probabilities,
+segment indexes, and the trailer's counts stay there. The document schema is
+vendored verbatim from gRParse
+(`proto/ai/pipestream/document/v1/document.proto`); do not edit it here.
 
 `GetServiceInfo` reports the build, backend, loaded models, and caps, plus
 the `UiInfo` block the shared demo shell reads to build its tab bar.
@@ -104,6 +129,7 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_WINDOW_SECONDS` | `480` | PCM window per `whisper_full`; bounds resident PCM |
 | `GRPC_ASR_THREADS` | `min(4,hw)` | whisper decode threads |
 | `GRPC_ASR_KEYFRAME_INTERVAL_SECONDS` | `10` | default keyframe spacing |
+| `GRPC_ASR_DOCUMENT_WORD_PROVENANCE` | `1` | per-word provenance in the folded Document; `0` keeps segment spans only. Costs one provenance entry per word (~150 per transcribed minute, ~72k over eight hours) in a single bounded message |
 | `GRPC_ASR_METRICS_INTERVAL_SECONDS` | `60` | stdout metrics line; `0` off |
 | `GRPC_ASR_TOOL_INACTIVITY_SECONDS` | `120` | ffmpeg/ffprobe no-output kill timer |
 | `GRPC_ASR_FFMPEG` / `GRPC_ASR_FFPROBE` | `ffmpeg`/`ffprobe` | tool paths |

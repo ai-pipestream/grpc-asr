@@ -32,6 +32,14 @@ struct Config {
     size_t threads = 4;
     // Server default when TranscribeOptions.keyframe_interval_seconds is 0.
     size_t keyframe_interval_seconds = 10;
+    // Whether the folded Document locates every word, not just every
+    // segment: one ProvenanceItem per word on the segment's text item.
+    // On by default; the cost is one provenance entry per word (roughly
+    // 150 per transcribed minute), which a many-hour transcript may not
+    // want to carry in one message. Words only exist when the client asked
+    // for TranscribeOptions.word_timestamps, so this narrows that further,
+    // it never adds work of its own.
+    bool document_word_provenance = true;
     // 0 disables the stdout metrics line.
     size_t metrics_interval_seconds = 60;
     // ffmpeg/ffprobe children with no output for this long are killed.

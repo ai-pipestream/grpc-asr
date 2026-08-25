@@ -42,6 +42,20 @@ class LockedWriter {
         return write_locked(response);
     }
 
+    // True while a Document fold is still collecting.
+    bool folding() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return fold_ != nullptr;
+    }
+
+    // Names the source media on the fold. No-op without one.
+    void set_source(std::string filename, std::string mimetype, uint64_t binary_hash) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (fold_ != nullptr) {
+            fold_->set_source(std::move(filename), std::move(mimetype), binary_hash);
+        }
+    }
+
     // Ends the stream: folds the trailer, emits the Document event when a
     // fold is active (the trailer's counts and language belong in it), and
     // writes the trailer last so it stays the final event.
@@ -80,12 +94,41 @@ class LockedWriter {
     bool dead_ = false;
 };
 
+// FNV-1a 64 over the encoded media, the same content hash the parse
+// coordinator stamps on its base document, so an ASR-only Document and a
+// merged one agree on the source identity.
+uint64_t content_hash(const std::string& bytes) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+// The name the media travels under: what the client called it (basename
+// only), or one derived from the sniffed container when it said nothing.
+std::string source_filename(const std::string& requested, media::MediaFamily family) {
+    if (requested.empty()) {
+        return "media." + std::string(media::family_name(family));
+    }
+    return requested.substr(requested.find_last_of('/') + 1);
+}
+
 void fill_segment(const engine::EngineSegment& source, asrv1::Segment* out) {
     out->set_index(source.index);
     out->set_start_ms(source.start_ms);
     out->set_end_ms(source.end_ms);
     out->set_text(source.text);
-    out->set_avg_logprob(source.avg_logprob);
+    // No scored token means no score, which is not the same claim as a
+    // confident zero; the field stays absent.
+    if (source.token_count > 0) {
+        out->set_avg_logprob(source.avg_logprob);
+    }
+    if (!source.speaker.empty()) {
+        out->set_speaker_id(source.speaker);
+    }
+    out->set_speaker_turn_next(source.speaker_turn_next);
     for (const engine::EngineWord& word : source.words) {
         asrv1::Word* out_word = out->add_words();
         out_word->set_text(word.text);
@@ -108,6 +151,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         .language = options.language(),
         .translate = options.task() == asrv1::TASK_TRANSLATE,
         .word_timestamps = options.word_timestamps(),
+        .diarize = options.diarize(),
         .threads = static_cast<int>(config_.threads),
         .window_seconds = config_.window_seconds,
         .max_duration_seconds = config_.max_duration_seconds,
@@ -252,6 +296,16 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             return {grpc::StatusCode::CANCELLED, "the stream went away mid-transcription"};
         }
 
+        // Name the folded Document. The event stream carries no filename
+        // and the origin hash needs every byte, so this lands once the
+        // upload is in and before the fold closes.
+        if (writer.folding()) {
+            writer.set_source(
+                source_filename(options.filename(), family),
+                std::string(media::family_mimetype(family)),
+                upload.is_complete() ? content_hash(upload.completed_bytes()) : 0);
+        }
+
         asrv1::TranscribeResponse trailer;
         asrv1::TranscriptComplete* complete = trailer.mutable_complete();
         complete->set_language(result.language);
@@ -317,7 +371,8 @@ grpc::Status AsrServiceImpl::Transcribe(
     // projection; otherwise the hot path never touches it.
     std::optional<doc::AsrDocumentFold> fold;
     if (options.emit_document()) {
-        fold.emplace(options.model(), GRPC_ASR_VERSION);
+        fold.emplace(options.model(), GRPC_ASR_VERSION,
+                     doc::FoldOptions{.word_provenance = config_.document_word_provenance});
     }
     LockedWriter writer(stream, fold.has_value() ? &*fold : nullptr);
     grpc::Status worker_status = grpc::Status::OK;

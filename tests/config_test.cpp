@@ -23,7 +23,7 @@ void clear_env() {
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
           "GRPC_ASR_WINDOW_SECONDS", "GRPC_ASR_THREADS", "GRPC_ASR_KEYFRAME_INTERVAL_SECONDS",
           "GRPC_ASR_METRICS_INTERVAL_SECONDS", "GRPC_ASR_TOOL_INACTIVITY_SECONDS",
-          "GRPC_ASR_FFMPEG", "GRPC_ASR_FFPROBE"}) {
+          "GRPC_ASR_DOCUMENT_WORD_PROVENANCE", "GRPC_ASR_FFMPEG", "GRPC_ASR_FFPROBE"}) {
         ::unsetenv(name);
     }
 }
@@ -52,6 +52,24 @@ void verify_defaults() {
     require(config.max_media_bytes == 256ULL * 1024 * 1024, "default media cap");
     require(config.window_seconds == 480, "default window");
     require(config.ffmpeg == "ffmpeg" && config.ffprobe == "ffprobe", "default tool names");
+    require(config.document_word_provenance, "word provenance is on unless turned off");
+}
+
+void verify_word_provenance_switch() {
+    for (const char* off : {"0", "false", "FALSE"}) {
+        clear_env();
+        ::setenv("GRPC_ASR_DOCUMENT_WORD_PROVENANCE", off, 1);
+        require(!load_config_from_env().document_word_provenance,
+                std::string("word provenance off via ") + off);
+    }
+    for (const char* on : {"1", "true", "True"}) {
+        clear_env();
+        ::setenv("GRPC_ASR_DOCUMENT_WORD_PROVENANCE", on, 1);
+        require(load_config_from_env().document_word_provenance,
+                std::string("word provenance on via ") + on);
+    }
+    require(rejects("GRPC_ASR_DOCUMENT_WORD_PROVENANCE", "maybe"),
+            "a non-boolean word provenance switch fails loud");
 }
 
 void verify_overrides() {
@@ -102,6 +120,7 @@ int main() {
         verify_overrides();
         verify_models_list();
         verify_rejects();
+        verify_word_provenance_switch();
         verify_metrics_can_be_disabled();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

@@ -29,8 +29,10 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 Options on the first message: `model` (`tiny`, `small`, `medium`,
 `large-v3`, `distil-large-v3`, and the rest of the Whisper family),
 `language` (empty means detect), `task` (`transcribe` by default, or
-`translate`), `word_timestamps`, `emit_keyframes` (video only), and
-`keyframe_interval_seconds`.
+`translate`), `word_timestamps`, `emit_keyframes` (video only),
+`keyframe_interval_seconds`, `diarize` (speaker turns; a model without
+speaker-turn training never predicts one), and `filename` (names the folded
+Document; the server derives one from the container otherwise).
 
 Events, in order:
 
@@ -51,17 +53,21 @@ and emits the Document immediately before the `TranscriptComplete` trailer.
 | ASR | Document |
 |---|---|
 | final segment | `TextItem` (label TEXT) under `#/body`, in wire order |
-| segment timing | `TrackSource{start_time, end_time}` in seconds. Media has no pages, so no `ProvenanceItem` is invented. The document schema requires `end > start` strictly on `TrackSource`, so zero-duration spans (keyframe instants, degenerate segments) get a 1 ms epsilon |
-| words | typed stream only; the document schema has no word-level slot, so `Word` events remain the source |
-| keyframe | `PictureItem` plus `ImageRef{mimetype, size, uri: "keyframe:<timestamp_ms>"}`, a pointer at the typed event. PNG bytes are never embedded, so the Document stays one bounded message |
-| MediaInfo / language | `body.meta` (`asr.*` custom fields, `language.code_raw`) |
+| segment timing | `prov[0].time = TimeSpan{start_ms, end_ms}`, plus the item's whole-text charspan. Time is a locator, so it belongs in provenance; media has no pages, so `page_no` stays 0 and no box is invented. `TrackSource{start_time, end_time}` in seconds stays alongside for consumers that already read it, and keeps its 1 ms epsilon where the schema requires `end > start` strictly |
+| words | one further `ProvenanceItem` each, in reading order: the word's own `TimeSpan` and its charspan (Unicode code points) inside the item text. On by default, `GRPC_ASR_DOCUMENT_WORD_PROVENANCE=0` off. Per-word probabilities stay on the typed stream: the schema has no per-word confidence slot |
+| speaker | `TimeSpan.speaker` on the segment and its words, with the distinct labels registered in `Document.media.speakers` in first-appearance order. Only when `diarize` was requested |
+| segment confidence | `CollectorSource.confidence` (`exp(avg_logprob)`, a rescaled decoder score) plus the raw score in the item meta as `pipestream__avg_logprob`. A segment that scored no token claims neither; a score of 0 is a value, not a gap |
+| keyframe | `PictureItem` plus `ImageRef{mimetype, size, uri: "keyframe:<timestamp_ms>"}`, a pointer at the typed event. PNG bytes are never embedded, so the Document stays one bounded message. Its `prov[0].time` is the true instant, a zero-length span |
+| language | `body.meta.language` (`code` enum, `code_raw`, `created_by`) and `Document.source_meta.language` |
+| MediaInfo / trailer | `Document.media{duration_ms, codec}` for the typed facts, `body.meta` `asr.*` custom fields for the rest |
+| source identity | `Document.name` and `DocumentOrigin{filename, mimetype, binary_hash}` from `TranscribeOptions.filename` (basename; a name derived from the sniffed container when absent), the sniffed family, and the FNV-1a content hash of the upload |
 | VTT | not produced here; the sink renders it from segment timestamps |
 
 Every item carries `CollectorSource{collector: "asr", model: <whisper model
-id>, version: <server build>, confidence: exp(avg_logprob) when the segment
-reports one}` alongside the `TrackSource`. Partial segments are not folded
-(their finals supersede them). The document schema is vendored verbatim
-from gRParse; gRParse `COLLECTOR_ASR` wiring is a follow-up in that repo.
+id>, version: <server build>}`. Partial segments are not folded (their
+finals supersede them), and segment indexes and the trailer's counts stay on
+the typed stream. The document schema is vendored verbatim from gRParse;
+gRParse `COLLECTOR_ASR` wiring is a follow-up in that repo.
 
 Video without an audio track is `INVALID_ARGUMENT`. Audio-only files never
 emit keyframes.

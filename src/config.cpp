@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -27,6 +28,23 @@ size_t configured_size(const char* name, size_t fallback, size_t minimum, size_t
 std::string configured_string(const char* name, const std::string& fallback) {
     const char* raw = std::getenv(name);
     return raw == nullptr || *raw == '\0' ? fallback : raw;
+}
+
+bool configured_bool(const char* name, bool fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    std::string value(raw);
+    std::ranges::transform(value, value.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (value == "1" || value == "true") {
+        return true;
+    }
+    if (value == "0" || value == "false") {
+        return false;
+    }
+    throw std::invalid_argument(std::string(name) + " must be 0, 1, true, or false");
 }
 
 std::vector<std::string> configured_list(const char* name) {
@@ -81,6 +99,8 @@ Config load_config_from_env() {
         configured_size("GRPC_ASR_THREADS", std::min<size_t>(4, hw), 1, 256);
     config.keyframe_interval_seconds = configured_size(
         "GRPC_ASR_KEYFRAME_INTERVAL_SECONDS", config.keyframe_interval_seconds, 1, 3600);
+    config.document_word_provenance = configured_bool("GRPC_ASR_DOCUMENT_WORD_PROVENANCE",
+                                                      config.document_word_provenance);
     config.metrics_interval_seconds = configured_size(
         "GRPC_ASR_METRICS_INTERVAL_SECONDS", config.metrics_interval_seconds, 0, 86400);
     config.tool_inactivity_seconds = configured_size(
