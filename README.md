@@ -59,10 +59,10 @@ transcript.
 - Every item keeps `TrackSource` (seconds) and
   `CollectorSource{collector: "asr", model, version, confidence}` for
   consumers that already read them. The confidence is a rescaled decoder
-  score, not a calibrated probability, so the raw mean token logprob also
-  rides the item meta as `pipestream__avg_logprob`. A segment that scored
-  no token claims no confidence at all; a score of exactly 0 is a real
-  value.
+  score, not a calibrated probability, so the raw mean token logprob rides
+  the same `CollectorSource` as a typed `raw_score` with `raw_score_kind`
+  `"avg_logprob"`. A segment that scored no token claims neither field, and
+  nothing is written in their place; a score of exactly 0 is a real value.
 - The detected language lands in `body.meta.language` (enum plus raw code)
   and in `Document.source_meta.language`; the decoded duration and codec in
   `Document.media`; the filename, sniffed mimetype, and FNV-1a content hash

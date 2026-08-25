@@ -260,12 +260,27 @@ void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::s
                 "collector attribution names asr and the model");
         require(collector.confidence() > 0.0 && collector.confidence() <= 1.0,
                 "confidence derived from the segment's avg logprob");
-        require(base.meta().custom_fields().at("pipestream__avg_logprob").number_value() <= 0.0,
-                "the raw decoder score rides the item meta");
+        require(!base.meta().custom_fields().contains("pipestream__avg_logprob"),
+                "the retired meta custom field is gone from a real transcription");
 
         // Time provenance: the segment entry, then one entry per word the
         // decoder aligned.
         const asrv1::Segment& segment = result.finals[i];
+
+        // The raw decoder score is typed on the collector source and is the
+        // typed stream's own number, byte for byte, not a rescale of it.
+        require(collector.has_raw_score() == segment.has_avg_logprob(),
+                "raw_score is set exactly when the decoder scored the segment");
+        if (segment.has_avg_logprob()) {
+            require(collector.raw_score() == static_cast<double>(segment.avg_logprob()),
+                    "raw_score carries the typed segment's avg logprob verbatim");
+            require(collector.raw_score_kind() == "avg_logprob",
+                    "raw_score_kind names the engine's signal");
+            require(collector.raw_score() <= 0.0, "a mean token logprob is at most zero");
+        } else {
+            require(!collector.has_raw_score_kind(),
+                    "an unscored segment names no raw score kind");
+        }
         require(base.prov_size() == 1 + segment.words_size(),
                 "one provenance entry for the segment plus one per word");
         const docv1::ProvenanceItem& span = base.prov(0);

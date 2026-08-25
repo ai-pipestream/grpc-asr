@@ -144,9 +144,13 @@ void verify_fold() {
             "collector attribution");
     require(std::abs(collector.confidence() - std::exp(-0.25)) < 1e-9,
             "confidence rescales avg_logprob into 0..1");
-    require(std::abs(first.meta().custom_fields().at("pipestream__avg_logprob").number_value() +
-                     0.25) < 1e-6,
-            "the raw decoder score rides the item meta, unrescaled");
+    require(collector.has_raw_score() && collector.raw_score() < 0.0,
+            "the raw decoder score is a typed double on the collector source");
+    require(std::abs(collector.raw_score() + 0.25) < 1e-6,
+            "raw_score is the avg logprob verbatim, unrescaled");
+    require(collector.raw_score_kind() == "avg_logprob", "raw_score_kind names the signal");
+    require(!first.meta().custom_fields().contains("pipestream__avg_logprob"),
+            "the retired meta custom field is gone");
 
     // Time is provenance: one entry for the segment, no words on this run.
     require(first.prov_size() == 1, "segment provenance, no word entries without words");
@@ -174,6 +178,9 @@ void verify_fold() {
             "keyframe provenance is the true instant, unwidened");
     require(!picture.source(1).collector().has_confidence(),
             "keyframes claim no model confidence");
+    require(!picture.source(1).collector().has_raw_score() &&
+                !picture.source(1).collector().has_raw_score_kind(),
+            "and no raw score either: a keyframe is not something the decoder scored");
 
     const docv1::BaseMeta& meta = document.body().meta();
     require(meta.language().code() == docv1::HUMAN_LANGUAGE_LABEL_EN,
@@ -289,26 +296,49 @@ void verify_language_slots() {
     require(language.code_raw() == "yue", "the raw code survives regardless");
 }
 
-void verify_confidence_presence() {
-    // No score at all: nothing is claimed.
+void verify_score_presence() {
+    // No score at all: nothing is claimed, and nothing stands in for it.
     asr::doc::AsrDocumentFold silent("tiny.en", "1.2.3");
     silent.consume(segment_event(/*final=*/true, 0, 0, 1000, "hello", std::nullopt));
     const docv1::TextItemBase& unscored = silent.document().texts(0).text().base();
-    require(!unscored.source(1).collector().has_confidence(),
-            "an absent avg_logprob claims no confidence");
-    require(!unscored.meta().custom_fields().contains("pipestream__avg_logprob"),
-            "and records no raw score");
+    const docv1::CollectorSource& unscored_collector = unscored.source(1).collector();
+    require(!unscored_collector.has_confidence(), "an absent avg_logprob claims no confidence");
+    require(!unscored_collector.has_raw_score(), "and no raw score");
+    require(!unscored_collector.has_raw_score_kind(), "and names no raw score kind");
+    require(unscored_collector.raw_score() == 0.0 && unscored_collector.raw_score_kind().empty(),
+            "the unset default is the proto default, never a written sentinel");
+    require(unscored.meta().custom_fields().empty(),
+            "an unscored item carries no meta custom fields at all");
 
     // A real zero: the decoder was certain, which is a value, not a gap.
     asr::doc::AsrDocumentFold certain("tiny.en", "1.2.3");
     certain.consume(segment_event(/*final=*/true, 0, 0, 1000, "hello", 0.0F));
-    const docv1::TextItemBase& scored = certain.document().texts(0).text().base();
-    require(scored.source(1).collector().has_confidence(),
-            "avg_logprob 0 is a score, not a missing one");
-    require(std::abs(scored.source(1).collector().confidence() - 1.0) < 1e-9,
+    const docv1::CollectorSource& certain_collector =
+        certain.document().texts(0).text().base().source(1).collector();
+    require(certain_collector.has_confidence(), "avg_logprob 0 is a score, not a missing one");
+    require(std::abs(certain_collector.confidence() - 1.0) < 1e-9,
             "logprob 0 rescales to confidence 1");
-    require(scored.meta().custom_fields().at("pipestream__avg_logprob").number_value() == 0.0,
-            "the raw zero is recorded");
+    require(certain_collector.has_raw_score() && certain_collector.raw_score() == 0.0,
+            "the raw zero is recorded as a set field, not left to the default");
+    require(certain_collector.raw_score_kind() == "avg_logprob",
+            "a zero score still names its kind");
+
+    // The two are independent readings of the same measurement: raw_score
+    // stays the decoder's own number while confidence stays the rescale,
+    // so a consumer can invert neither into the other by accident.
+    asr::doc::AsrDocumentFold unsure("tiny.en", "1.2.3");
+    unsure.consume(segment_event(/*final=*/true, 0, 0, 1000, "hello", -1.75F));
+    const docv1::CollectorSource& unsure_collector =
+        unsure.document().texts(0).text().base().source(1).collector();
+    require(std::abs(unsure_collector.raw_score() + 1.75) < 1e-6,
+            "raw_score is uncalibrated and may sit far outside 0..1");
+    require(std::abs(unsure_collector.confidence() - std::exp(-1.75)) < 1e-9,
+            "confidence is derived exactly as before, unchanged by the raw score");
+    require(unsure_collector.confidence() != unsure_collector.raw_score(),
+            "the rescaled and raw readings are distinct numbers");
+    require(!unsure.document().texts(0).text().base().meta().custom_fields().contains(
+                "pipestream__avg_logprob"),
+            "no item writes the retired custom field, whatever it scored");
 }
 
 void verify_integrity_checker_catches_breakage() {
@@ -340,7 +370,7 @@ int main() {
         verify_word_provenance_can_be_turned_off();
         verify_speaker_registry();
         verify_language_slots();
-        verify_confidence_presence();
+        verify_score_presence();
         verify_integrity_checker_catches_breakage();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

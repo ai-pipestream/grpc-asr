@@ -15,11 +15,10 @@ namespace {
 
 constexpr char kSchemaName[] = "docling_document_v2";
 constexpr char kCollector[] = "asr";
-// The producer's own unrescaled score, kept next to the rescaled
-// CollectorSource.confidence so a consumer can rerank without inverting an
-// exp(). The pipestream__ prefix is the fleet's channel for own-model data
-// that must survive the render boundary.
-constexpr char kAvgLogprobField[] = "pipestream__avg_logprob";
+// Names the engine signal CollectorSource.raw_score carries, so a consumer
+// reading raw_score knows it is a mean token log probability and never
+// mistakes it for a probability.
+constexpr char kRawScoreKind[] = "avg_logprob";
 
 std::string trimmed(const std::string& text) {
     const char* whitespace = " \t\r\n";
@@ -142,13 +141,17 @@ void AsrDocumentFold::stamp_sources(
     collector->set_model(model_);
     collector->set_version(version_);
     // A mean token logprob is at most 0 and exp() maps it onto the
-    // schema's 0..1 range. This is a rescaled decoder score, not a
-    // calibrated probability, which is why the raw value also rides the
-    // item's meta; an absent score means the decoder scored no token, and
-    // a present 0 is a real one.
+    // schema's 0..1 range. That is a rescaled decoder score, not a
+    // calibrated probability, so raw_score keeps the decoder's own number
+    // verbatim and raw_score_kind names what it is; a consumer can rerank
+    // without inverting the exp(). An absent score means the decoder
+    // scored no token, and then neither field is written: no sentinel
+    // stands in for a missing measurement. A present 0 is a real score.
     if (avg_logprob.has_value()) {
         double confidence = std::exp(static_cast<double>(*avg_logprob));
         collector->set_confidence(confidence > 1.0 ? 1.0 : confidence);
+        collector->set_raw_score(static_cast<double>(*avg_logprob));
+        collector->set_raw_score_kind(kRawScoreKind);
     }
 }
 
@@ -238,10 +241,6 @@ void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
         add_word_provenance(base, segment, text);
     }
 
-    if (segment.has_avg_logprob()) {
-        set_number(base->mutable_meta()->mutable_custom_fields(), kAvgLogprobField,
-                   static_cast<double>(segment.avg_logprob()));
-    }
     stamp_sources(base->mutable_source(), static_cast<double>(segment.start_ms()) / 1000.0,
                   static_cast<double>(segment.end_ms()) / 1000.0,
                   segment.has_avg_logprob() ? std::optional<float>(segment.avg_logprob())

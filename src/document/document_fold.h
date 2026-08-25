@@ -40,8 +40,9 @@ struct FoldOptions {
 // every item alongside the collector attribution
 // (CollectorSource{collector "asr", model, version, confidence from the
 // segment's avg logprob}) for consumers that already read it, and the raw
-// unrescaled score rides the item's meta as pipestream__avg_logprob so
-// rescoring is still possible. Speakers, when the decoder diarizes, are
+// unrescaled score rides the same CollectorSource as raw_score with
+// raw_score_kind "avg_logprob", so rescoring is still possible without
+// inverting the rescale. Speakers, when the decoder diarizes, are
 // stream-local labels on the time spans, registered once in
 // Document.media.speakers.
 //
@@ -95,7 +96,8 @@ class AsrDocumentFold {
 
     // Appends the TrackSource + CollectorSource pair every item carries.
     // An absent avg_logprob means the decoder scored no token, so the item
-    // claims no confidence at all; a present 0 is a real score.
+    // claims neither a confidence nor a raw score; a present 0 is a real
+    // score and lands in both.
     void stamp_sources(
         google::protobuf::RepeatedPtrField<ai::pipestream::document::v1::SourceType>* source,
         double start_seconds, double end_seconds, std::optional<float> avg_logprob);
