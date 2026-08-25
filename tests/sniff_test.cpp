@@ -46,6 +46,21 @@ void verify_family_kinds() {
     require(!asr::media::is_video_family(MediaFamily::kUnknown), "unknown is neither");
 }
 
+void verify_mimetypes() {
+    // The Document origin is stamped from these, so every family a sniff
+    // can return names a real type and nothing falls through to the
+    // catch-all by accident.
+    require(asr::media::family_mimetype(MediaFamily::kWav) == "audio/wav", "wav mimetype");
+    require(asr::media::family_mimetype(MediaFamily::kMp3) == "audio/mpeg", "mp3 mimetype");
+    require(asr::media::family_mimetype(MediaFamily::kFlac) == "audio/flac", "flac mimetype");
+    require(asr::media::family_mimetype(MediaFamily::kOgg) == "audio/ogg", "ogg mimetype");
+    require(asr::media::family_mimetype(MediaFamily::kMp4) == "video/mp4", "mp4 mimetype");
+    require(asr::media::family_mimetype(MediaFamily::kMkv) == "video/x-matroska",
+            "mkv mimetype");
+    require(asr::media::family_mimetype(MediaFamily::kUnknown) == "application/octet-stream",
+            "an unsniffed container claims nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -53,6 +68,7 @@ int main() {
         verify_families();
         verify_rejects();
         verify_family_kinds();
+        verify_mimetypes();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

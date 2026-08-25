@@ -30,6 +30,14 @@ bool is_video_family(MediaFamily family);
 MediaFamily sniff(const uint8_t* data, size_t size);
 
 // Human-readable family name for logs and errors, e.g. "wav", "mp4".
+// Doubles as the filename extension when a name has to be derived.
 std::string_view family_name(MediaFamily family);
+
+// MIME type for the sniffed container, e.g. "audio/wav", "video/mp4".
+// The container families that can hold either audio or video (mp4/m4a,
+// mkv/webm) report the video type: the magic bytes cannot tell them
+// apart, and only the demuxer knows. Unknown containers report
+// "application/octet-stream".
+std::string_view family_mimetype(MediaFamily family);
 
 }  // namespace asr::media

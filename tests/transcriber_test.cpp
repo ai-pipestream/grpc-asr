@@ -140,6 +140,31 @@ void verify_word_timestamps(const std::string& jfk) {
                              std::to_string(words));
 }
 
+void verify_speaker_labels(const std::string& jfk) {
+    EngineOptions options;
+    options.language = "en";
+    options.window_seconds = 30;
+    Collected quiet = run_over(jfk, options);
+    for (const EngineSegment& segment : quiet.finals) {
+        require(segment.speaker.empty(), "no speaker is claimed without diarization");
+        require(!segment.speaker_turn_next, "no turn is reported without diarization");
+    }
+
+    // With diarization on, every segment is attributed. A model without
+    // speaker-turn training never predicts a turn, so this fixture stays
+    // on one voice; the labels must still be there and consistent.
+    options.diarize = true;
+    Collected diarized = run_over(jfk, options);
+    require(!diarized.finals.empty(), "diarization does not break decoding");
+    std::string transcript;
+    for (const EngineSegment& segment : diarized.finals) {
+        require(segment.speaker.starts_with("S"), "every segment carries a speaker label");
+        transcript += segment.text;
+    }
+    require(lower(transcript).find("country") != std::string::npos,
+            "the transcript survives diarization, got: " + transcript);
+}
+
 void verify_silence() {
     EngineOptions options;
     options.language = "en";
@@ -194,6 +219,7 @@ int main() {
     try {
         verify_jfk(jfk);
         verify_word_timestamps(jfk);
+        verify_speaker_labels(jfk);
         verify_silence();
         verify_duration_cap();
     } catch (const std::exception& error) {

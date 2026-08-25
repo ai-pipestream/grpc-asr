@@ -80,4 +80,23 @@ std::string_view family_name(MediaFamily family) {
     }
 }
 
+std::string_view family_mimetype(MediaFamily family) {
+    switch (family) {
+        case MediaFamily::kWav:
+            return "audio/wav";
+        case MediaFamily::kMp3:
+            return "audio/mpeg";
+        case MediaFamily::kFlac:
+            return "audio/flac";
+        case MediaFamily::kOgg:
+            return "audio/ogg";
+        case MediaFamily::kMp4:
+            return "video/mp4";
+        case MediaFamily::kMkv:
+            return "video/x-matroska";
+        default:
+            return "application/octet-stream";
+    }
+}
+
 }  // namespace asr::media

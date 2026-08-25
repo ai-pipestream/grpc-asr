@@ -33,9 +33,17 @@ struct EngineSegment {
     uint64_t start_ms = 0;
     uint64_t end_ms = 0;
     std::string text;
+    // Mean token log-probability. Meaningful only when token_count > 0; a
+    // segment that scored no token has no confidence to report, which is a
+    // different statement from a confident zero.
     float avg_logprob = 0.0f;
     uint32_t token_count = 0;
     std::vector<EngineWord> words;
+    // Stream-local speaker label ("S1", "S2", ...), empty unless
+    // diarization is on.
+    std::string speaker;
+    // True when the decoder predicted a speaker change after this segment.
+    bool speaker_turn_next = false;
 };
 
 // Aggregates for the TranscriptComplete trailer.
@@ -55,6 +63,10 @@ struct EngineOptions {
     std::string language;
     bool translate = false;
     bool word_timestamps = false;
+    // Ask the decoder for speaker turns and label segments by speaker. A
+    // model without speaker-turn training never predicts one, so every
+    // segment stays on the first speaker.
+    bool diarize = false;
     int threads = 4;
     // PCM window per whisper_full call; bounds resident PCM memory.
     size_t window_seconds = 480;

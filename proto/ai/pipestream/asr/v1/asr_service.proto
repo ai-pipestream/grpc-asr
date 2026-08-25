@@ -80,6 +80,17 @@ message TranscribeOptions {
   // projection every collector in the fleet offers, tagged with a
   // CollectorSource so downstream merges stay additive.
   bool emit_document = 7;
+
+  // When true, the decoder is asked to detect speaker turns and segments
+  // carry a speaker id. Off by default; a model without speaker-turn
+  // training never predicts a turn, so every segment stays on the first
+  // speaker.
+  bool diarize = 8;
+
+  // Original filename of the media, when the client knows one. Names the
+  // folded Document and its origin; empty means the server derives a name
+  // from the sniffed container.
+  string filename = 9;
 }
 
 // Whisper decoding task.
@@ -120,11 +131,12 @@ message TranscribeResponse {
     // The transcript folded into the Document data plane: one per stream,
     // emitted immediately before the complete trailer, only when
     // TranscribeOptions.emit_document was set. Final segments become text
-    // items whose sources carry the media time range (TrackSource) and the
-    // collector attribution (CollectorSource, collector "asr"); keyframes
-    // become picture items whose ImageRef.uri points back at the typed
-    // Keyframe event ("keyframe:<timestamp_ms>") instead of embedding PNG
-    // bytes, so the Document stays one bounded message.
+    // items located by time provenance (ProvenanceItem.time, one entry for
+    // the segment and one per word) and attributed to the collector
+    // (CollectorSource, collector "asr"); keyframes become picture items
+    // whose ImageRef.uri points back at the typed Keyframe event
+    // ("keyframe:<timestamp_ms>") instead of embedding PNG bytes, so the
+    // Document stays one bounded message.
     ai.pipestream.document.v1.Document document = 6;
   }
 }
@@ -160,8 +172,18 @@ message Segment {
   // Per-word timings, present only on final segments when
   // TranscribeOptions.word_timestamps was set.
   repeated Word words = 5;
-  // Mean log-probability of the segment's tokens; 0 when unknown.
-  float avg_logprob = 6;
+  // Mean log-probability of the segment's tokens. Absent when the segment
+  // decoded no scored token; a present 0 is a real score (a segment the
+  // decoder was certain of), never a stand-in for "unknown".
+  optional float avg_logprob = 6;
+  // Field 7 is held for the decoder's non-speech probability.
+  //
+  // True when the decoder predicted a speaker change at the end of this
+  // segment. Only ever true when TranscribeOptions.diarize was set.
+  bool speaker_turn_next = 8;
+  // Speaker attributed to this segment, as a stream-local label ("S1",
+  // "S2", ...). Empty when diarization is off.
+  string speaker_id = 9;
 }
 
 // A single word with its timing inside a segment.

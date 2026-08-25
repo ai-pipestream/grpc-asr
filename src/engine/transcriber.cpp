@@ -28,6 +28,9 @@ struct RunState {
     uint64_t window_base_ms = 0;
     // Global index of the current window's segment 0.
     uint32_t window_base_index = 0;
+    // Zero-based speaker of the current window's segment 0; advances by
+    // every speaker turn the finalized segments predicted.
+    uint32_t window_base_speaker = 0;
     // Set when the sink returns false; makes whisper abort mid-window.
     std::atomic<bool> abort{false};
 };
@@ -42,6 +45,22 @@ EngineSegment read_segment(RunState& run, whisper_state* state, int i) {
     segment.end_ms =
         run.window_base_ms + centisec_to_ms(whisper_full_get_segment_t1_from_state(state, i));
     segment.text = whisper_full_get_segment_text_from_state(state, i);
+
+    if (run.options->diarize) {
+        // Speakers are numbered, not identified: the decoder reports where
+        // one voice hands off to another, so the label is the running count
+        // of handoffs. Segments earlier in this window are re-read rather
+        // than remembered, which keeps a re-decoded window self-consistent.
+        uint32_t speaker = run.window_base_speaker;
+        for (int j = 0; j < i; j++) {
+            if (whisper_full_get_segment_speaker_turn_next_from_state(state, j)) {
+                speaker++;
+            }
+        }
+        segment.speaker = "S" + std::to_string(speaker + 1);
+        segment.speaker_turn_next =
+            whisper_full_get_segment_speaker_turn_next_from_state(state, i);
+    }
 
     const int n_tokens = whisper_full_n_tokens_from_state(state, i);
     const whisper_token eot = whisper_token_eot(run.ctx);
@@ -119,6 +138,7 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
     // as a prompt would let one hallucination poison the rest of the file.
     params.no_context = true;
     params.token_timestamps = options.word_timestamps;
+    params.tdrz_enable = options.diarize;
     params.new_segment_callback = on_new_segment;
     params.new_segment_callback_user_data = &run;
     params.abort_callback = on_abort;
@@ -198,16 +218,19 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
             finalize = 1;
         }
 
+        uint32_t window_turns = 0;
         for (int i = 0; i < finalize; i++) {
             EngineSegment segment = read_segment(run, state, i);
             result.tokens += segment.token_count;
             result.final_segments++;
+            window_turns += segment.speaker_turn_next ? 1 : 0;
             if (!sink(segment, /*is_final=*/true)) {
                 result.aborted = true;
                 return result;
             }
         }
         run.window_base_index += static_cast<uint32_t>(finalize);
+        run.window_base_speaker += window_turns;
 
         if (last_window) {
             break;
