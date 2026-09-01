@@ -1,13 +1,13 @@
 name: Publish Images
 
-# Builds the CUDA and CPU service images and pushes them to
-# docker.io/pipestreamai. Every push to main republishes :latest and
-# :latest-cpu; a manual dispatch with a version input also tags that
-# version. Docker Hub credentials come from the DOCKER_USER / DOCKER_TOKEN
-# org secrets.
+# Builds the CUDA, CPU, and OpenVINO service images and pushes them to
+# docker.io/pipestreamai. Every push to main republishes :latest,
+# :latest-cpu, and :latest-openvino; a manual dispatch with a version
+# input also tags that version. Docker Hub credentials come from the
+# DOCKER_USER / DOCKER_TOKEN org secrets.
 #
 # amd64-only: the CUDA family has no arm64 consumers, so no QEMU setup and
-# a single linux/amd64 platform for both builds.
+# a single linux/amd64 platform for all builds.
 on:
   push:
     branches: [main]
@@ -36,12 +36,15 @@ jobs:
         run: |
           cuda="docker.io/pipestreamai/grpc-asr:latest"
           cpu="docker.io/pipestreamai/grpc-asr:latest-cpu"
+          openvino="docker.io/pipestreamai/grpc-asr:latest-openvino"
           if [ -n "${{ inputs.version }}" ]; then
             cuda="$cuda,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}"
             cpu="$cpu,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}-cpu"
+            openvino="$openvino,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}-openvino"
           fi
           echo "cuda=$cuda" >> "$GITHUB_OUTPUT"
           echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
+          echo "openvino=$openvino" >> "$GITHUB_OUTPUT"
       - name: Build and push the CUDA service image
         uses: docker/build-push-action@v6
         with:
@@ -61,3 +64,13 @@ jobs:
           provenance: false
           sbom: false
           tags: ${{ steps.tags.outputs.cpu }}
+      - name: Build and push the OpenVINO service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.openvino
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.openvino }}
