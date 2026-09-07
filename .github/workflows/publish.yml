@@ -1,13 +1,43 @@
 name: Publish Images
 
-# Builds the CUDA, CPU, and OpenVINO service images and pushes them to
-# docker.io/pipestreamai. Every push to main republishes :latest,
-# :latest-cpu, and :latest-openvino; a manual dispatch with a version
-# input also tags that version. Docker Hub credentials come from the
-# DOCKER_USER / DOCKER_TOKEN org secrets.
+# Builds the three backend variants (the build stage runs the test suite),
+# boot-proofs each runtime image with scripts/smoke-test.sh, and only then
+# gives it a public name on docker.io/pipestreamai/grpc-asr. Three variants:
+# Dockerfile (CUDA, owns the plain :latest tag, linux/amd64 by nature),
+# Dockerfile.cpu (:latest-cpu, a linux/amd64 + linux/arm64 manifest list;
+# its ubuntu:26.04 runtime base is multi-arch, and the workflow does not
+# override GRPC_ASR_RUNTIME_IMAGE, which only the CUDA Dockerfile declares
+# anyway), Dockerfile.openvino (:latest-openvino, Intel, linux/amd64 by
+# nature).
 #
-# amd64-only: the CUDA family has no arm64 consumers, so no QEMU setup and
-# a single linux/amd64 platform for all builds.
+# When it runs and what it tags:
+#   push to main     republishes :latest, :latest-cpu, :latest-openvino
+#   workflow_dispatch
+#     version input  the same, plus :<version>, :<version>-cpu,
+#                    :<version>-openvino
+#
+# Build once, gate, then name. A multi-platform image cannot be loaded into
+# the docker daemon, so every leg is built once with provenance (mode=max)
+# and SBOM attestations and pushed BY DIGEST ONLY: no tag points at it, it
+# is invisible under any public name. The leg then pulls that digest back
+# and runs the smoke test on its own architecture; only a digest that
+# passed is recorded as an artifact. The `publish` job assembles the
+# recorded digests into the tagged manifest lists with `docker buildx
+# imagetools create` (scripts/publish-manifests.sh) and inspects the
+# result: the index must list exactly the platforms the run built and one
+# attestation manifest per platform, or the job fails. So the smoke gate
+# still runs before any tag exists, and the attestations on the published
+# image are the ones the build produced.
+#
+# The arm64 CPU leg builds natively on an org self-hosted linux/arm64
+# runner and needs one registered and online; if none is, the leg queues
+# and GitHub fails queued jobs after 24h, so merging this before the runner
+# exists stalls publishes. The CPU Dockerfile keys its buildx cache mounts
+# on ${TARGETARCH}, so the amd64 and arm64 legs never share a cache.
+#
+# Docker Hub credentials come from the DOCKER_USER / DOCKER_TOKEN org
+# secrets. This workflow pushes to Docker Hub only; it does not mirror to
+# the Forgejo registry.
 on:
   push:
     branches: [main]
@@ -18,59 +48,147 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
+env:
+  HUB_REPO: docker.io/pipestreamai/grpc-asr
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.variant }} ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cuda
+            dockerfile: Dockerfile
+            platform: linux/amd64
+            runner: ubuntu-latest
+            timeout: 300
+          - variant: cpu
+            dockerfile: Dockerfile.cpu
+            platform: linux/amd64
+            runner: ubuntu-latest
+            timeout: 300
+          - variant: cpu
+            dockerfile: Dockerfile.cpu
+            platform: linux/arm64
+            runner: [self-hosted, linux, arm64]
+            # whisper.cpp and gRPC build from source on the self-hosted
+            # runner; native Pi-class builds are slow.
+            timeout: 720
+          - variant: openvino
+            dockerfile: Dockerfile.openvino
+            platform: linux/amd64
+            runner: ubuntu-latest
+            timeout: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Log in to Docker Hub (docker.io)
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: docker.io
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
-      - name: Compute tags
-        id: tags
+      - name: Name the repository this leg pushes to by digest
+        id: names
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          cuda="docker.io/pipestreamai/grpc-asr:latest"
-          cpu="docker.io/pipestreamai/grpc-asr:latest-cpu"
-          openvino="docker.io/pipestreamai/grpc-asr:latest-openvino"
-          if [ -n "${{ inputs.version }}" ]; then
-            cuda="$cuda,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}"
-            cpu="$cpu,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}-cpu"
-            openvino="$openvino,docker.io/pipestreamai/grpc-asr:${{ inputs.version }}-openvino"
-          fi
-          echo "cuda=$cuda" >> "$GITHUB_OUTPUT"
-          echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
-          echo "openvino=$openvino" >> "$GITHUB_OUTPUT"
-      - name: Build and push the CUDA service image
-        uses: docker/build-push-action@v6
+          set -euo pipefail
+          echo "names=$HUB_REPO" >> "$GITHUB_OUTPUT"
+          echo "platform_pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+      - name: Build (runs the test suite in the build stage) and push by digest
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          sbom: false
-          tags: ${{ steps.tags.outputs.cuda }}
-      - name: Build and push the CPU service image
-        uses: docker/build-push-action@v6
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,"name=${{ steps.names.outputs.names }}",push-by-digest=true,name-canonical=true,push=true
+      - name: Boot-proof the pushed digest before it gets a name
+        # A build is not done until the artifact has started up for real:
+        # library closure plus boot-to-model-load, no GPU or models needed.
+        # The image under test is the exact digest that was pushed, pulled
+        # back from the registry, so what passes here is what gets tagged.
+        env:
+          IMAGE: ${{ env.HUB_REPO }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          ./scripts/smoke-test.sh "$IMAGE"
+      - name: Record the digest that passed
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - name: Upload the digest for the publish job
+        uses: actions/upload-artifact@v7
         with:
-          context: .
-          file: Dockerfile.cpu
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          sbom: false
-          tags: ${{ steps.tags.outputs.cpu }}
-      - name: Build and push the OpenVINO service image
-        uses: docker/build-push-action@v6
+          name: digest-${{ matrix.variant }}-${{ steps.names.outputs.platform_pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.variant }}
+    needs: build
+    # Runs even when a build leg failed, so one variant's failure does not
+    # hold the others back: a variant whose leg is missing has fewer
+    # digests than platforms and scripts/publish-manifests.sh refuses it.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cuda
+            suffix: ''
+            platforms: linux/amd64
+          - variant: cpu
+            suffix: -cpu
+            platforms: linux/amd64,linux/arm64
+          - variant: openvino
+            suffix: -openvino
+            platforms: linux/amd64
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the digests that passed their smoke gate
+        uses: actions/download-artifact@v8
         with:
-          context: .
-          file: Dockerfile.openvino
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          sbom: false
-          tags: ${{ steps.tags.outputs.openvino }}
+          path: ${{ runner.temp }}/digests
+          pattern: digest-${{ matrix.variant }}-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Log in to Docker Hub (docker.io)
+        uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Create the manifest lists and prove them
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+          PLATFORMS: ${{ matrix.platforms }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          digests=()
+          for file in "$RUNNER_TEMP"/digests/*; do
+            [ -e "$file" ] && digests+=("$(basename "$file")")
+          done
+          ./scripts/publish-manifests.sh --suffix "$SUFFIX" --version "$VERSION" \
+            --platforms "$PLATFORMS" --repo "$HUB_REPO" "${digests[@]}"
