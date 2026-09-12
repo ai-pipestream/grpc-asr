@@ -171,6 +171,11 @@ has no render-node access otherwise. The OpenVINO compile cache lives under
 Without `/dev/dri` or without the converted encoder files the server refuses
 to boot: OpenVINO encoder init fails loud at startup, never on the first RPC.
 
+Published tags: the CPU image (`:latest-cpu` and versioned `-cpu` tags) is a
+multi-arch manifest list, linux/amd64 plus linux/arm64 (each leg builds and
+boot-tests natively on a hosted runner of its own architecture). The CUDA
+and OpenVINO images are linux/amd64 only.
+
 ## Remotes
 
 Forgejo (`git.rokkon.com/ai-pipestream/grpc-asr`) is the source of truth;
