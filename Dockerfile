@@ -43,6 +43,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
 
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 
+# The server links libcuda.so.1, which nvidia-container-toolkit injects on
+# GPU hosts; a plain docker run has no driver library, so the loader stops
+# before main. The CUDA stub from the build stage, parked OFF the default
+# library path, lets scripts/smoke-test.sh boot-proof this image on a
+# GPU-less CI runner via LD_LIBRARY_PATH=/opt/cuda-stubs. Nothing loads it
+# otherwise: on GPU hosts the injected real driver wins because this
+# directory is never searched.
+COPY --from=build /usr/local/cuda/lib64/stubs/libcuda.so /opt/cuda-stubs/libcuda.so.1
+
 ENV GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
     GRPC_ASR_BACKEND=cuda \
     GRPC_ASR_MODELS_DIR=/models \

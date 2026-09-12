@@ -21,7 +21,18 @@
 # Nothing here needs a shell inside the image: the closure check asks the
 # dynamic loader itself (LD_TRACE_LOADED_OBJECTS is what ldd does under the
 # hood), so the checks pass on any base.
+#
+# The CUDA image links libcuda.so.1, which nvidia-container-toolkit injects
+# on GPU hosts and no CI runner has. The image parks the CUDA stub library
+# at /opt/cuda-stubs (off the default loader path; see Dockerfile), and
+# every docker run below points LD_LIBRARY_PATH there so the loader
+# resolves. The CPU and OpenVINO images have no such directory and ignore
+# the setting. The boot check forces GRPC_ASR_BACKEND=cpu so model
+# discovery is reached without a single CUDA call; the GPU path itself is
+# out of scope here, as the header says.
 set -euo pipefail
+
+stub_path=/opt/cuda-stubs
 
 usage() {
   echo "Usage: $0 IMAGE" >&2
@@ -31,7 +42,7 @@ usage() {
 image=$1
 
 echo "== smoke: library closure of the shipped server"
-trace=$(docker run --rm -e LD_TRACE_LOADED_OBJECTS=1 --entrypoint /usr/local/bin/grpc-asr-server "$image" 2>&1 || true)
+trace=$(docker run --rm -e LD_TRACE_LOADED_OBJECTS=1 -e LD_LIBRARY_PATH="$stub_path" --entrypoint /usr/local/bin/grpc-asr-server "$image" 2>&1 || true)
 if ! grep -q '=>' <<<"$trace"; then
   echo "the loader printed no dependency list for grpc-asr-server in $image:" >&2
   echo "$trace" >&2
@@ -52,8 +63,9 @@ fi
 
 echo "== smoke: server reaches model loading (expects its own no-models failure)"
 # /models is a tmpfs with no weights: ModelPool must stop the boot with its
-# own discovery failure, after the backend check, on every image variant.
-boot_output=$(docker run --rm --tmpfs /models "$image" 2>&1 || true)
+# own discovery failure on every image variant. The cpu backend keeps the
+# check hermetic on the CUDA image (discovery precedes any device use).
+boot_output=$(docker run --rm --tmpfs /models -e GRPC_ASR_BACKEND=cpu -e LD_LIBRARY_PATH="$stub_path" "$image" 2>&1 || true)
 echo "$boot_output"
 if grep -q "error while loading shared libraries" <<<"$boot_output"; then
   echo "the loader failed before main ran" >&2
