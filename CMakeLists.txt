@@ -163,6 +163,7 @@ if(BUILD_TESTING)
     audio-decoder-test
     document-fold-test
     model-discovery-test
+    window-cut-test
     transcriber-test
     video-demux-test
     asr-service-test)

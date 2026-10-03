@@ -58,6 +58,24 @@ inline std::string make_wav(double seconds, double frequency, uint32_t sample_ra
     return wav;
 }
 
+// Builds a 16 kHz mono 16-bit PCM WAV of low white noise from a fixed-seed
+// generator, so every run gets the same bytes. whisper's no-speech gate
+// decodes a window of it into no segment at all, which digital silence
+// does not do (it decodes into a "[BLANK_AUDIO]" segment).
+inline std::string make_hiss_wav(double seconds, double amplitude = 0.1) {
+    std::string wav = make_wav(seconds, 0.0);
+    uint32_t state = 12345;
+    for (size_t offset = 44; offset + 1 < wav.size(); offset += 2) {
+        state = state * 1664525u + 1013904223u;
+        const double unit = static_cast<double>(state >> 8) / 8388608.0 - 1.0;  // [-1, 1)
+        const auto sample =
+            static_cast<uint16_t>(static_cast<int16_t>(amplitude * unit * 32767.0));
+        wav[offset] = static_cast<char>(sample & 0xFF);
+        wav[offset + 1] = static_cast<char>(sample >> 8);
+    }
+    return wav;
+}
+
 // Bytes that sniff as mp3 (ID3v2 header) but hold no decodable frame —
 // the deterministic "truncated mp3".
 inline std::string make_truncated_mp3() {

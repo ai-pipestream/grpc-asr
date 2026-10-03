@@ -6,6 +6,7 @@
 #include <cstring>
 #include <vector>
 
+#include "engine/window_cut.h"
 #include "media/audio_decoder.h"
 #include "whisper.h"
 
@@ -206,20 +207,19 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
             }
         }
 
-        const int segments = whisper_full_n_segments_from_state(state);
         // Finalize everything the window edge could not have cut: every
-        // segment on the last window, all but the last otherwise.
-        int finalize = last_window ? segments : segments - 1;
-
-        // A single segment spanning the whole window means no progress
-        // point to resume from; finalize it and move on rather than
-        // re-decoding forever.
-        if (!last_window && segments == 1) {
-            finalize = 1;
-        }
+        // segment on the last window, all but the last otherwise, and
+        // nothing from a window that decoded no segment at all.
+        const int segments = whisper_full_n_segments_from_state(state);
+        const uint64_t window_ms = buffer.size() * 1000ULL / kModelSampleRate;
+        const uint64_t last_start_ms =
+            segments >= 2
+                ? centisec_to_ms(whisper_full_get_segment_t0_from_state(state, segments - 1))
+                : 0;
+        const WindowCut cut = cut_window(segments, last_window, window_ms, last_start_ms);
 
         uint32_t window_turns = 0;
-        for (int i = 0; i < finalize; i++) {
+        for (int i = 0; i < cut.finalize; i++) {
             EngineSegment segment = read_segment(run, state, i);
             result.tokens += segment.token_count;
             result.final_segments++;
@@ -229,7 +229,7 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
                 return result;
             }
         }
-        run.window_base_index += static_cast<uint32_t>(finalize);
+        run.window_base_index += static_cast<uint32_t>(cut.finalize);
         run.window_base_speaker += window_turns;
 
         if (last_window) {
@@ -237,21 +237,12 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
         }
 
         // Carry the tail: resume the next window at the first unfinalized
-        // sample (the cut segment's own start, or the window end when
-        // everything finalized).
-        uint64_t resume_ms;
-        if (finalize < segments) {
-            resume_ms = run.window_base_ms +
-                        centisec_to_ms(whisper_full_get_segment_t0_from_state(state, finalize));
-        } else {
-            resume_ms = run.window_base_ms +
-                        buffer.size() * 1000ULL / kModelSampleRate;
-        }
-        uint64_t keep_from_sample =
-            (resume_ms - run.window_base_ms) * kModelSampleRate / 1000ULL;
-        keep_from_sample = std::min<uint64_t>(keep_from_sample, buffer.size());
+        // sample (the held-back segment's own start, or the window end
+        // when everything finalized).
+        const uint64_t keep_from_sample =
+            std::min<uint64_t>(cut.resume_ms * kModelSampleRate / 1000ULL, buffer.size());
         buffer.erase(buffer.begin(), buffer.begin() + static_cast<size_t>(keep_from_sample));
-        run.window_base_ms = resume_ms;
+        run.window_base_ms += cut.resume_ms;
     }
 
     result.duration_ms = consumed_samples * 1000ULL / kModelSampleRate;

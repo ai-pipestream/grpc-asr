@@ -82,8 +82,10 @@ struct EngineOptions {
 // for revision). Segments wholly inside a window become final immediately
 // after the window; the window's last segment stays partial and is
 // re-decoded from its own start in the next window, so its final may
-// extend it. Finals replace partials by index. PCM behind a final is
-// dropped — memory never grows with media length.
+// extend it. A window that decoded no segment (silence, music) finalizes
+// nothing and the next one starts at its end; window_cut.h has the rule.
+// Finals replace partials by index. PCM behind a final is dropped, so
+// memory never grows with media length.
 class Transcriber {
   public:
     // Pulls up to max mono f32 samples at the model rate; 0 means EOF.

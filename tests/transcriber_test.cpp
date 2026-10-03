@@ -182,6 +182,81 @@ void verify_silence() {
     }
 }
 
+// Decodes a whole media file to mono f32 at the model rate.
+std::vector<float> decode_pcm(const std::string& media) {
+    asr::media::ByteStream stream;
+    stream.append(media.data(), media.size());
+    stream.complete();
+    AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+    std::vector<float> pcm;
+    std::vector<float> chunk(16000);
+    while (size_t got = decoder.read(chunk.data(), chunk.size())) {
+        pcm.insert(pcm.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(got));
+    }
+    return pcm;
+}
+
+void verify_empty_windows_before_speech(const std::string& jfk) {
+    // 25 s of low hiss, then the spoken fixture, through 10 s windows.
+    // whisper's no-speech gate decodes a speech-free window like the
+    // first two into no segment at all (see make_hiss_wav). Such a window
+    // used to finalize segment -1, stepping the index back and reading
+    // whisper's segment array out of bounds for the resume point, so
+    // everything after it came out misnumbered and mistimed.
+    const std::vector<float> hiss = decode_pcm(make_hiss_wav(25.0));
+    const std::vector<float> speech = decode_pcm(jfk);
+    const size_t lead_in = hiss.size();
+    const size_t total = lead_in + speech.size();
+    const uint64_t total_ms = total * 1000ULL / asr::media::kModelSampleRate;
+    EngineOptions options;
+    options.language = "en";
+    options.window_seconds = 10;
+    std::vector<EngineSegment> finals;
+    size_t position = 0;
+    const EngineResult result = Transcriber::run(
+        g_ctx, g_state, options,
+        [&](float* out, size_t max_samples) {
+            const size_t count = std::min(max_samples, total - position);
+            for (size_t i = 0; i < count; i++, position++) {
+                out[i] = position < lead_in ? hiss[position] : speech[position - lead_in];
+            }
+            return count;
+        },
+        [&](const EngineSegment& segment, bool is_final) {
+            if (is_final) {
+                finals.push_back(segment);
+            }
+            return true;
+        });
+
+    std::string transcript;
+    uint64_t last_start = 0;
+    for (size_t i = 0; i < finals.size(); i++) {
+        const EngineSegment& segment = finals[i];
+        transcript += segment.text;
+        require(segment.index == i, "final indexes stay dense from 0 across empty windows, got " +
+                                        std::to_string(segment.index) + " at " +
+                                        std::to_string(i));
+        require(segment.start_ms >= last_start && segment.end_ms <= total_ms + 1000,
+                "finals stay ordered and inside the media, got " +
+                    std::to_string(segment.start_ms) + ".." + std::to_string(segment.end_ms));
+        last_start = segment.start_ms;
+        // Nothing was spoken in the first two windows; whisper may time a
+        // window's first words from the window start, so the bound is the
+        // first window holding speech. Bracketed tags ("[BLANK_AUDIO]")
+        // are whisper's non-speech markers, not words.
+        const size_t first = segment.text.find_first_not_of(' ');
+        const bool spoken = first != std::string::npos && segment.text[first] != '[' &&
+                            segment.text[first] != '(';
+        require(!spoken || segment.start_ms >= 20000,
+                "speech is timed after the empty windows, got " + std::to_string(segment.start_ms));
+    }
+    require(lower(transcript).find("country") != std::string::npos,
+            "the speech after the empty windows is transcribed, got: " + transcript);
+    require(result.final_segments == finals.size(), "trailer count matches finals");
+    require(result.duration_ms + 100 >= total_ms, "duration covers the lead-in too");
+}
+
 void verify_duration_cap() {
     EngineOptions options;
     options.language = "en";
@@ -221,6 +296,7 @@ int main() {
         verify_word_timestamps(jfk);
         verify_speaker_labels(jfk);
         verify_silence();
+        verify_empty_windows_before_speech(jfk);
         verify_duration_cap();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
