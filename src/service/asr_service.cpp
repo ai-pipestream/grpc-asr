@@ -242,26 +242,40 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
 
             // Keyframes stream from their own ffmpeg child concurrently
             // with transcription; the LockedWriter interleaves the two.
-            std::thread keyframe_thread;
+            // Leaving this block any way but the joins below (an
+            // exception from the audio child or the decoder included)
+            // destroys the jthread, which asks the extraction to stop and
+            // joins it: a running std::thread there would call
+            // std::terminate and take every other stream down with this
+            // one. Everything the thread touches is declared before it.
             std::exception_ptr keyframe_error;
+            std::jthread keyframe_thread;
             if (options.emit_keyframes() && probe.has_video) {
                 uint32_t interval =
                     options.keyframe_interval_seconds() != 0
                         ? options.keyframe_interval_seconds()
                         : static_cast<uint32_t>(config_.keyframe_interval_seconds);
-                keyframe_thread = std::thread([&, interval] {
+                keyframe_thread = std::jthread([&, interval](std::stop_token keyframe_stop) {
                     try {
                         demux.extract_keyframes(
                             interval, [&](uint64_t timestamp_ms, uint32_t width, uint32_t height,
                                           std::string png) {
+                                if (keyframe_stop.stop_requested()) {
+                                    return false;
+                                }
                                 asrv1::TranscribeResponse response;
                                 asrv1::Keyframe* frame = response.mutable_keyframe();
                                 frame->set_timestamp_ms(timestamp_ms);
                                 frame->set_width(width);
                                 frame->set_height(height);
                                 frame->set_png(std::move(png));
-                                writer.write(response);
+                                // A failed write means the client is gone:
+                                // stop decoding stills nobody will read.
+                                if (!writer.write(response)) {
+                                    return false;
+                                }
                                 keyframe_count++;
+                                return true;
                             });
                     } catch (...) {
                         keyframe_error = std::current_exception();
@@ -270,24 +284,24 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             }
 
             demux.open_audio();
-            try {
-                result = engine::Transcriber::run(
-                    lease.context(), lease.state(), engine_options,
-                    [&](float* out, size_t max_samples) {
-                        return demux.read_audio(out, max_samples);
-                    },
-                    segment_sink);
-            } catch (...) {
-                if (keyframe_thread.joinable()) {
-                    keyframe_thread.join();
-                }
-                throw;
+            result = engine::Transcriber::run(
+                lease.context(), lease.state(), engine_options,
+                [&](float* out, size_t max_samples) { return demux.read_audio(out, max_samples); },
+                segment_sink);
+            if (result.aborted) {
+                // The transcription stopped reading mid-stream, so the
+                // audio child is blocked on its full pipe: kill it rather
+                // than judge the media by the exit status of a child that
+                // was cut off, and stop the stills with it.
+                demux.cancel_audio();
+                keyframe_thread.request_stop();
+            } else {
+                demux.close_audio();
             }
-            demux.close_audio();
             if (keyframe_thread.joinable()) {
                 keyframe_thread.join();
             }
-            if (keyframe_error != nullptr) {
+            if (!result.aborted && keyframe_error != nullptr) {
                 std::rethrow_exception(keyframe_error);
             }
         }

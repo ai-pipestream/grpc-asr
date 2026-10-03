@@ -372,9 +372,14 @@ void VideoDemux::close_audio() {
     }
 }
 
+void VideoDemux::cancel_audio() {
+    // ToolProcess's destructor closes the pipes, then kills and reaps.
+    impl_->audio.reset();
+}
+
 void VideoDemux::extract_keyframes(
     uint32_t interval_seconds,
-    const std::function<void(uint64_t, uint32_t, uint32_t, std::string)>& sink) {
+    const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink) {
     // fps=1/N picks the frame nearest each N-second grid point starting at
     // zero, so frame n sits at n*N seconds of media time.
     ToolProcess tool(
@@ -389,11 +394,12 @@ void VideoDemux::extract_keyframes(
     uint8_t chunk[64 * 1024];
 
     // Walk PNG chunks to find each image's end; everything up to and
-    // including IEND+CRC is one still.
+    // including IEND+CRC is one still. Returns false once the sink asked
+    // to stop.
     auto emit_complete = [&]() {
         while (true) {
             if (buffer.size() < 8) {
-                return;
+                return true;
             }
             if (!buffer.starts_with(kSignature)) {
                 throw DecodeError("keyframe stream lost PNG framing");
@@ -401,14 +407,14 @@ void VideoDemux::extract_keyframes(
             size_t offset = 8;
             while (true) {
                 if (buffer.size() < offset + 8) {
-                    return;  // need more bytes for the next chunk header
+                    return true;  // need more bytes for the next chunk header
                 }
                 uint32_t length =
                     read_be32(reinterpret_cast<const uint8_t*>(buffer.data()) + offset);
                 bool is_end = buffer.compare(offset + 4, 4, "IEND") == 0;
                 size_t chunk_total = 8ULL + length + 4ULL;  // header + data + crc
                 if (buffer.size() < offset + chunk_total) {
-                    return;
+                    return true;
                 }
                 offset += chunk_total;
                 if (is_end) {
@@ -417,7 +423,10 @@ void VideoDemux::extract_keyframes(
                     uint32_t width = 0;
                     uint32_t height = 0;
                     png_dimensions(png, &width, &height);
-                    sink(frame_index * interval_seconds * 1000ULL, width, height, std::move(png));
+                    if (!sink(frame_index * interval_seconds * 1000ULL, width, height,
+                              std::move(png))) {
+                        return false;
+                    }
                     frame_index++;
                     break;  // scan the buffer again from the top
                 }
@@ -431,7 +440,9 @@ void VideoDemux::extract_keyframes(
             break;
         }
         buffer.append(reinterpret_cast<char*>(chunk), n);
-        emit_complete();
+        if (!emit_complete()) {
+            return;  // the sink stopped us; ~ToolProcess kills and reaps the child
+        }
     }
     int code = tool.wait_exit();
     if (code == kExecFailed) {

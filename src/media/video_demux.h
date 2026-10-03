@@ -64,13 +64,20 @@ class VideoDemux {
     void open_audio();
     size_t read_audio(float* out, size_t max_samples);
     void close_audio();
+    // Kills and reaps the audio child without reading its exit status.
+    // For a reader that stopped early: the child was cut off mid-stream
+    // (blocked on the full pipe, then killed), so its status says nothing
+    // about the media. No-op when no child is open.
+    void cancel_audio();
 
     // Extracts one PNG still roughly every interval_seconds, invoking the
     // sink per frame as it is parsed from the child's output stream. The
-    // timestamp is the frame's position on the sampling grid.
+    // timestamp is the frame's position on the sampling grid. A sink that
+    // returns false stops the extraction: the child is killed and the call
+    // returns normally.
     void extract_keyframes(
         uint32_t interval_seconds,
-        const std::function<void(uint64_t timestamp_ms, uint32_t width, uint32_t height,
+        const std::function<bool(uint64_t timestamp_ms, uint32_t width, uint32_t height,
                                  std::string png)>& sink);
 
   private:

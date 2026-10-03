@@ -13,8 +13,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <print>
 #include <thread>
@@ -149,6 +151,60 @@ StreamResult transcribe(const std::shared_ptr<grpc::Channel>& channel,
     }
     result.status = stream->Finish();
     return result;
+}
+
+// Uploads the whole media, reads events until cancel_on says the server is
+// mid-transcription, waits settle, and cancels the call from the client
+// side. Returns the status the client saw.
+grpc::Status transcribe_and_cancel(
+    const std::shared_ptr<grpc::Channel>& channel, const asrv1::TranscribeOptions& options,
+    const std::string& media,
+    const std::function<bool(const asrv1::TranscribeResponse&)>& cancel_on,
+    std::chrono::milliseconds settle = std::chrono::milliseconds(0)) {
+    auto stub = asrv1::AsrService::NewStub(channel);
+    grpc::ClientContext context;
+    auto stream = stub->Transcribe(&context);
+    asrv1::TranscribeRequest request;
+    *request.mutable_options() = options;
+    stream->Write(request);
+    for (size_t offset = 0; offset < media.size(); offset += kChunk) {
+        request.Clear();
+        request.mutable_chunk()->set_data(
+            media.substr(offset, std::min(kChunk, media.size() - offset)));
+        if (!stream->Write(request)) {
+            break;
+        }
+    }
+    stream->WritesDone();
+    asrv1::TranscribeResponse response;
+    while (stream->Read(&response)) {
+        if (cancel_on(response)) {
+            break;
+        }
+    }
+    std::this_thread::sleep_for(settle);
+    context.TryCancel();
+    while (stream->Read(&response)) {
+    }
+    return stream->Finish();
+}
+
+// Streams whose handler has returned, whatever the status. The cases run
+// one stream at a time, so this moves by one per finished stream.
+long handlers_finished(const asr::AsrServiceImpl& service) {
+    return service.transcribed.load() + service.rejected.load() + service.failed.load();
+}
+
+// Polls until condition holds; false when limit passed first.
+bool eventually(const std::function<bool()>& condition, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!condition()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return true;
 }
 
 asrv1::TranscribeOptions options_for(const std::string& model) {
@@ -422,6 +478,37 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
             "video without an audio track is INVALID_ARGUMENT");
 }
 
+void verify_cancel_video(const std::shared_ptr<grpc::Channel>& channel,
+                         const asr::AsrServiceImpl& service, const std::string& jfk_path,
+                         const std::string& jfk) {
+    // Five minutes of the spoken fixture, looped under a moving picture, so
+    // both ffmpeg children are still busy when the client cancels. That
+    // path used to throw from the audio child's exit status past a running
+    // keyframe thread: std::terminate, and every stream on the server gone.
+    std::string media = generate_media(
+        "-f lavfi -i testsrc2=duration=300:size=160x120:rate=5 -stream_loop -1 -i " +
+            jfk_path + " -t 300 -pix_fmt yuv420p",
+        ".mp4");
+    asrv1::TranscribeOptions options = options_for("tiny.en");
+    options.set_emit_keyframes(true);
+    options.set_keyframe_interval_seconds(1);
+
+    const long finished = handlers_finished(service);
+    grpc::Status status = transcribe_and_cancel(
+        channel, options, media,
+        [](const asrv1::TranscribeResponse& response) { return response.has_final_segment(); });
+    require(status.error_code() == grpc::StatusCode::CANCELLED,
+            "the client sees its own cancel, got " + status.error_message());
+    require(eventually([&] { return handlers_finished(service) > finished; },
+                       std::chrono::seconds(30)),
+            "the cancelled video stream ends long before its five minutes are transcribed");
+
+    // The single model state came back: the next stream runs normally.
+    StreamResult next = transcribe(channel, options_for("tiny.en"), jfk);
+    require(next.status.ok() && lower(final_text(next)).find("country") != std::string::npos,
+            "the server serves the next stream after the cancel: " + next.status.error_message());
+}
+
 void verify_service_info(const std::shared_ptr<grpc::Channel>& channel) {
     auto stub = asrv1::AsrService::NewStub(channel);
     grpc::ClientContext context;
@@ -511,6 +598,7 @@ int main() {
         verify_service_info(channel);
         if (have_ffmpeg()) {
             verify_video(channel, sample);
+            verify_cancel_video(channel, service, sample, jfk);
         } else {
             std::println("note: ffmpeg not on PATH; video cases not run");
         }

@@ -5,8 +5,10 @@
 
 #include "media/video_demux.h"
 
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <print>
@@ -106,10 +108,41 @@ void verify_keyframes(const std::string& media) {
         require(count == 0 || timestamp_ms > last_ts, "keyframe timestamps advance");
         last_ts = timestamp_ms;
         count++;
+        return true;
     });
     // 8 seconds at one frame per 2 seconds: allow the fencepost.
     require(count >= 3 && count <= 5,
             "keyframe count matches the interval, got " + std::to_string(count));
+}
+
+// No ffmpeg child may outlive the call that started it: once every child
+// was reaped, waitpid has nobody left to report.
+bool no_children_left() {
+    int status = 0;
+    return ::waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD;
+}
+
+void verify_keyframes_stop(const std::string& media) {
+    VideoDemux demux = open(media);
+    size_t count = 0;
+    demux.extract_keyframes(1, [&](uint64_t, uint32_t, uint32_t, std::string) {
+        count++;
+        return false;  // the reader went away after the first still
+    });
+    require(count == 1, "a sink that returns false is sent no further stills");
+    require(no_children_left(), "the stopped keyframe child was killed and reaped");
+}
+
+void verify_audio_cancel(const std::string& media) {
+    VideoDemux demux = open(media);
+    demux.open_audio();
+    std::vector<float> pcm(1024);
+    require(demux.read_audio(pcm.data(), pcm.size()) > 0, "the audio child streams PCM");
+    // A reader that stops early leaves the child blocked on its pipe;
+    // cancelling must neither wait it out nor judge its exit status.
+    demux.cancel_audio();
+    require(no_children_left(), "the cancelled audio child was killed and reaped");
+    demux.close_audio();  // nothing left to close: a no-op, not an error
 }
 
 void verify_video_without_audio() {
@@ -156,6 +189,8 @@ int main() {
         verify_probe(media);
         verify_audio_extraction(media);
         verify_keyframes(media);
+        verify_keyframes_stop(media);
+        verify_audio_cancel(media);
         verify_video_without_audio();
         verify_garbage_rejected();
         verify_png_dimensions();
