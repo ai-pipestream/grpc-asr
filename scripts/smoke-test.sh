@@ -17,8 +17,11 @@
 #
 # There is deliberately no --full mode: the image ships no client binary
 # and a real transcription needs model weights, which CI contexts do not
-# carry (the in-build ctest battery already covers the transcribe path on
-# every leg, natively, inside the build).
+# carry. The in-build ctest battery does not transcribe in CI either:
+# transcriber-test and asr-service-test need models/ggml-tiny.en.bin in the
+# build context and skip (exit 77) without it, which ctest counts as a
+# pass, so no CI leg runs a transcription. Only a local image build with
+# models/ in its context (see .dockerignore) exercises that path.
 #
 # Nothing here needs a shell inside the image: the closure check asks the
 # dynamic loader itself (LD_TRACE_LOADED_OBJECTS is what ldd does under the
