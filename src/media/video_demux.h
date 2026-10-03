@@ -38,9 +38,10 @@ struct ProbeInfo {
 };
 
 // Demuxes a video container held in memory through ffmpeg without ever
-// touching a filesystem: the encoded bytes live in a memfd (anonymous RAM
-// file, seekable, so mp4 trailing-moov layouts work), and every child
-// reads it via /dev/fd. PCM and PNG output stream back through pipes with
+// touching a filesystem: the encoded bytes live in a sealed memfd
+// (anonymous RAM file, seekable, so mp4 trailing-moov layouts work), and
+// every child reads it via /dev/fd. The memfd and the children's pipes are
+// close-on-exec, so concurrent streams never inherit each other's. PCM and PNG output stream back through pipes with
 // backpressure, so memory stays bounded no matter the media length.
 //
 // Every child watches the stop token its call was given: a stop request
@@ -49,9 +50,10 @@ struct ProbeInfo {
 // streaming or silent.
 class VideoDemux {
   public:
-    // Copies nothing to disk: creates a memfd and writes the media bytes
-    // into it. inactivity_timeout bounds how long a child may go without
-    // producing output before it is killed.
+    // Copies nothing to disk: creates a memfd, writes the media bytes into
+    // it, and seals it against writes and resizes. inactivity_timeout
+    // bounds how long a child may go without producing output before it is
+    // killed.
     VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path,
                std::string ffprobe_path, std::chrono::milliseconds inactivity_timeout);
     ~VideoDemux();

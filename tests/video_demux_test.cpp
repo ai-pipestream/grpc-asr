@@ -5,16 +5,20 @@
 
 #include "media/video_demux.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <print>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -150,6 +154,104 @@ void verify_audio_cancel(const std::string& media) {
     demux.close_audio();  // nothing left to close: a no-op, not an error
 }
 
+// A descriptor of this process whose /proc link starts with a prefix.
+struct Descriptor {
+    int fd;
+    std::string target;
+    bool cloexec;
+};
+
+// Descriptors already in `before` (the test's own stdout and stderr are
+// pipes too) are left out.
+std::vector<Descriptor> open_descriptors(std::string_view prefix,
+                                         const std::vector<Descriptor>& before = {}) {
+    std::vector<Descriptor> found;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+        std::error_code error;
+        const std::string target = std::filesystem::read_symlink(entry.path(), error).string();
+        if (error || !target.starts_with(prefix)) {
+            continue;
+        }
+        const int fd = std::stoi(entry.path().filename().string());
+        const int flags = ::fcntl(fd, F_GETFD);
+        const bool known = std::ranges::any_of(
+            before, [&](const Descriptor& old) { return old.fd == fd && old.target == target; });
+        if (flags >= 0 && !known) {
+            found.push_back({fd, target, (flags & FD_CLOEXEC) != 0});
+        }
+    }
+    return found;
+}
+
+// What a child forked right now inherits, as /proc lists its descriptors.
+std::string inherited_by_a_child() {
+    std::string listing;
+    FILE* child = ::popen("ls -l /proc/self/fd/ 2>&1", "r");
+    require(child != nullptr, "listing child started");
+    char buf[4096];
+    while (size_t n = std::fread(buf, 1, sizeof buf, child)) {
+        listing.append(buf, n);
+    }
+    ::pclose(child);
+    return listing;
+}
+
+void verify_descriptors_stay_private(const std::string& media) {
+    // Another stream's fork must inherit none of this stream's pipe ends
+    // or its memfd: a leaked pipe write end kept the reader here from ever
+    // seeing end of file until the unrelated child exited (the read then
+    // waited out the inactivity timeout and failed INTERNAL), and a leaked
+    // memfd pinned this stream's media in memory.
+    const std::vector<Descriptor> own_pipes = open_descriptors("pipe:");
+    VideoDemux demux = open(media);
+    demux.open_audio();
+    const std::vector<Descriptor> memfds = open_descriptors("/memfd:grpc-asr-media");
+    const std::vector<Descriptor> pipes = open_descriptors("pipe:", own_pipes);
+    require(memfds.size() == 1, "the demux holds one media memfd");
+    require(pipes.size() >= 2, "the audio child's stdout and stderr pipes are open");
+    const std::string listing = inherited_by_a_child();
+    for (const Descriptor& descriptor : memfds) {
+        require(descriptor.cloexec, "the media memfd is close-on-exec");
+        require(listing.find("grpc-asr-media") == std::string::npos,
+                "an unrelated child inherits no media memfd");
+    }
+    for (const Descriptor& descriptor : pipes) {
+        require(descriptor.cloexec, descriptor.target + " is close-on-exec");
+        require(listing.find(descriptor.target) == std::string::npos,
+                "an unrelated child inherits no " + descriptor.target);
+    }
+
+    // Sealed, as the docs say: the bytes the children read cannot change.
+    const int seals = ::fcntl(memfds.front().fd, F_GET_SEALS);
+    const int wanted = F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+    require(seals >= 0 && (seals & wanted) == wanted, "the media memfd is sealed");
+    require(::pwrite(memfds.front().fd, "x", 1, 0) < 0, "a write to the sealed media fails");
+    demux.cancel_audio();
+}
+
+void verify_media_on_fd_3(const std::string& media) {
+    // Children read the media on fd 3. When the memfd was itself given fd 3
+    // (the lowest free descriptor), dup2(3, 3) is a no-op that leaves
+    // close-on-exec set, and exec would close the descriptor the tool has
+    // to read; the child moves its descriptors clear of 1-3 first.
+    int parked = -1;
+    if (::fcntl(3, F_GETFD) >= 0) {
+        parked = ::fcntl(3, F_DUPFD_CLOEXEC, 10);
+        ::close(3);
+    }
+    {
+        VideoDemux demux = open(media);
+        const std::vector<Descriptor> memfds = open_descriptors("/memfd:grpc-asr-media");
+        require(memfds.size() == 1 && memfds.front().fd == 3, "the media memfd landed on fd 3");
+        const asr::media::ProbeInfo info = demux.probe();
+        require(info.has_audio && info.has_video, "the tool still reads the media on fd 3");
+    }
+    if (parked >= 0) {
+        ::dup2(parked, 3);
+        ::close(parked);
+    }
+}
+
 // A stand-in tool that never writes a byte, like ffmpeg seeking or
 // decoding toward its next still on a long video.
 std::string write_silent_tool() {
@@ -273,6 +375,8 @@ int main() {
         verify_stop_reaches_a_silent_child(media);
         verify_stop_before_start(media);
         verify_stop_mid_audio(media);
+        verify_descriptors_stay_private(media);
+        verify_media_on_fd_3(media);
         verify_video_without_audio();
         verify_garbage_rejected();
         verify_png_dimensions();

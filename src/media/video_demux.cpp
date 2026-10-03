@@ -25,8 +25,9 @@ namespace {
 // fresh, independently-seekable file through /dev/fd.
 constexpr int kMediaFd = 3;
 constexpr char kMediaPath[] = "/dev/fd/3";
-// Sentinel exit code the child uses when execvp itself fails, so a missing
-// binary is distinguishable from ffmpeg rejecting the media.
+// Sentinel exit code the child uses when execvp (or the descriptor setup
+// before it) fails, so a missing binary is distinguishable from ffmpeg
+// rejecting the media.
 constexpr int kExecFailed = 127;
 constexpr std::chrono::milliseconds kReapGrace{2000};
 // How often a waiting read re-checks its stop token: the bound on how long
@@ -46,31 +47,56 @@ class ToolProcess {
         if (stop_.stop_requested()) {
             throw Cancelled(tool_ + " not started: the stream is gone");
         }
+        // argv is built before fork: the child of a multithreaded process
+        // may only make async-signal-safe calls, so it cannot allocate.
+        std::vector<char*> args;
+        args.reserve(argv.size() + 1);
+        for (const std::string& arg : argv) {
+            args.push_back(const_cast<char*>(arg.c_str()));
+        }
+        args.push_back(nullptr);
+        // Close-on-exec, like the memfd: a child another stream forks
+        // concurrently must not inherit these ends, since an inherited
+        // write end keeps this reader from ever seeing end of file.
         int out_pipe[2];
         int err_pipe[2];
-        if (::pipe(out_pipe) != 0 || ::pipe(err_pipe) != 0) {
+        if (::pipe2(out_pipe, O_CLOEXEC) != 0) {
+            throw ToolError("pipe creation failed");
+        }
+        if (::pipe2(err_pipe, O_CLOEXEC) != 0) {
+            ::close(out_pipe[0]);
+            ::close(out_pipe[1]);
             throw ToolError("pipe creation failed");
         }
         pid_ = ::fork();
         if (pid_ < 0) {
+            for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
+                ::close(fd);
+            }
             throw ToolError("fork failed");
         }
         if (pid_ == 0) {
-            // dup2 clears CLOEXEC on the duplicate, which is exactly what
-            // lets the exec'd tool see the memfd.
-            ::dup2(media_fd, kMediaFd);
-            ::dup2(out_pipe[1], STDOUT_FILENO);
-            ::dup2(err_pipe[1], STDERR_FILENO);
-            ::close(out_pipe[0]);
-            ::close(out_pipe[1]);
-            ::close(err_pipe[0]);
-            ::close(err_pipe[1]);
-            std::vector<char*> args;
-            args.reserve(argv.size() + 1);
-            for (const std::string& arg : argv) {
-                args.push_back(const_cast<char*>(arg.c_str()));
+            // First lift every source above the target slots, so no dup2
+            // below overwrites one still waiting to be copied: the memfd
+            // or a pipe end sits on 1, 2 or 3 whenever those were free.
+            // Then dup2 clears close-on-exec on the copies, so the tool
+            // keeps exactly its stdout, its stderr, and the media on fd 3;
+            // everything else closes at exec.
+            int media = media_fd;
+            int out = out_pipe[1];
+            int err = err_pipe[1];
+            for (int* fd : {&media, &out, &err}) {
+                if (*fd <= kMediaFd) {
+                    *fd = ::fcntl(*fd, F_DUPFD_CLOEXEC, kMediaFd + 1);
+                    if (*fd < 0) {
+                        ::_exit(kExecFailed);
+                    }
+                }
             }
-            args.push_back(nullptr);
+            if (::dup2(media, kMediaFd) < 0 || ::dup2(out, STDOUT_FILENO) < 0 ||
+                ::dup2(err, STDERR_FILENO) < 0) {
+                ::_exit(kExecFailed);
+            }
             ::execvp(args[0], args.data());
             ::_exit(kExecFailed);
         }
@@ -290,7 +316,10 @@ VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path
     impl_->ffmpeg = std::move(ffmpeg_path);
     impl_->ffprobe = std::move(ffprobe_path);
     impl_->inactivity_timeout = inactivity_timeout;
-    impl_->media_fd = static_cast<int>(::memfd_create("grpc-asr-media", 0));
+    // Close-on-exec, so the children of other streams never inherit (and
+    // pin) this media; each tool gets its own copy on fd 3.
+    impl_->media_fd = static_cast<int>(
+        ::memfd_create("grpc-asr-media", MFD_CLOEXEC | MFD_ALLOW_SEALING));
     if (impl_->media_fd < 0) {
         throw ToolError("memfd_create failed");
     }
@@ -301,6 +330,11 @@ VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path
             throw ToolError("writing media to memfd failed");
         }
         written += static_cast<size_t>(n);
+    }
+    // Seal it: the bytes every child reads can no longer change or move.
+    if (::fcntl(impl_->media_fd, F_ADD_SEALS,
+                F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL) != 0) {
+        throw ToolError(std::string("sealing the media memfd failed: ") + std::strerror(errno));
     }
 }
 
