@@ -653,6 +653,29 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
             "video without an audio track is INVALID_ARGUMENT");
 }
 
+void verify_ogg(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk_path) {
+    // Ogg was sniffed as in-process audio, but miniaudio decodes neither
+    // Vorbis nor Opus here, so every .ogg/.opus upload failed
+    // INVALID_ARGUMENT "cannot decode media". ffmpeg decodes both.
+    for (const char* codec : {"libopus", "libvorbis"}) {
+        const std::string ogg =
+            generate_media("-i " + jfk_path + " -c:a " + std::string(codec), ".ogg");
+        asrv1::TranscribeOptions options = options_for("tiny.en");
+        options.set_emit_document(true);
+        StreamResult result = transcribe(channel, options, ogg);
+        const std::string expected = std::string(codec).substr(3);  // opus, vorbis
+        require(result.status.ok(),
+                expected + " in ogg transcribes OK: " + result.status.error_message());
+        require(result.media_info.audio_codec() == expected && !result.media_info.has_video(),
+                "MediaInfo names the " + expected + " codec, got " +
+                    result.media_info.audio_codec());
+        require(lower(final_text(result)).find("country") != std::string::npos,
+                expected + " transcript contains 'country', got: " + final_text(result));
+        require(result.document.origin().mimetype() == "audio/ogg",
+                "the document origin keeps the sniffed ogg mimetype");
+    }
+}
+
 void verify_cancel_video(const std::shared_ptr<grpc::Channel>& channel,
                          const asr::AsrServiceImpl& service, const std::string& jfk_path,
                          const std::string& jfk) {
@@ -784,6 +807,7 @@ int main() {
         verify_service_info(channel);
         if (have_ffmpeg()) {
             verify_video(channel, sample);
+            verify_ogg(channel, sample);
             verify_cancel_video(channel, service, sample, jfk);
         } else {
             std::println("note: ffmpeg not on PATH; video cases not run");

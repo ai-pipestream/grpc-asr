@@ -211,7 +211,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             return writer.write(response);
         };
 
-        if (media::is_audio_family(family)) {
+        if (media::decodes_in_process(family)) {
             // Live path: the decoder pulls from the growing upload, so
             // MediaInfo and the first segments go out before half-close.
             media::AudioDecoder decoder(upload, family == media::MediaFamily::kWav);
@@ -235,10 +235,12 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 [&](float* out, size_t max_samples) { return decoder.read(out, max_samples); },
                 segment_sink, stop);
         } else {
-            // Video path: a classic mp4's moov index can trail the file,
-            // so ffmpeg needs the complete bytes in the (seekable) memfd.
-            // Streamable containers (mpeg-ts, fragmented mp4) via a pipe
-            // are the designed follow-up; see docs/design.md.
+            // ffmpeg path, for the video containers and for ogg (miniaudio
+            // decodes neither Vorbis nor Opus here). A classic mp4's moov
+            // index can trail the file, so ffmpeg needs the complete bytes
+            // in the (seekable) memfd. Streamable containers (mpeg-ts,
+            // fragmented mp4) via a pipe are the designed follow-up; see
+            // docs/design.md.
             upload.wait_complete();
             if (gone()) {
                 return {grpc::StatusCode::CANCELLED, "upload aborted"};
@@ -251,7 +253,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             media::ProbeInfo probe = demux.probe(stop);
             if (!probe.has_audio) {
                 return {grpc::StatusCode::INVALID_ARGUMENT,
-                        "video has no audio track to transcribe"};
+                        "the media has no audio track to transcribe"};
             }
             if (probe.duration_ms > max_duration_ms) {
                 return {grpc::StatusCode::RESOURCE_EXHAUSTED,

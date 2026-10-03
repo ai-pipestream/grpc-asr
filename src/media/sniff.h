@@ -7,7 +7,8 @@
 namespace asr::media {
 
 // Container family detected from magic bytes. Drives the decode path:
-// audio families decode in-process, video families demux via ffmpeg.
+// wav, mp3 and flac decode in-process, everything else demuxes via
+// ffmpeg.
 enum class MediaFamily {
     kUnknown,
     kWav,
@@ -18,12 +19,14 @@ enum class MediaFamily {
     kMkv,   // mkv / webm (EBML)
 };
 
-// True for families handled by the in-process audio decoder.
-bool is_audio_family(MediaFamily family);
+// True for families the in-process decoder (miniaudio) handles: wav, mp3,
+// flac.
+bool decodes_in_process(MediaFamily family);
 
-// True for container families that may carry a video stream and are
-// demuxed through ffmpeg.
-bool is_video_family(MediaFamily family);
+// True for families demuxed and decoded through an ffmpeg child: the
+// containers that may carry video (mp4, mkv), and ogg, whose Vorbis and
+// Opus audio miniaudio cannot decode here.
+bool demuxes_with_ffmpeg(MediaFamily family);
 
 // Sniffs the container family from the first bytes of the media.
 // Needs at most 16 bytes; shorter inputs return kUnknown.

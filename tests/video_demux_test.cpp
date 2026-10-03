@@ -326,6 +326,29 @@ void verify_stop_mid_audio(const std::string& media) {
     require(no_children_left(), "the stopped audio child was killed and reaped");
 }
 
+void verify_ogg_audio() {
+    // Ogg goes through ffmpeg: miniaudio decodes neither codec here.
+    for (const char* codec : {"libopus", "libvorbis"}) {
+        const std::string ogg = generate_media(
+            std::string("-f lavfi -i sine=frequency=440:duration=4 -c:a ") + codec, ".ogg");
+        VideoDemux demux = open(ogg);
+        const asr::media::ProbeInfo info = demux.probe();
+        const std::string expected = std::string(codec).substr(3);  // opus, vorbis
+        require(info.has_audio && info.audio_codec == expected,
+                "ogg audio probed as " + expected + ", got " + info.audio_codec);
+        require(!info.has_video, "audio-only ogg has no video");
+        demux.open_audio();
+        std::vector<float> pcm(16000);
+        size_t total = 0;
+        while (size_t got = demux.read_audio(pcm.data(), pcm.size())) {
+            total += got;
+        }
+        demux.close_audio();
+        require(total > 3 * asr::media::kModelSampleRate,
+                expected + " in ogg decodes to PCM, got " + std::to_string(total) + " samples");
+    }
+}
+
 void verify_video_without_audio() {
     std::string media = make_video_only_mp4();
     VideoDemux demux = open(media);
@@ -377,6 +400,7 @@ int main() {
         verify_stop_mid_audio(media);
         verify_descriptors_stay_private(media);
         verify_media_on_fd_3(media);
+        verify_ogg_audio();
         verify_video_without_audio();
         verify_garbage_rejected();
         verify_png_dimensions();

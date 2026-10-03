@@ -13,20 +13,20 @@ bool starts_with(const uint8_t* data, size_t size, const char* magic, size_t mag
 
 }  // namespace
 
-bool is_audio_family(MediaFamily family) {
+bool decodes_in_process(MediaFamily family) {
     switch (family) {
         case MediaFamily::kWav:
         case MediaFamily::kMp3:
         case MediaFamily::kFlac:
-        case MediaFamily::kOgg:
             return true;
         default:
             return false;
     }
 }
 
-bool is_video_family(MediaFamily family) {
-    return family == MediaFamily::kMp4 || family == MediaFamily::kMkv;
+bool demuxes_with_ffmpeg(MediaFamily family) {
+    return family == MediaFamily::kOgg || family == MediaFamily::kMp4 ||
+           family == MediaFamily::kMkv;
 }
 
 MediaFamily sniff(const uint8_t* data, size_t size) {
@@ -50,12 +50,14 @@ MediaFamily sniff(const uint8_t* data, size_t size) {
         return MediaFamily::kMkv;
     }
     // ID3v2-tagged or bare MPEG audio. A bare frame starts with an 11-bit
-    // sync run; check the first two bytes only, the decoder validates the
-    // rest.
+    // sync run, then two version and two layer bits; the decoder validates
+    // the rest. Version 01 is reserved, and so is layer 00, which is
+    // exactly where ADTS AAC (0xFFF1, 0xFFF9) differs: not mp3.
     if (starts_with(data, size, "ID3", 3)) {
         return MediaFamily::kMp3;
     }
-    if (size >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+    if (size >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 && (data[1] & 0x18) != 0x08 &&
+        (data[1] & 0x06) != 0) {
         return MediaFamily::kMp3;
     }
     return MediaFamily::kUnknown;

@@ -20,7 +20,7 @@ class DecodeError : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// In-process decoder for the audio container families (wav/mp3/flac/ogg)
+// In-process decoder for the audio container families (wav/mp3/flac)
 // producing mono f32 PCM at the model rate. Pulls encoded bytes from a
 // ByteStream through blocking reads, so decoding (and therefore
 // transcription) starts while the media is still uploading. Nothing

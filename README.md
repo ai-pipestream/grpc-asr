@@ -81,8 +81,10 @@ vendored verbatim from gRParse
 the `UiInfo` block the shared demo shell reads to build its tab bar.
 Standard `grpc.health.v1.Health` and server reflection are registered.
 
-Containers: wav, mp3, flac, ogg decode in process; mp4/mov and mkv/webm are
-demuxed by ffmpeg (video needs an audio track). Errors: cap overruns are
+Containers: wav, mp3 and flac decode in process; ogg (Vorbis, Opus),
+mp4/mov and mkv/webm are demuxed by ffmpeg once the upload is complete
+(the media needs an audio track). Raw ADTS AAC is not sniffed and is
+refused as an unknown container. Errors: cap overruns are
 `RESOURCE_EXHAUSTED`, undecodable media is `INVALID_ARGUMENT`, unknown
 containers are `UNIMPLEMENTED`, decoder faults are `INTERNAL`.
 
