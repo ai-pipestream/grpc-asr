@@ -51,6 +51,11 @@ RUN curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
 COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
 RUN /tmp/build-ffmpeg.sh /opt/ffmpeg
 
+# CI downloads models/ggml-tiny.en.bin into the build context (COPY . .
+# brings it into this stage only; the runtime stage never sees /src) and
+# passes 1, so the in-build ctest fails on a missing model instead of
+# skipping the model-backed tests.
+ARG GRPC_ASR_TEST_REQUIRE_MODELS=0
 WORKDIR /src
 COPY . .
 
@@ -63,6 +68,7 @@ RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-cxx23-grpc1.83.0-wh
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
+        GRPC_ASR_TEST_REQUIRE_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} \
         ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/
 

@@ -277,11 +277,11 @@ int main() {
     const char* model = env_or_null("GRPC_ASR_TEST_MODEL");
     const char* sample = env_or_null("GRPC_ASR_TEST_SAMPLE");
     if (model == nullptr || slurp(model).empty()) {
-        return skip("no model weights at $GRPC_ASR_TEST_MODEL");
+        return missing_model_input("no model weights at $GRPC_ASR_TEST_MODEL");
     }
     std::string jfk = sample == nullptr ? "" : slurp(sample);
     if (jfk.empty()) {
-        return skip("no fixture wav at $GRPC_ASR_TEST_SAMPLE");
+        return missing_model_input("no fixture wav at $GRPC_ASR_TEST_SAMPLE");
     }
 
     whisper_context_params cparams = whisper_context_default_params();
