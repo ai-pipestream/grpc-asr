@@ -1,0 +1,45 @@
+grpc-asr
+Copyright 2026 ai.pipestream
+
+Third-party software in grpc-asr-server
+---------------------------------------
+
+grpc-asr-server, the one program this repository builds, links only
+permissively licensed code:
+
+- whisper.cpp and ggml (https://github.com/ggml-org/whisper.cpp, v1.9.3,
+  fetched at build time): MIT License.
+- miniaudio (third_party/miniaudio/miniaudio.h, vendored): public domain
+  (Unlicense) or MIT No Attribution, at your choice.
+- gRPC (https://github.com/grpc/grpc, v1.83.0, fetched at build time):
+  Apache License 2.0, together with the libraries it builds from its own
+  third_party tree (Protocol Buffers, Abseil, BoringSSL, c-ares, RE2, upb,
+  zlib), each under the permissive license recorded there.
+
+FFmpeg in the container images (GPL)
+------------------------------------
+
+The published images (CUDA, CPU and OpenVINO) also contain the ffmpeg and
+ffprobe executables, installed from the Ubuntu archive of each image's base
+(ubuntu:26.04 for the CPU and OpenVINO images, which ships FFmpeg 8.0;
+ubuntu:24.04 under the CUDA runtime image, which ships FFmpeg 6.1).
+
+Ubuntu configures that FFmpeg with --enable-gpl and links GPL components
+into it (libx264, libx265, libxvid and others), so these two
+executables are licensed under the GNU General Public License, version 2
+or later, as a whole. Their copyright file is /usr/share/doc/ffmpeg/copyright
+in the image.
+
+grpc-asr-server does not link FFmpeg. It starts ffmpeg and ffprobe as
+separate processes (video containers and Ogg audio) and exchanges data with
+them only through a memfd and pipes. The server binary therefore carries no
+GPL code, but each image does: anyone redistributing an image redistributes
+these GPL executables and takes on the GPL's obligations for them,
+including making their corresponding source available. That source is
+Ubuntu's ffmpeg source package at the version installed in the image
+(`dpkg -s ffmpeg` prints it; `apt-get source ffmpeg=<version>` fetches it).
+
+Every image states this in its ai.pipestream.ffmpeg.license label and
+carries this file at /usr/share/doc/grpc-asr/NOTICE. Like any Ubuntu-based
+image, the images also contain the base system's own packages under their
+own licenses, recorded under /usr/share/doc.

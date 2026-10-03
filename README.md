@@ -188,6 +188,20 @@ multi-arch manifest list, linux/amd64 plus linux/arm64 (each leg builds and
 boot-tests natively on a hosted runner of its own architecture). The CUDA
 and OpenVINO images are linux/amd64 only.
 
+## Licensing
+
+grpc-asr-server links only permissively licensed code: whisper.cpp and
+ggml (MIT), miniaudio (public domain or MIT-0), and gRPC (Apache-2.0) with
+the libraries it builds. The container images also install `ffmpeg` and
+`ffprobe` from Ubuntu's archive, and Ubuntu builds them with `--enable-gpl`
+(libx264, libx265 and more), so those two executables are
+GPL-2.0-or-later. The server runs them as separate processes for video and
+Ogg input and never links them; the binary carries no GPL code, but every
+image does, and anyone redistributing an image takes on the GPL's
+obligations for those executables, source availability included. Each image
+says so in its `ai.pipestream.ffmpeg.license` label and carries the details
+at `/usr/share/doc/grpc-asr/NOTICE` (this repository's [NOTICE](NOTICE)).
+
 ## Remotes
 
 Forgejo (`git.rokkon.com/ai-pipestream/grpc-asr`) is the source of truth;

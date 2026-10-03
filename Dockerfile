@@ -43,6 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
 
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 
+# The ffmpeg and ffprobe installed above are Ubuntu's --enable-gpl build:
+# GPL-2.0-or-later executables the server runs as child processes and never
+# links. The label and NOTICE tell anyone who pulls or redistributes the
+# image; scripts/smoke-test.sh checks both are there.
+COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
+LABEL ai.pipestream.ffmpeg.license="GPL-2.0-or-later" \
+      ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are Ubuntu archive builds configured with --enable-gpl; grpc-asr-server runs them as separate processes and does not link them. Details: /usr/share/doc/grpc-asr/NOTICE"
+
 # The server links libcuda.so.1, which nvidia-container-toolkit injects on
 # GPU hosts; a plain docker run has no driver library, so the loader stops
 # before main. The CUDA stub from the build stage, parked OFF the default

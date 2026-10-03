@@ -12,6 +12,8 @@
 #      with its OWN "no ggml-*.bin model files" startup failure, proving
 #      the loader, configuration parsing, backend verification, and model
 #      discovery all ran, not a loader error.
+#   4. license notice: the image labels the GPL ffmpeg it ships
+#      (ai.pipestream.ffmpeg.license) and carries NOTICE.
 #
 # There is deliberately no --full mode: the image ships no client binary
 # and a real transcription needs model weights, which CI contexts do not
@@ -75,5 +77,19 @@ if ! grep -qF "Startup failed: no ggml-*.bin model files in /models" <<<"$boot_o
   echo "expected the server's own startup failure for absent models" >&2
   exit 1
 fi
+
+echo "== smoke: image declares the GPL ffmpeg it ships"
+ffmpeg_license=$(docker inspect --format '{{ index .Config.Labels "ai.pipestream.ffmpeg.license" }}' "$image")
+if [[ "$ffmpeg_license" != "GPL-2.0-or-later" ]]; then
+  echo "expected label ai.pipestream.ffmpeg.license=GPL-2.0-or-later, image has '$ffmpeg_license'" >&2
+  exit 1
+fi
+notice_probe=$(docker create "$image")
+if ! docker cp "$notice_probe:/usr/share/doc/grpc-asr/NOTICE" - >/dev/null 2>&1; then
+  docker rm "$notice_probe" >/dev/null
+  echo "the image carries no /usr/share/doc/grpc-asr/NOTICE" >&2
+  exit 1
+fi
+docker rm "$notice_probe" >/dev/null
 
 echo "smoke-test: OK ($image)"
