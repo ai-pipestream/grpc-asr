@@ -112,6 +112,9 @@ and the video cases need `ffmpeg` and `ffprobe` on PATH. The tests author
 their fixtures with `GRPC_ASR_TEST_FIXTURE_FFMPEG` (default `ffmpeg`), which
 needs the libx264, libopus and libvorbis encoders; the image builds point it
 at a distribution ffmpeg and test the decode-only one they ship.
+Set `GRPC_ASR_TEST_REQUIRE_MODELS=1` to turn a missing model or sample into
+a test failure instead of a skip; CI does, after fetching the model at a
+pinned revision and checking its sha256.
 
 Backend variants: `-DGRPC_ASR_CUDA=ON` (GGML CUDA) and
 `-DGRPC_ASR_OPENVINO=ON` (whisper OpenVINO encoder; needs the OpenVINO SDK

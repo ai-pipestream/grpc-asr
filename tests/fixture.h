@@ -12,6 +12,7 @@
 #include <print>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 inline void require(bool condition, const std::string& what) {
@@ -111,4 +112,17 @@ inline std::string fixture_ffmpeg() {
 inline int skip(const std::string& why) {
     std::println(stderr, "SKIP: {}", why);
     return 77;
+}
+
+// For a missing model or sample: skip like skip(), unless
+// GRPC_ASR_TEST_REQUIRE_MODELS is set to anything but 0, in which case the
+// test fails. CI provisions the model and sets it, so a lost download or a
+// broken path fails the run instead of passing as a quiet SKIP.
+inline int missing_model_input(const std::string& why) {
+    const char* required = env_or_null("GRPC_ASR_TEST_REQUIRE_MODELS");
+    if (required != nullptr && std::string_view(required) != "0") {
+        std::println(stderr, "FAIL: {} (GRPC_ASR_TEST_REQUIRE_MODELS={})", why, required);
+        return 1;
+    }
+    return skip(why);
 }

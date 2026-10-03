@@ -15,6 +15,14 @@ on:
 permissions:
   contents: read
 
+# The whisper tiny.en weights the model-backed tests (transcriber-test,
+# asr-service-test) load, fetched from the canonical Hugging Face repo at a
+# pinned revision and checked against the LFS sha256 before any build sees
+# them.
+env:
+  TEST_MODEL_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin
+  TEST_MODEL_SHA256: 921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
+
 jobs:
   image:
     name: image ${{ matrix.variant }} ${{ matrix.runner }}
@@ -24,27 +32,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # models: false on CUDA because a docker build has no driver
+          # library, so CMake disables the whisper-linked tests there at
+          # configure time (GPU hosts still run them); the other legs run
+          # them and must not skip.
           - variant: cuda
             dockerfile: Dockerfile
             runner: ubuntu-latest
+            models: false
           - variant: cpu
             dockerfile: Dockerfile.cpu
             runner: ubuntu-latest
+            models: true
           - variant: cpu
             dockerfile: Dockerfile.cpu
             runner: ubuntu-24.04-arm
+            models: true
           - variant: openvino
             dockerfile: Dockerfile.openvino
             runner: ubuntu-latest
+            models: true
     steps:
       - uses: actions/checkout@v7
       # The CUDA devel base alone is several GB; the hosted runner's
       # preinstalled SDKs are not needed here.
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      # models/ is in the build context (.dockerignore keeps it), so COPY
+      # . . puts the weights in the build stage for ctest; the runtime stage
+      # copies only the server binary and ffmpeg, never /src.
+      - name: Fetch the test model
+        if: matrix.models
+        run: |
+          mkdir -p models
+          curl -fsSL --retry 5 --retry-all-errors -o models/ggml-tiny.en.bin "$TEST_MODEL_URL"
+          echo "$TEST_MODEL_SHA256  models/ggml-tiny.en.bin" | sha256sum -c -
       # The image build runs the test suite itself, so this also proves the
       # tests pass in a clean container with no host toolchain state.
       - name: docker build
-        run: docker build -f ${{ matrix.dockerfile }} -t grpc-asr:ci .
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+            --build-arg GRPC_ASR_TEST_REQUIRE_MODELS=${{ matrix.models && '1' || '0' }} \
+            -t grpc-asr:ci .
       - name: Boot-proof the runtime image
         run: ./scripts/smoke-test.sh grpc-asr:ci
