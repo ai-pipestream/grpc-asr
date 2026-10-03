@@ -477,6 +477,56 @@ void verify_silence(const std::shared_ptr<grpc::Channel>& channel) {
     }
 }
 
+void verify_trailer_to_gone_client(const std::string& target,
+                                   const asr::AsrServiceImpl& service) {
+    // A client that leaves after the last segment fails only the trailer
+    // write, and never sees TranscriptComplete: the stream must end
+    // CANCELLED, not OK, and not count as transcribed. The Document event
+    // goes out with the trailer and carries the filename, so a 1 MiB name
+    // makes it far larger than the window a client that stops reading
+    // grants with BDP probing off. The server then sits in that write,
+    // past every earlier check for a gone call, until the cancel fails it.
+    grpc::ChannelArguments arguments;
+    arguments.SetInt(GRPC_ARG_HTTP2_BDP_PROBE, 0);
+    auto channel =
+        grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), arguments);
+    asrv1::TranscribeOptions options = options_for("tiny.en");
+    options.set_emit_document(true);
+    options.set_filename(std::string(1 << 20, 'a') + ".wav");
+    // No samples, so no whisper pass: the stream reaches its trailer at
+    // once, whatever the weights.
+    const std::string media = make_wav(0.0, 0.0);
+
+    const long transcribed = service.transcribed.load();
+    const long finished = handlers_finished(service);
+    auto stub = asrv1::AsrService::NewStub(channel);
+    grpc::ClientContext context;
+    auto stream = stub->Transcribe(&context);
+    asrv1::TranscribeRequest request;
+    *request.mutable_options() = options;
+    stream->Write(request);
+    request.Clear();
+    request.mutable_chunk()->set_data(media);
+    stream->Write(request);
+    stream->WritesDone();
+    asrv1::TranscribeResponse response;
+    while (stream->Read(&response) && !response.has_media_info()) {
+    }
+    // Long enough for the stream to park in the Document write.
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    require(handlers_finished(service) == finished,
+            "the server waits on the client that stopped reading");
+    context.TryCancel();
+    while (stream->Read(&response)) {
+    }
+    stream->Finish();
+    require(eventually([&] { return handlers_finished(service) > finished; },
+                       std::chrono::seconds(10)),
+            "the stream ends once its client is gone");
+    require(service.transcribed.load() == transcribed,
+            "a stream whose trailer never reached the client is not transcribed");
+}
+
 void verify_cancel_without_speech(const std::shared_ptr<grpc::Channel>& channel,
                                   const asr::AsrServiceImpl& service, const std::string& hiss,
                                   const std::string& jfk) {
@@ -791,6 +841,7 @@ int main() {
         verify_streaming_during_upload(channel, jfk);
         verify_document(channel, jfk);
         verify_silence(channel);
+        verify_trailer_to_gone_client("127.0.0.1:" + std::to_string(port), service);
         {
             // Forty minutes of low hiss: whisper decodes it into no segment
             // at all, so nothing is ever written, and a server that ignored

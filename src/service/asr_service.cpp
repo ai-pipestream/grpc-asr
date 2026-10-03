@@ -368,7 +368,11 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         complete->set_segment_count(result.final_segments);
         complete->set_token_count(result.tokens);
         complete->set_keyframe_count(keyframe_count.load());
-        writer.finish(trailer);
+        // A client that left after the last segment fails only here; it
+        // never saw the trailer, so the stream did not complete.
+        if (!writer.finish(trailer)) {
+            return cancelled;
+        }
 
         audio_ms += static_cast<long>(result.duration_ms);
         return grpc::Status::OK;
