@@ -8,11 +8,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <string_view>
 #include <vector>
 
+#include "cancellation.h"
 #include "media/audio_decoder.h"
 
 namespace asr::media {
@@ -23,44 +25,94 @@ namespace {
 // fresh, independently-seekable file through /dev/fd.
 constexpr int kMediaFd = 3;
 constexpr char kMediaPath[] = "/dev/fd/3";
-// Sentinel exit code the child uses when execvp itself fails, so a missing
-// binary is distinguishable from ffmpeg rejecting the media.
+// Sentinel exit code the child uses when execvp (or the descriptor setup
+// before it) fails, so a missing binary is distinguishable from ffmpeg
+// rejecting the media.
 constexpr int kExecFailed = 127;
 constexpr std::chrono::milliseconds kReapGrace{2000};
+// Highest descriptor count the pre-close_range fallback walks.
+constexpr long kCloseLimitCap = 65536;
+// How often a waiting read re-checks its stop token: the bound on how long
+// a child outlives the call that wanted its output.
+constexpr std::chrono::milliseconds kStopPollInterval{100};
 
 // One ffmpeg/ffprobe child with its stdout and stderr pipes. Reads apply
-// the inactivity timeout; stderr is drained alongside stdout (so the child
-// can never block on a full stderr pipe) and its tail kept for errors.
+// the inactivity timeout and the stop token; stderr is drained alongside
+// stdout (so the child can never block on a full stderr pipe) and its tail
+// kept for errors.
 class ToolProcess {
   public:
     ToolProcess(const std::vector<std::string>& argv, int media_fd,
-                std::chrono::milliseconds inactivity_timeout)
-        : inactivity_timeout_(inactivity_timeout) {
+                std::chrono::milliseconds inactivity_timeout, std::stop_token stop)
+        : inactivity_timeout_(inactivity_timeout), stop_(std::move(stop)) {
+        tool_ = argv.empty() ? "tool" : argv[0];
+        if (stop_.stop_requested()) {
+            throw Cancelled(tool_ + " not started: the stream is gone");
+        }
+        // argv is built before fork: the child of a multithreaded process
+        // may only make async-signal-safe calls, so it cannot allocate.
+        std::vector<char*> args;
+        args.reserve(argv.size() + 1);
+        for (const std::string& arg : argv) {
+            args.push_back(const_cast<char*>(arg.c_str()));
+        }
+        args.push_back(nullptr);
+        // Close-on-exec, like the memfd: a child another stream forks
+        // concurrently must not inherit these ends, since an inherited
+        // write end keeps this reader from ever seeing end of file.
         int out_pipe[2];
         int err_pipe[2];
-        if (::pipe(out_pipe) != 0 || ::pipe(err_pipe) != 0) {
+        if (::pipe2(out_pipe, O_CLOEXEC) != 0) {
             throw ToolError("pipe creation failed");
         }
+        if (::pipe2(err_pipe, O_CLOEXEC) != 0) {
+            ::close(out_pipe[0]);
+            ::close(out_pipe[1]);
+            throw ToolError("pipe creation failed");
+        }
+        // Bound for the fallback close loop in the child, read here because
+        // sysconf is not async-signal-safe.
+        const long open_max = ::sysconf(_SC_OPEN_MAX);
+        const int close_limit = open_max > kMediaFd && open_max < kCloseLimitCap
+                                    ? static_cast<int>(open_max)
+                                    : kCloseLimitCap;
         pid_ = ::fork();
         if (pid_ < 0) {
+            for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
+                ::close(fd);
+            }
             throw ToolError("fork failed");
         }
         if (pid_ == 0) {
-            // dup2 clears CLOEXEC on the duplicate, which is exactly what
-            // lets the exec'd tool see the memfd.
-            ::dup2(media_fd, kMediaFd);
-            ::dup2(out_pipe[1], STDOUT_FILENO);
-            ::dup2(err_pipe[1], STDERR_FILENO);
-            ::close(out_pipe[0]);
-            ::close(out_pipe[1]);
-            ::close(err_pipe[0]);
-            ::close(err_pipe[1]);
-            std::vector<char*> args;
-            args.reserve(argv.size() + 1);
-            for (const std::string& arg : argv) {
-                args.push_back(const_cast<char*>(arg.c_str()));
+            // First lift every source above the target slots, so no dup2
+            // below overwrites one still waiting to be copied: the memfd
+            // or a pipe end sits on 1, 2 or 3 whenever those were free.
+            // Then dup2 clears close-on-exec on the copies, and every
+            // descriptor above fd 3 is closed, so the tool keeps exactly
+            // its stdin, stdout, stderr, and the media on fd 3. Close-on-exec
+            // alone would leave in place whatever a library (a GPU runtime,
+            // say) opened without it.
+            int media = media_fd;
+            int out = out_pipe[1];
+            int err = err_pipe[1];
+            for (int* fd : {&media, &out, &err}) {
+                if (*fd <= kMediaFd) {
+                    *fd = ::fcntl(*fd, F_DUPFD_CLOEXEC, kMediaFd + 1);
+                    if (*fd < 0) {
+                        ::_exit(kExecFailed);
+                    }
+                }
             }
-            args.push_back(nullptr);
+            if (::dup2(media, kMediaFd) < 0 || ::dup2(out, STDOUT_FILENO) < 0 ||
+                ::dup2(err, STDERR_FILENO) < 0) {
+                ::_exit(kExecFailed);
+            }
+            if (::close_range(kMediaFd + 1, ~0U, 0) != 0) {
+                // Kernels before 5.9 have no close_range.
+                for (int fd = kMediaFd + 1; fd < close_limit; ++fd) {
+                    ::close(fd);
+                }
+            }
             ::execvp(args[0], args.data());
             ::_exit(kExecFailed);
         }
@@ -68,7 +120,6 @@ class ToolProcess {
         ::close(err_pipe[1]);
         out_fd_ = out_pipe[0];
         err_fd_ = err_pipe[0];
-        tool_ = argv.empty() ? "tool" : argv[0];
     }
 
     ~ToolProcess() {
@@ -86,18 +137,32 @@ class ToolProcess {
 
     // Reads up to max_bytes of the child's stdout. Returns 0 on clean end
     // of stream. Kills the child and throws ToolError when it produces no
-    // output within the inactivity timeout.
+    // output (stdout or stderr) within the inactivity timeout, and
+    // Cancelled once the stop token fires.
     size_t read(uint8_t* out, size_t max_bytes) {
+        auto idle_deadline = std::chrono::steady_clock::now() + inactivity_timeout_;
         while (true) {
+            if (stop_.stop_requested()) {
+                ::kill(pid_, SIGKILL);
+                throw Cancelled(tool_ + " stopped: the stream is gone");
+            }
+            const auto idle_left = std::chrono::ceil<std::chrono::milliseconds>(
+                idle_deadline - std::chrono::steady_clock::now());
+            if (idle_left.count() <= 0) {
+                ::kill(pid_, SIGKILL);
+                throw ToolError(tool_ + " produced no output for " +
+                                std::to_string(inactivity_timeout_.count()) + "ms; killed");
+            }
             struct pollfd fds[2];
             fds[0] = {out_fd_, POLLIN, 0};
             fds[1] = {err_fd_, POLLIN, 0};
             nfds_t nfds = err_fd_ >= 0 ? 2 : 1;
-            int ready = ::poll(fds, nfds, static_cast<int>(inactivity_timeout_.count()));
+            // Short slices, so a stop request lands even while the child
+            // is silent (seeking, decoding toward the next still).
+            int ready = ::poll(fds, nfds,
+                               static_cast<int>(std::min(idle_left, kStopPollInterval).count()));
             if (ready == 0) {
-                ::kill(pid_, SIGKILL);
-                throw ToolError(tool_ + " produced no output for " +
-                                std::to_string(inactivity_timeout_.count()) + "ms; killed");
+                continue;
             }
             if (ready < 0) {
                 if (errno == EINTR) {
@@ -106,7 +171,9 @@ class ToolProcess {
                 throw ToolError(tool_ + " poll failed: " + std::strerror(errno));
             }
             if (err_fd_ >= 0 && (fds[1].revents & (POLLIN | POLLHUP)) != 0) {
-                drain_stderr();
+                if (drain_stderr()) {
+                    idle_deadline = std::chrono::steady_clock::now() + inactivity_timeout_;
+                }
             }
             if ((fds[0].revents & (POLLIN | POLLHUP)) != 0) {
                 ssize_t n = ::read(out_fd_, out, max_bytes);
@@ -163,25 +230,35 @@ class ToolProcess {
     const std::string& stderr_tail() const { return stderr_tail_; }
 
   private:
-    void drain_stderr() {
+    // Returns true when the sweep read anything. At end of file the pipe
+    // is closed, so poll stops reporting its hangup over and over.
+    bool drain_stderr() {
         if (err_fd_ < 0) {
-            return;
+            return false;
         }
         // Non-blocking sweep: keep only the final 4 KiB.
         int flags = ::fcntl(err_fd_, F_GETFL);
         ::fcntl(err_fd_, F_SETFL, flags | O_NONBLOCK);
         char buf[4096];
+        bool got = false;
         while (true) {
             ssize_t n = ::read(err_fd_, buf, sizeof buf);
-            if (n <= 0) {
+            if (n == 0) {
+                ::close(err_fd_);
+                err_fd_ = -1;
+                return got;
+            }
+            if (n < 0) {
                 break;
             }
+            got = true;
             stderr_tail_.append(buf, static_cast<size_t>(n));
             if (stderr_tail_.size() > 4096) {
                 stderr_tail_.erase(0, stderr_tail_.size() - 4096);
             }
         }
         ::fcntl(err_fd_, F_SETFL, flags);
+        return got;
     }
 
     pid_t pid_ = -1;
@@ -191,6 +268,7 @@ class ToolProcess {
     std::string tool_;
     std::string stderr_tail_;
     std::chrono::milliseconds inactivity_timeout_;
+    std::stop_token stop_;
 };
 
 // Reads the whole (small) stdout of a tool run, e.g. an ffprobe query.
@@ -254,7 +332,10 @@ VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path
     impl_->ffmpeg = std::move(ffmpeg_path);
     impl_->ffprobe = std::move(ffprobe_path);
     impl_->inactivity_timeout = inactivity_timeout;
-    impl_->media_fd = static_cast<int>(::memfd_create("grpc-asr-media", 0));
+    // Close-on-exec, so the children of other streams never inherit (and
+    // pin) this media; each tool gets its own copy on fd 3.
+    impl_->media_fd = static_cast<int>(
+        ::memfd_create("grpc-asr-media", MFD_CLOEXEC | MFD_ALLOW_SEALING));
     if (impl_->media_fd < 0) {
         throw ToolError("memfd_create failed");
     }
@@ -266,15 +347,20 @@ VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path
         }
         written += static_cast<size_t>(n);
     }
+    // Seal it: the bytes every child reads can no longer change or move.
+    if (::fcntl(impl_->media_fd, F_ADD_SEALS,
+                F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL) != 0) {
+        throw ToolError(std::string("sealing the media memfd failed: ") + std::strerror(errno));
+    }
 }
 
 VideoDemux::~VideoDemux() = default;
 
-ProbeInfo VideoDemux::probe() {
+ProbeInfo VideoDemux::probe(std::stop_token stop) {
     ProbeInfo info;
 
     auto run_query = [&](const std::vector<std::string>& argv) -> std::string {
-        ToolProcess tool(argv, impl_->media_fd, impl_->inactivity_timeout);
+        ToolProcess tool(argv, impl_->media_fd, impl_->inactivity_timeout, stop);
         std::string out = collect_output(tool);
         int code = tool.wait_exit();
         if (code == kExecFailed) {
@@ -322,12 +408,12 @@ ProbeInfo VideoDemux::probe() {
     return info;
 }
 
-void VideoDemux::open_audio() {
+void VideoDemux::open_audio(std::stop_token stop) {
     impl_->audio = std::make_unique<ToolProcess>(
         std::vector<std::string>{impl_->ffmpeg, "-v", "error", "-i", kMediaPath, "-map", "a:0",
                                  "-f", "f32le", "-ac", "1", "-ar",
                                  std::to_string(kModelSampleRate), "pipe:1"},
-        impl_->media_fd, impl_->inactivity_timeout);
+        impl_->media_fd, impl_->inactivity_timeout, std::move(stop));
     impl_->partial_sample.clear();
 }
 
@@ -372,16 +458,22 @@ void VideoDemux::close_audio() {
     }
 }
 
+void VideoDemux::cancel_audio() {
+    // ToolProcess's destructor closes the pipes, then kills and reaps.
+    impl_->audio.reset();
+}
+
 void VideoDemux::extract_keyframes(
     uint32_t interval_seconds,
-    const std::function<void(uint64_t, uint32_t, uint32_t, std::string)>& sink) {
+    const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink,
+    std::stop_token stop) {
     // fps=1/N picks the frame nearest each N-second grid point starting at
     // zero, so frame n sits at n*N seconds of media time.
     ToolProcess tool(
         {impl_->ffmpeg, "-v", "error", "-i", kMediaPath, "-map", "v:0", "-vf",
          "fps=1/" + std::to_string(interval_seconds), "-f", "image2pipe", "-c:v", "png",
          "pipe:1"},
-        impl_->media_fd, impl_->inactivity_timeout);
+        impl_->media_fd, impl_->inactivity_timeout, std::move(stop));
 
     constexpr std::string_view kSignature{"\x89PNG\r\n\x1a\n", 8};
     std::string buffer;
@@ -389,11 +481,12 @@ void VideoDemux::extract_keyframes(
     uint8_t chunk[64 * 1024];
 
     // Walk PNG chunks to find each image's end; everything up to and
-    // including IEND+CRC is one still.
+    // including IEND+CRC is one still. Returns false once the sink asked
+    // to stop.
     auto emit_complete = [&]() {
         while (true) {
             if (buffer.size() < 8) {
-                return;
+                return true;
             }
             if (!buffer.starts_with(kSignature)) {
                 throw DecodeError("keyframe stream lost PNG framing");
@@ -401,14 +494,14 @@ void VideoDemux::extract_keyframes(
             size_t offset = 8;
             while (true) {
                 if (buffer.size() < offset + 8) {
-                    return;  // need more bytes for the next chunk header
+                    return true;  // need more bytes for the next chunk header
                 }
                 uint32_t length =
                     read_be32(reinterpret_cast<const uint8_t*>(buffer.data()) + offset);
                 bool is_end = buffer.compare(offset + 4, 4, "IEND") == 0;
                 size_t chunk_total = 8ULL + length + 4ULL;  // header + data + crc
                 if (buffer.size() < offset + chunk_total) {
-                    return;
+                    return true;
                 }
                 offset += chunk_total;
                 if (is_end) {
@@ -417,7 +510,10 @@ void VideoDemux::extract_keyframes(
                     uint32_t width = 0;
                     uint32_t height = 0;
                     png_dimensions(png, &width, &height);
-                    sink(frame_index * interval_seconds * 1000ULL, width, height, std::move(png));
+                    if (!sink(frame_index * interval_seconds * 1000ULL, width, height,
+                              std::move(png))) {
+                        return false;
+                    }
                     frame_index++;
                     break;  // scan the buffer again from the top
                 }
@@ -431,7 +527,9 @@ void VideoDemux::extract_keyframes(
             break;
         }
         buffer.append(reinterpret_cast<char*>(chunk), n);
-        emit_complete();
+        if (!emit_complete()) {
+            return;  // the sink stopped us; ~ToolProcess kills and reaps the child
+        }
     }
     int code = tool.wait_exit();
     if (code == kExecFailed) {

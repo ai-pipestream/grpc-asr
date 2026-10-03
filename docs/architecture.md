@@ -17,8 +17,8 @@ keyframe stills from video feed the CV path.
 ```mermaid
 flowchart TD
     A[MediaChunk stream] --> B{container sniff}
-    B -->|wav / mp3 / flac / ogg| C[in-process decode]
-    B -->|mp4 / mkv / webm| D[ffmpeg demux over memfd]
+    B -->|wav / mp3 / flac| C[in-process decode]
+    B -->|ogg / mp4 / mkv / webm| D[ffmpeg demux over memfd]
     C --> E[PCM windows]
     D --> E
     D --> K[keyframe ffmpeg child]

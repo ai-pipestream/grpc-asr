@@ -83,7 +83,7 @@ above a configured byte cap or duration cap fails with
 
 ## 5a. Implementation notes (v1, as built)
 
-**Streaming input.** For the audio families the decoder pulls from the
+**Streaming input.** For wav, mp3 and flac the decoder pulls from the
 growing upload buffer, so `MediaInfo` and the first segments are emitted
 before the client half-closes. The e2e test holds back the last half second
 of the fixture until a `FinalSegment` arrives.
@@ -98,6 +98,13 @@ dropped, so resident memory never grows with media length.
 classic mp4 puts its moov index at the end, so the input must be complete
 and seekable; nothing touches a filesystem. Keyframes stream from a second
 ffmpeg child concurrently with transcription.
+
+**Ogg (Vorbis, Opus).** The in-process decoder handles neither codec, so
+Ogg takes the video path through ffmpeg and the memfd. It is not live yet:
+nothing is decoded until the whole upload is in, and the upload buffer plus
+its memfd copy hold up to twice `GRPC_ASR_MAX_MEDIA_BYTES` in memory per
+stream. Ogg pages are streamable, so the pipe-fed path below would make it
+live.
 
 **Live feeds (follow-up).** Streamable containers (MPEG-TS, fragmented
 MP4/CMAF, mkv/webm) can be demuxed from a pipe as bytes arrive. Routing

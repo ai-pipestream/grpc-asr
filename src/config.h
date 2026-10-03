@@ -16,6 +16,11 @@ struct Config {
     // fallback.
     std::string backend = "cuda";
     int cuda_device = 0;
+    // OpenVINO device the whisper encoder compiles for under the openvino
+    // backend ("GPU", "GPU.1", ...; other devices need their OpenVINO
+    // plugin, and the OpenVINO image ships only the GPU one). An
+    // unavailable device fails the boot, like every other backend choice.
+    std::string openvino_device = "GPU";
     std::string models_dir = "/models";
     // Model names to serve ("tiny.en", "large-v3", ...). Empty means
     // discover every ggml-*.bin in models_dir. Each name must resolve to
@@ -24,6 +29,11 @@ struct Config {
     // Concurrent transcriptions per model: whisper states created at
     // startup per loaded context.
     size_t concurrency = 2;
+    // How long a stream may wait for a free whisper state before it fails
+    // RESOURCE_EXHAUSTED; 0 waits as long as the client does. A stream
+    // also leaves the queue the moment its client cancels or its deadline
+    // passes. The default matches gRParse's ASR deadline.
+    size_t queue_timeout_seconds = 1800;
     size_t max_media_bytes = 256ULL * 1024 * 1024;
     size_t max_duration_seconds = 14400;
     // PCM window fed to whisper_full per iteration; bounds resident PCM.

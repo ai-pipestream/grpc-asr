@@ -81,10 +81,19 @@ vendored verbatim from gRParse
 the `UiInfo` block the shared demo shell reads to build its tab bar.
 Standard `grpc.health.v1.Health` and server reflection are registered.
 
-Containers: wav, mp3, flac, ogg decode in process; mp4/mov and mkv/webm are
-demuxed by ffmpeg (video needs an audio track). Errors: cap overruns are
+Containers: wav, mp3 and flac decode in process; ogg (Vorbis, Opus),
+mp4/mov and mkv/webm are demuxed by ffmpeg once the upload is complete
+(the media needs an audio track). Raw ADTS AAC is not sniffed and is
+refused as an unknown container. Errors: cap overruns are
 `RESOURCE_EXHAUSTED`, undecodable media is `INVALID_ARGUMENT`, unknown
 containers are `UNIMPLEMENTED`, decoder faults are `INTERNAL`.
+
+A stream stops working the moment its client cancels or its deadline
+passes, whether it is decoding speech or a silent stretch that commits no
+segment, waiting for a free model state, probing a video, or extracting
+keyframes: the decoder and every ffmpeg child watch the call. A stream
+that waits for a model state longer than `GRPC_ASR_QUEUE_TIMEOUT_SECONDS`
+fails `RESOURCE_EXHAUSTED`.
 
 ## Build and test
 
@@ -99,7 +108,10 @@ tests need provisioning and skip (exit 77) without it: `transcriber-test`
 and `asr-service-test` need `models/ggml-tiny.en.bin` (`curl -L -o
 models/ggml-tiny.en.bin
 https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin`),
-and the video cases need `ffmpeg` and `ffprobe` on PATH.
+and the video cases need `ffmpeg` and `ffprobe` on PATH. The tests author
+their fixtures with `GRPC_ASR_TEST_FIXTURE_FFMPEG` (default `ffmpeg`), which
+needs the libx264, libopus and libvorbis encoders; the image builds point it
+at a distribution ffmpeg and test the decode-only one they ship.
 
 Backend variants: `-DGRPC_ASR_CUDA=ON` (GGML CUDA) and
 `-DGRPC_ASR_OPENVINO=ON` (whisper OpenVINO encoder; needs the OpenVINO SDK
@@ -121,9 +133,11 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_LISTEN_ADDRESS` | `0.0.0.0:50055` | listen address |
 | `GRPC_ASR_BACKEND` | `cuda` | `cuda` \| `openvino` \| `cpu`; never silently substituted |
 | `GRPC_ASR_CUDA_DEVICE` | `0` | CUDA device index |
+| `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the whisper encoder, e.g. `GPU.1` on a multi-GPU host; the OpenVINO image ships only the GPU plugin, and an unavailable device stops the boot |
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
 | `GRPC_ASR_CONCURRENCY` | `2` | whisper states per model (concurrent transcriptions) |
+| `GRPC_ASR_QUEUE_TIMEOUT_SECONDS` | `1800` | how long a stream waits for a free whisper state before `RESOURCE_EXHAUSTED`; `0` waits as long as the client does |
 | `GRPC_ASR_MAX_MEDIA_BYTES` | `268435456` | upload cap, overrun is `RESOURCE_EXHAUSTED` |
 | `GRPC_ASR_MAX_DURATION_SECONDS` | `14400` | media duration cap, overrun is `RESOURCE_EXHAUSTED` |
 | `GRPC_ASR_WINDOW_SECONDS` | `480` | PCM window per `whisper_full`; bounds resident PCM |
@@ -154,8 +168,9 @@ The OpenVINO image carries OpenVINO 2025.4.1 (Intel APT repo, ubuntu24
 distribution, on an ubuntu:26.04 base), the Intel GPU plugin, and the NEO
 compute runtime (`intel-opencl-icd` 26.05 from Ubuntu's 26.04 archive,
 Battlemage-capable); it defaults to `GRPC_ASR_BACKEND=openvino`. The
-whisper OpenVINO encoder targets an Intel GPU, so the container needs the
-render device, and the models mount needs the converted encoder IR
+whisper OpenVINO encoder targets an Intel GPU (`GRPC_ASR_OPENVINO_DEVICE`,
+default `GPU`), so the container needs the render device, and the models
+mount needs the converted encoder IR
 (`ggml-<name>-encoder-openvino.xml` / `.bin`, produced by whisper.cpp's
 `convert-whisper-to-openvino` tooling) next to the ggml weights:
 
@@ -175,6 +190,21 @@ Published tags: the CPU image (`:latest-cpu` and versioned `-cpu` tags) is a
 multi-arch manifest list, linux/amd64 plus linux/arm64 (each leg builds and
 boot-tests natively on a hosted runner of its own architecture). The CUDA
 and OpenVINO images are linux/amd64 only.
+
+## Licensing
+
+grpc-asr-server links only permissively licensed code: whisper.cpp and
+ggml (MIT), miniaudio (public domain or MIT-0), and gRPC (Apache-2.0) with
+the libraries it builds. The container images also ship `ffmpeg` and
+`ffprobe`, built from the upstream FFmpeg 9.0.2 release by
+[scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh) without `--enable-gpl` or
+`--enable-nonfree` and with only the demuxers and decoders the service uses,
+so they are LGPL-2.1-or-later. The server runs them as separate processes
+for video and Ogg input and never links them. Each image says so in its
+`ai.pipestream.ffmpeg.license` label, carries the license text, the exact
+configure line and the source tarball under `/opt/ffmpeg/share/doc/ffmpeg`,
+and carries the details at `/usr/share/doc/grpc-asr/NOTICE` (this
+repository's [NOTICE](NOTICE)).
 
 ## Remotes
 

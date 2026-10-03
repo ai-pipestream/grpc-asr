@@ -19,7 +19,9 @@ namespace {
 void clear_env() {
     for (const char* name :
          {"GRPC_ASR_LISTEN_ADDRESS", "GRPC_ASR_BACKEND", "GRPC_ASR_CUDA_DEVICE",
+          "GRPC_ASR_OPENVINO_DEVICE",
           "GRPC_ASR_MODELS_DIR", "GRPC_ASR_MODELS", "GRPC_ASR_CONCURRENCY",
+          "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
           "GRPC_ASR_WINDOW_SECONDS", "GRPC_ASR_THREADS", "GRPC_ASR_KEYFRAME_INTERVAL_SECONDS",
           "GRPC_ASR_METRICS_INTERVAL_SECONDS", "GRPC_ASR_TOOL_INACTIVITY_SECONDS",
@@ -46,9 +48,11 @@ void verify_defaults() {
     const Config config = load_config_from_env();
     require(config.listen_address == "0.0.0.0:50055", "default listen address");
     require(config.backend == "cuda", "cuda is the default backend");
+    require(config.openvino_device == "GPU", "the OpenVINO encoder targets the GPU by default");
     require(config.models_dir == "/models", "default models dir");
     require(config.models.empty(), "no models named means discovery");
     require(config.concurrency == 2, "default concurrency");
+    require(config.queue_timeout_seconds == 1800, "default queue timeout");
     require(config.max_media_bytes == 256ULL * 1024 * 1024, "default media cap");
     require(config.window_seconds == 480, "default window");
     require(config.ffmpeg == "ffmpeg" && config.ffprobe == "ffprobe", "default tool names");
@@ -78,11 +82,13 @@ void verify_overrides() {
     ::setenv("GRPC_ASR_LISTEN_ADDRESS", "127.0.0.1:9", 1);
     ::setenv("GRPC_ASR_CONCURRENCY", "5", 1);
     ::setenv("GRPC_ASR_THREADS", "8", 1);
+    ::setenv("GRPC_ASR_OPENVINO_DEVICE", "NPU", 1);
     const Config config = load_config_from_env();
     require(config.backend == "cpu", "backend override");
     require(config.listen_address == "127.0.0.1:9", "listen address override");
     require(config.concurrency == 5, "concurrency override");
     require(config.threads == 8, "threads override");
+    require(config.openvino_device == "NPU", "OpenVINO device override");
 }
 
 void verify_models_list() {
@@ -105,6 +111,19 @@ void verify_rejects() {
     require(rejects("GRPC_ASR_MAX_MEDIA_BYTES", "512"), "sub-minimum media cap fails loud");
 }
 
+void verify_queue_timeout() {
+    clear_env();
+    ::setenv("GRPC_ASR_QUEUE_TIMEOUT_SECONDS", "30", 1);
+    require(load_config_from_env().queue_timeout_seconds == 30, "queue timeout override");
+    clear_env();
+    ::setenv("GRPC_ASR_QUEUE_TIMEOUT_SECONDS", "0", 1);
+    require(load_config_from_env().queue_timeout_seconds == 0,
+            "queue timeout 0 waits as long as the client does");
+    require(rejects("GRPC_ASR_QUEUE_TIMEOUT_SECONDS", "-1"), "a negative queue timeout fails loud");
+    require(rejects("GRPC_ASR_QUEUE_TIMEOUT_SECONDS", "soon"),
+            "a non-numeric queue timeout fails loud");
+}
+
 void verify_metrics_can_be_disabled() {
     clear_env();
     ::setenv("GRPC_ASR_METRICS_INTERVAL_SECONDS", "0", 1);
@@ -121,6 +140,7 @@ int main() {
         verify_models_list();
         verify_rejects();
         verify_word_provenance_switch();
+        verify_queue_timeout();
         verify_metrics_can_be_disabled();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

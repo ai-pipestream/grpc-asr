@@ -1,0 +1,50 @@
+# CI gates for grpc-asr: each image build compiles the service and runs
+# the ctest suite in its build stage, so a green run here and a green local
+# image build mean the same thing; the smoke test then boot-proofs each
+# runtime image (library closure, uid 65532, boot to model loading, and an
+# LGPL-only ffmpeg). The legs match the publish workflow's: CUDA, CPU on
+# both architectures (each built natively), and OpenVINO.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: image ${{ matrix.variant }} ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cuda
+            dockerfile: Dockerfile
+            runner: ubuntu-latest
+          - variant: cpu
+            dockerfile: Dockerfile.cpu
+            runner: ubuntu-latest
+          - variant: cpu
+            dockerfile: Dockerfile.cpu
+            runner: ubuntu-24.04-arm
+          - variant: openvino
+            dockerfile: Dockerfile.openvino
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The CUDA devel base alone is several GB; the hosted runner's
+      # preinstalled SDKs are not needed here.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      # The image build runs the test suite itself, so this also proves the
+      # tests pass in a clean container with no host toolchain state.
+      - name: docker build
+        run: docker build -f ${{ matrix.dockerfile }} -t grpc-asr:ci .
+      - name: Boot-proof the runtime image
+        run: ./scripts/smoke-test.sh grpc-asr:ci

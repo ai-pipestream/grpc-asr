@@ -85,9 +85,12 @@ Config load_config_from_env() {
     }
     config.cuda_device =
         static_cast<int>(configured_size("GRPC_ASR_CUDA_DEVICE", 0, 0, 63));
+    config.openvino_device = configured_string("GRPC_ASR_OPENVINO_DEVICE", config.openvino_device);
     config.models_dir = configured_string("GRPC_ASR_MODELS_DIR", config.models_dir);
     config.models = configured_list("GRPC_ASR_MODELS");
     config.concurrency = configured_size("GRPC_ASR_CONCURRENCY", config.concurrency, 1, 64);
+    config.queue_timeout_seconds = configured_size("GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
+                                                   config.queue_timeout_seconds, 0, 86400 * 7);
     config.max_media_bytes = configured_size("GRPC_ASR_MAX_MEDIA_BYTES", config.max_media_bytes,
                                              1024, 4ULL * 1024 * 1024 * 1024);
     config.max_duration_seconds = configured_size("GRPC_ASR_MAX_DURATION_SECONDS",

@@ -19,7 +19,7 @@ plane), follow architecture.md.
 
 gRPC ASR collector (whisper.cpp) for audio and video, projecting transcripts into the gRParse Document data plane
 
-- **Language:** C++ (whisper.cpp). ffmpeg/memfd for video demux only.
+- **Language:** C++ (whisper.cpp). ffmpeg/memfd for video containers and Ogg (Vorbis/Opus).
 - **Copy from:** /work/main/grpc-services/gRParse (CMake, health, metrics) and /work/main/grpc-services/grpc-libreoffice (C++ gRPC server shape)
 - **Stack:** whisper.cpp with CUDA and OpenVINO builds as first-class. No openai-whisper Python. Fail loud if the backend or model file is missing.
 - **Live stream:** MediaInfo, then PartialSegment/FinalSegment as the decoder commits, optional Keyframe, then TranscriptComplete.

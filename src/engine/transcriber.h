@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -52,8 +53,8 @@ struct EngineResult {
     uint64_t duration_ms = 0;
     uint32_t final_segments = 0;
     uint64_t tokens = 0;
-    // True when the sink asked to stop (client went away) — the trailer
-    // must not be sent.
+    // True when the sink asked to stop or the stop token fired (the client
+    // went away); the trailer must not be sent.
     bool aborted = false;
 };
 
@@ -82,8 +83,10 @@ struct EngineOptions {
 // for revision). Segments wholly inside a window become final immediately
 // after the window; the window's last segment stays partial and is
 // re-decoded from its own start in the next window, so its final may
-// extend it. Finals replace partials by index. PCM behind a final is
-// dropped — memory never grows with media length.
+// extend it. A window that decoded no segment (silence, music) finalizes
+// nothing and the next one starts at its end; window_cut.h has the rule.
+// Finals replace partials by index. PCM behind a final is dropped, so
+// memory never grows with media length.
 class Transcriber {
   public:
     // Pulls up to max mono f32 samples at the model rate; 0 means EOF.
@@ -95,9 +98,14 @@ class Transcriber {
     // Runs to completion on the caller's thread. Throws DecodeError
     // propagated from the source, DurationCapExceeded past the cap, and
     // std::runtime_error on an internal whisper failure.
+    //
+    // A stop request ends the run with aborted set: between PCM reads, and
+    // inside whisper_full through its abort callback, which whisper checks
+    // after every encode and decode step. A window that commits nothing
+    // (silence, music) never reaches the sink, so this is what stops it.
     static EngineResult run(whisper_context* ctx, whisper_state* state,
                             const EngineOptions& options, const PcmRead& read,
-                            const SegmentSink& sink);
+                            const SegmentSink& sink, std::stop_token stop = {});
 };
 
 }  // namespace asr::engine

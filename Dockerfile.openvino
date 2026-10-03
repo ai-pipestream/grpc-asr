@@ -29,7 +29,7 @@ FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl g++ git gpg make ninja-build pkg-config ffmpeg \
+        ca-certificates cmake curl g++ git gpg make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Intel's OpenVINO APT repo, 2025 stream, ubuntu24 (noble) distribution.
@@ -40,6 +40,16 @@ RUN curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
     && apt-get update \
     && apt-get install -y --no-install-recommends libopenvino-dev-2025.4.1 \
     && rm -rf /var/lib/apt/lists/*
+
+# The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
+# sha256-checked upstream release with just the demuxers and decoders the
+# service runs (scripts/build-ffmpeg.sh). Ubuntu's ffmpeg package, which is
+# built with --enable-gpl, is installed above for the build stage only: the
+# tests author their fixtures with its encoders (libx264, libopus,
+# libvorbis), never ship it, and run the code under test against
+# /opt/ffmpeg, which comes first on PATH for ctest.
+COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
+RUN /tmp/build-ffmpeg.sh /opt/ffmpeg
 
 WORKDIR /src
 COPY . .
@@ -52,7 +62,8 @@ RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-cxx23-grpc1.83.0-wh
     cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
-    && ctest --test-dir /build -L asr --output-on-failure \
+    && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
+        ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/
 
 FROM ubuntu:26.04
@@ -62,8 +73,9 @@ FROM ubuntu:26.04
 # runtime (intel-opencl-icd) that the plugin drives. The OpenVINO debs come
 # from Intel's repo; intel-opencl-icd comes from Ubuntu's own 26.04 archive
 # (26.05, Battlemage-capable). The repo is removed again once the debs are in.
+# libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gpg ffmpeg \
+        ca-certificates curl gpg libgomp1 \
     && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
         | gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu24 main" \
@@ -79,7 +91,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 
-ENV GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
+# ffmpeg and ffprobe with their shared libraries, from the build stage:
+# LGPL-2.1-or-later, found through an absolute rpath into /opt/ffmpeg/lib.
+# /opt/ffmpeg/share/doc/ffmpeg carries the license texts, the configure
+# line and the source tarball the build was made from; NOTICE says so, and
+# scripts/smoke-test.sh checks the label, NOTICE and that the build is not
+# a GPL one.
+COPY --from=build /opt/ffmpeg /opt/ffmpeg
+COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
+LABEL ai.pipestream.ffmpeg.license="LGPL-2.1-or-later" \
+      ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are built from the upstream FFmpeg release without --enable-gpl or --enable-nonfree; source, configure line and license: /opt/ffmpeg/share/doc/ffmpeg. Details: /usr/share/doc/grpc-asr/NOTICE"
+
+ENV PATH=/opt/ffmpeg/bin:$PATH \
+    GRPC_ASR_FFMPEG=/opt/ffmpeg/bin/ffmpeg \
+    GRPC_ASR_FFPROBE=/opt/ffmpeg/bin/ffprobe \
+    GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
     GRPC_ASR_BACKEND=openvino \
     GRPC_ASR_MODELS_DIR=/models
 
