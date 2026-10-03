@@ -266,6 +266,55 @@ std::string write_silent_tool() {
     return path;
 }
 
+void verify_stray_descriptors_stay_out(const std::string& media) {
+    // A descriptor some library opened without close-on-exec must not
+    // reach the tool: the child closes everything above fd 3 before exec.
+    // The stand-in ffprobe records the descriptors it was started with.
+    std::string listing_path = "/tmp/grpc-asr-tool-fds-XXXXXX";
+    int listing_fd = mkstemp(listing_path.data());
+    require(listing_fd >= 0, "temp listing path");
+    ::close(listing_fd);
+    std::string tool = "/tmp/grpc-asr-fd-tool-XXXXXX";
+    int fd = mkstemp(tool.data());
+    require(fd >= 0, "temp tool path");
+    const std::string script = "#!/bin/sh\nls /proc/$$/fd > " + listing_path + "\n";
+    require(::write(fd, script.data(), script.size()) == static_cast<ssize_t>(script.size()),
+            "tool script written");
+    ::close(fd);
+    require(::chmod(tool.c_str(), 0700) == 0, "tool script executable");
+
+    // High enough to stay clear of the descriptors sh opens for itself.
+    const int null_fd = ::open("/dev/null", O_RDONLY);
+    require(null_fd >= 0, "/dev/null opened");
+    const int stray = ::fcntl(null_fd, F_DUPFD, 100);
+    ::close(null_fd);
+    require(stray >= 100, "stray descriptor without close-on-exec");
+
+    VideoDemux demux(reinterpret_cast<const uint8_t*>(media.data()), media.size(), "ffmpeg", tool,
+                     kToolTimeout);
+    demux.probe();
+    ::close(stray);
+    const std::string listing = slurp(listing_path);
+    std::remove(listing_path.c_str());
+    std::remove(tool.c_str());
+
+    std::vector<int> inherited;
+    size_t start = 0;
+    while (start < listing.size()) {
+        size_t end = listing.find('\n', start);
+        if (end == std::string::npos) {
+            end = listing.size();
+        }
+        if (end > start) {
+            inherited.push_back(std::stoi(listing.substr(start, end - start)));
+        }
+        start = end + 1;
+    }
+    require(std::ranges::find(inherited, 3) != inherited.end(), "the tool still gets the media");
+    require(std::ranges::find(inherited, stray) == inherited.end(),
+            "a descriptor without close-on-exec stays out of the tool, got: " + listing);
+}
+
 void verify_stop_reaches_a_silent_child(const std::string& media) {
     // The stop lands while the child produces nothing: the read must not
     // sit out the (60 s) inactivity timeout before noticing.
@@ -400,6 +449,7 @@ int main() {
         verify_stop_mid_audio(media);
         verify_descriptors_stay_private(media);
         verify_media_on_fd_3(media);
+        verify_stray_descriptors_stay_out(media);
         verify_ogg_audio();
         verify_video_without_audio();
         verify_garbage_rejected();

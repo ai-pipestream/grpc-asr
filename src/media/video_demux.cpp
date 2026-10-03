@@ -30,6 +30,8 @@ constexpr char kMediaPath[] = "/dev/fd/3";
 // rejecting the media.
 constexpr int kExecFailed = 127;
 constexpr std::chrono::milliseconds kReapGrace{2000};
+// Highest descriptor count the pre-close_range fallback walks.
+constexpr long kCloseLimitCap = 65536;
 // How often a waiting read re-checks its stop token: the bound on how long
 // a child outlives the call that wanted its output.
 constexpr std::chrono::milliseconds kStopPollInterval{100};
@@ -68,6 +70,12 @@ class ToolProcess {
             ::close(out_pipe[1]);
             throw ToolError("pipe creation failed");
         }
+        // Bound for the fallback close loop in the child, read here because
+        // sysconf is not async-signal-safe.
+        const long open_max = ::sysconf(_SC_OPEN_MAX);
+        const int close_limit = open_max > kMediaFd && open_max < kCloseLimitCap
+                                    ? static_cast<int>(open_max)
+                                    : kCloseLimitCap;
         pid_ = ::fork();
         if (pid_ < 0) {
             for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
@@ -79,9 +87,11 @@ class ToolProcess {
             // First lift every source above the target slots, so no dup2
             // below overwrites one still waiting to be copied: the memfd
             // or a pipe end sits on 1, 2 or 3 whenever those were free.
-            // Then dup2 clears close-on-exec on the copies, so the tool
-            // keeps exactly its stdout, its stderr, and the media on fd 3;
-            // everything else closes at exec.
+            // Then dup2 clears close-on-exec on the copies, and every
+            // descriptor above fd 3 is closed, so the tool keeps exactly
+            // its stdin, stdout, stderr, and the media on fd 3. Close-on-exec
+            // alone would leave in place whatever a library (a GPU runtime,
+            // say) opened without it.
             int media = media_fd;
             int out = out_pipe[1];
             int err = err_pipe[1];
@@ -96,6 +106,12 @@ class ToolProcess {
             if (::dup2(media, kMediaFd) < 0 || ::dup2(out, STDOUT_FILENO) < 0 ||
                 ::dup2(err, STDERR_FILENO) < 0) {
                 ::_exit(kExecFailed);
+            }
+            if (::close_range(kMediaFd + 1, ~0U, 0) != 0) {
+                // Kernels before 5.9 have no close_range.
+                for (int fd = kMediaFd + 1; fd < close_limit; ++fd) {
+                    ::close(fd);
+                }
             }
             ::execvp(args[0], args.data());
             ::_exit(kExecFailed);
