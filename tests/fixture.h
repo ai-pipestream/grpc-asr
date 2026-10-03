@@ -98,6 +98,15 @@ inline const char* env_or_null(const char* name) {
     return value != nullptr && *value != '\0' ? value : nullptr;
 }
 
+// The ffmpeg that authors media fixtures. The code under test always runs
+// the ffmpeg/ffprobe on PATH; GRPC_ASR_TEST_FIXTURE_FFMPEG points fixture
+// generation at a separate build with the encoders the shipped one lacks
+// (the image's ffmpeg decodes only).
+inline std::string fixture_ffmpeg() {
+    const char* configured = env_or_null("GRPC_ASR_TEST_FIXTURE_FFMPEG");
+    return configured != nullptr ? configured : "ffmpeg";
+}
+
 // Standard skip: exit 77 so CTest reports SKIP, not PASS.
 inline int skip(const std::string& why) {
     std::println(stderr, "SKIP: {}", why);

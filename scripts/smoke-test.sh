@@ -12,8 +12,10 @@
 #      with its OWN "no ggml-*.bin model files" startup failure, proving
 #      the loader, configuration parsing, backend verification, and model
 #      discovery all ran, not a loader error.
-#   4. license notice: the image labels the GPL ffmpeg it ships
-#      (ai.pipestream.ffmpeg.license) and carries NOTICE.
+#   4. ffmpeg: ffmpeg and ffprobe resolve every shared library, the build
+#      configuration carries neither --enable-gpl nor --enable-nonfree, the
+#      label says LGPL-2.1-or-later, and the image carries NOTICE plus the
+#      ffmpeg license text, configure line and source tarball.
 #
 # There is deliberately no --full mode: the image ships no client binary
 # and a real transcription needs model weights, which CI contexts do not
@@ -81,16 +83,41 @@ if ! grep -qF "Startup failed: no ggml-*.bin model files in /models" <<<"$boot_o
   exit 1
 fi
 
-echo "== smoke: image declares the GPL ffmpeg it ships"
+echo "== smoke: ffmpeg and ffprobe resolve their libraries"
+for tool in ffmpeg ffprobe; do
+  tool_trace=$(docker run --rm -e LD_TRACE_LOADED_OBJECTS=1 --entrypoint "/opt/ffmpeg/bin/$tool" "$image" 2>&1 || true)
+  if ! grep -q '=>' <<<"$tool_trace" || grep -q "not found" <<<"$tool_trace"; then
+    echo "/opt/ffmpeg/bin/$tool does not load in $image:" >&2
+    echo "$tool_trace" >&2
+    exit 1
+  fi
+done
+
+echo "== smoke: ffmpeg is an LGPL build"
+buildconf=$(docker run --rm --entrypoint /opt/ffmpeg/bin/ffmpeg "$image" -hide_banner -buildconf 2>&1)
+echo "$buildconf"
+if grep -qE -- '--enable-(gpl|version3|nonfree)' <<<"$buildconf"; then
+  echo "the ffmpeg in $image is configured with GPL, LGPLv3 or nonfree parts" >&2
+  exit 1
+fi
 ffmpeg_license=$(docker inspect --format '{{ index .Config.Labels "ai.pipestream.ffmpeg.license" }}' "$image")
-if [[ "$ffmpeg_license" != "GPL-2.0-or-later" ]]; then
-  echo "expected label ai.pipestream.ffmpeg.license=GPL-2.0-or-later, image has '$ffmpeg_license'" >&2
+if [[ "$ffmpeg_license" != "LGPL-2.1-or-later" ]]; then
+  echo "expected label ai.pipestream.ffmpeg.license=LGPL-2.1-or-later, image has '$ffmpeg_license'" >&2
   exit 1
 fi
 notice_probe=$(docker create "$image")
-if ! docker cp "$notice_probe:/usr/share/doc/grpc-asr/NOTICE" - >/dev/null 2>&1; then
+for path in /usr/share/doc/grpc-asr/NOTICE /opt/ffmpeg/share/doc/ffmpeg/COPYING.LGPLv2.1 \
+    /opt/ffmpeg/share/doc/ffmpeg/CONFIGURE; do
+  if ! docker cp "$notice_probe:$path" - >/dev/null 2>&1; then
+    docker rm "$notice_probe" >/dev/null
+    echo "the image carries no $path" >&2
+    exit 1
+  fi
+done
+ffmpeg_docs=$(docker cp "$notice_probe:/opt/ffmpeg/share/doc/ffmpeg" - 2>/dev/null | tar -t || true)
+if ! grep -qE '^ffmpeg/ffmpeg-[0-9.]+\.tar\.xz$' <<<"$ffmpeg_docs"; then
   docker rm "$notice_probe" >/dev/null
-  echo "the image carries no /usr/share/doc/grpc-asr/NOTICE" >&2
+  echo "the image carries no ffmpeg source tarball under /opt/ffmpeg/share/doc/ffmpeg" >&2
   exit 1
 fi
 docker rm "$notice_probe" >/dev/null

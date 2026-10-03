@@ -108,7 +108,10 @@ tests need provisioning and skip (exit 77) without it: `transcriber-test`
 and `asr-service-test` need `models/ggml-tiny.en.bin` (`curl -L -o
 models/ggml-tiny.en.bin
 https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin`),
-and the video cases need `ffmpeg` and `ffprobe` on PATH.
+and the video cases need `ffmpeg` and `ffprobe` on PATH. The tests author
+their fixtures with `GRPC_ASR_TEST_FIXTURE_FFMPEG` (default `ffmpeg`), which
+needs the libx264, libopus and libvorbis encoders; the image builds point it
+at a distribution ffmpeg and test the decode-only one they ship.
 
 Backend variants: `-DGRPC_ASR_CUDA=ON` (GGML CUDA) and
 `-DGRPC_ASR_OPENVINO=ON` (whisper OpenVINO encoder; needs the OpenVINO SDK
@@ -192,15 +195,16 @@ and OpenVINO images are linux/amd64 only.
 
 grpc-asr-server links only permissively licensed code: whisper.cpp and
 ggml (MIT), miniaudio (public domain or MIT-0), and gRPC (Apache-2.0) with
-the libraries it builds. The container images also install `ffmpeg` and
-`ffprobe` from Ubuntu's archive, and Ubuntu builds them with `--enable-gpl`
-(libx264, libx265 and more), so those two executables are
-GPL-2.0-or-later. The server runs them as separate processes for video and
-Ogg input and never links them; the binary carries no GPL code, but every
-image does, and anyone redistributing an image takes on the GPL's
-obligations for those executables, source availability included. Each image
-says so in its `ai.pipestream.ffmpeg.license` label and carries the details
-at `/usr/share/doc/grpc-asr/NOTICE` (this repository's [NOTICE](NOTICE)).
+the libraries it builds. The container images also ship `ffmpeg` and
+`ffprobe`, built from the upstream FFmpeg 9.0.2 release by
+[scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh) without `--enable-gpl` or
+`--enable-nonfree` and with only the demuxers and decoders the service uses,
+so they are LGPL-2.1-or-later. The server runs them as separate processes
+for video and Ogg input and never links them. Each image says so in its
+`ai.pipestream.ffmpeg.license` label, carries the license text, the exact
+configure line and the source tarball under `/opt/ffmpeg/share/doc/ffmpeg`,
+and carries the details at `/usr/share/doc/grpc-asr/NOTICE` (this
+repository's [NOTICE](NOTICE)).
 
 ## Remotes
 

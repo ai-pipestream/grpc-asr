@@ -35,8 +35,10 @@ namespace {
 constexpr std::chrono::milliseconds kToolTimeout{60000};
 
 bool have_ffmpeg() {
+    const std::string generator = fixture_ffmpeg() + " -version >/dev/null 2>&1";
     return std::system("ffmpeg -version >/dev/null 2>&1") == 0 &&
-           std::system("ffprobe -version >/dev/null 2>&1") == 0;
+           std::system("ffprobe -version >/dev/null 2>&1") == 0 &&
+           std::system(generator.c_str()) == 0;
 }
 
 // Generates a fixture through ffmpeg into a temp file, slurps it, deletes
@@ -48,7 +50,8 @@ std::string generate_media(const std::string& args, const std::string& suffix) {
     int fd = mkstemps(path.data(), static_cast<int>(suffix.size()));
     require(fd >= 0, "temp fixture path");
     ::close(fd);
-    std::string command = "ffmpeg -v error -y " + args + " " + path + " >/dev/null 2>&1";
+    std::string command =
+        fixture_ffmpeg() + " -v error -y " + args + " " + path + " >/dev/null 2>&1";
     require(std::system(command.c_str()) == 0, "fixture generation: " + command);
     std::string bytes = slurp(path);
     std::remove(path.c_str());

@@ -3,8 +3,8 @@
 #
 # The build stage compiles whisper.cpp with the GGML CUDA backend and runs
 # the test suite; the tests gate the image. Model weights are never baked
-# in — mount them read-only at /models. Tests that need weights or ffmpeg
-# skip cleanly (exit 77) when the build context lacks them, so CI contexts
+# in — mount them read-only at /models. Tests that need weights skip
+# cleanly (exit 77) when the build context lacks them, so CI contexts
 # without models still build an image while local builds (which keep
 # models/ in the context, see .dockerignore) assert the real transcription
 # path. Tests linked against the CUDA backend need the driver library at
@@ -19,8 +19,18 @@ ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu24.04
 FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake gcc-14 g++-14 git make ninja-build pkg-config ffmpeg \
+        ca-certificates cmake curl gcc-14 g++-14 git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+# The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
+# sha256-checked upstream release with just the demuxers and decoders the
+# service runs (scripts/build-ffmpeg.sh). Ubuntu's ffmpeg package, which is
+# built with --enable-gpl, is installed above for the build stage only: the
+# tests author their fixtures with its encoders (libx264, libopus,
+# libvorbis), never ship it, and run the code under test against
+# /opt/ffmpeg, which comes first on PATH for ctest.
+COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
+RUN CC=gcc-14 /tmp/build-ffmpeg.sh /opt/ffmpeg
 
 WORKDIR /src
 COPY . .
@@ -32,24 +42,29 @@ RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda12.9-gcc14-cxx23-grpc1.83.0-whis
         -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_CUDA=ON \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
-    && ctest --test-dir /build -L asr --output-on-failure \
+    && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
+        ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/
 
 FROM ${GRPC_ASR_RUNTIME_IMAGE}
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 
-# The ffmpeg and ffprobe installed above are Ubuntu's --enable-gpl build:
-# GPL-2.0-or-later executables the server runs as child processes and never
-# links. The label and NOTICE tell anyone who pulls or redistributes the
-# image; scripts/smoke-test.sh checks both are there.
+# ffmpeg and ffprobe with their shared libraries, from the build stage:
+# LGPL-2.1-or-later, found through an absolute rpath into /opt/ffmpeg/lib.
+# /opt/ffmpeg/share/doc/ffmpeg carries the license texts, the configure
+# line and the source tarball the build was made from; NOTICE says so, and
+# scripts/smoke-test.sh checks the label, NOTICE and that the build is not
+# a GPL one.
+COPY --from=build /opt/ffmpeg /opt/ffmpeg
 COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
-LABEL ai.pipestream.ffmpeg.license="GPL-2.0-or-later" \
-      ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are Ubuntu archive builds configured with --enable-gpl; grpc-asr-server runs them as separate processes and does not link them. Details: /usr/share/doc/grpc-asr/NOTICE"
+LABEL ai.pipestream.ffmpeg.license="LGPL-2.1-or-later" \
+      ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are built from the upstream FFmpeg release without --enable-gpl or --enable-nonfree; source, configure line and license: /opt/ffmpeg/share/doc/ffmpeg. Details: /usr/share/doc/grpc-asr/NOTICE"
 
 # The server links libcuda.so.1, which nvidia-container-toolkit injects on
 # GPU hosts; a plain docker run has no driver library, so the loader stops
@@ -60,7 +75,10 @@ LABEL ai.pipestream.ffmpeg.license="GPL-2.0-or-later" \
 # directory is never searched.
 COPY --from=build /usr/local/cuda/lib64/stubs/libcuda.so /opt/cuda-stubs/libcuda.so.1
 
-ENV GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
+ENV PATH=/opt/ffmpeg/bin:$PATH \
+    GRPC_ASR_FFMPEG=/opt/ffmpeg/bin/ffmpeg \
+    GRPC_ASR_FFPROBE=/opt/ffmpeg/bin/ffprobe \
+    GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 \
     GRPC_ASR_BACKEND=cuda \
     GRPC_ASR_MODELS_DIR=/models \
     CUDA_CACHE_DISABLE=1
