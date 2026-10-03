@@ -41,8 +41,9 @@ struct ProbeInfo {
 // touching a filesystem: the encoded bytes live in a sealed memfd
 // (anonymous RAM file, seekable, so mp4 trailing-moov layouts work), and
 // every child reads it via /dev/fd. The memfd and the children's pipes are
-// close-on-exec, so concurrent streams never inherit each other's. PCM and PNG output stream back through pipes with
-// backpressure, so memory stays bounded no matter the media length.
+// close-on-exec, so concurrent streams never inherit each other's. PCM and
+// PNG output stream back through pipes with backpressure, so memory stays
+// bounded no matter the media length.
 //
 // Every child watches the stop token its call was given: a stop request
 // kills the child within a fraction of a second and throws Cancelled from
