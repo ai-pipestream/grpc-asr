@@ -8,11 +8,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <string_view>
 #include <vector>
 
+#include "cancellation.h"
 #include "media/audio_decoder.h"
 
 namespace asr::media {
@@ -27,15 +29,23 @@ constexpr char kMediaPath[] = "/dev/fd/3";
 // binary is distinguishable from ffmpeg rejecting the media.
 constexpr int kExecFailed = 127;
 constexpr std::chrono::milliseconds kReapGrace{2000};
+// How often a waiting read re-checks its stop token: the bound on how long
+// a child outlives the call that wanted its output.
+constexpr std::chrono::milliseconds kStopPollInterval{100};
 
 // One ffmpeg/ffprobe child with its stdout and stderr pipes. Reads apply
-// the inactivity timeout; stderr is drained alongside stdout (so the child
-// can never block on a full stderr pipe) and its tail kept for errors.
+// the inactivity timeout and the stop token; stderr is drained alongside
+// stdout (so the child can never block on a full stderr pipe) and its tail
+// kept for errors.
 class ToolProcess {
   public:
     ToolProcess(const std::vector<std::string>& argv, int media_fd,
-                std::chrono::milliseconds inactivity_timeout)
-        : inactivity_timeout_(inactivity_timeout) {
+                std::chrono::milliseconds inactivity_timeout, std::stop_token stop)
+        : inactivity_timeout_(inactivity_timeout), stop_(std::move(stop)) {
+        tool_ = argv.empty() ? "tool" : argv[0];
+        if (stop_.stop_requested()) {
+            throw Cancelled(tool_ + " not started: the stream is gone");
+        }
         int out_pipe[2];
         int err_pipe[2];
         if (::pipe(out_pipe) != 0 || ::pipe(err_pipe) != 0) {
@@ -68,7 +78,6 @@ class ToolProcess {
         ::close(err_pipe[1]);
         out_fd_ = out_pipe[0];
         err_fd_ = err_pipe[0];
-        tool_ = argv.empty() ? "tool" : argv[0];
     }
 
     ~ToolProcess() {
@@ -86,18 +95,32 @@ class ToolProcess {
 
     // Reads up to max_bytes of the child's stdout. Returns 0 on clean end
     // of stream. Kills the child and throws ToolError when it produces no
-    // output within the inactivity timeout.
+    // output (stdout or stderr) within the inactivity timeout, and
+    // Cancelled once the stop token fires.
     size_t read(uint8_t* out, size_t max_bytes) {
+        auto idle_deadline = std::chrono::steady_clock::now() + inactivity_timeout_;
         while (true) {
+            if (stop_.stop_requested()) {
+                ::kill(pid_, SIGKILL);
+                throw Cancelled(tool_ + " stopped: the stream is gone");
+            }
+            const auto idle_left = std::chrono::ceil<std::chrono::milliseconds>(
+                idle_deadline - std::chrono::steady_clock::now());
+            if (idle_left.count() <= 0) {
+                ::kill(pid_, SIGKILL);
+                throw ToolError(tool_ + " produced no output for " +
+                                std::to_string(inactivity_timeout_.count()) + "ms; killed");
+            }
             struct pollfd fds[2];
             fds[0] = {out_fd_, POLLIN, 0};
             fds[1] = {err_fd_, POLLIN, 0};
             nfds_t nfds = err_fd_ >= 0 ? 2 : 1;
-            int ready = ::poll(fds, nfds, static_cast<int>(inactivity_timeout_.count()));
+            // Short slices, so a stop request lands even while the child
+            // is silent (seeking, decoding toward the next still).
+            int ready = ::poll(fds, nfds,
+                               static_cast<int>(std::min(idle_left, kStopPollInterval).count()));
             if (ready == 0) {
-                ::kill(pid_, SIGKILL);
-                throw ToolError(tool_ + " produced no output for " +
-                                std::to_string(inactivity_timeout_.count()) + "ms; killed");
+                continue;
             }
             if (ready < 0) {
                 if (errno == EINTR) {
@@ -106,7 +129,9 @@ class ToolProcess {
                 throw ToolError(tool_ + " poll failed: " + std::strerror(errno));
             }
             if (err_fd_ >= 0 && (fds[1].revents & (POLLIN | POLLHUP)) != 0) {
-                drain_stderr();
+                if (drain_stderr()) {
+                    idle_deadline = std::chrono::steady_clock::now() + inactivity_timeout_;
+                }
             }
             if ((fds[0].revents & (POLLIN | POLLHUP)) != 0) {
                 ssize_t n = ::read(out_fd_, out, max_bytes);
@@ -163,25 +188,35 @@ class ToolProcess {
     const std::string& stderr_tail() const { return stderr_tail_; }
 
   private:
-    void drain_stderr() {
+    // Returns true when the sweep read anything. At end of file the pipe
+    // is closed, so poll stops reporting its hangup over and over.
+    bool drain_stderr() {
         if (err_fd_ < 0) {
-            return;
+            return false;
         }
         // Non-blocking sweep: keep only the final 4 KiB.
         int flags = ::fcntl(err_fd_, F_GETFL);
         ::fcntl(err_fd_, F_SETFL, flags | O_NONBLOCK);
         char buf[4096];
+        bool got = false;
         while (true) {
             ssize_t n = ::read(err_fd_, buf, sizeof buf);
-            if (n <= 0) {
+            if (n == 0) {
+                ::close(err_fd_);
+                err_fd_ = -1;
+                return got;
+            }
+            if (n < 0) {
                 break;
             }
+            got = true;
             stderr_tail_.append(buf, static_cast<size_t>(n));
             if (stderr_tail_.size() > 4096) {
                 stderr_tail_.erase(0, stderr_tail_.size() - 4096);
             }
         }
         ::fcntl(err_fd_, F_SETFL, flags);
+        return got;
     }
 
     pid_t pid_ = -1;
@@ -191,6 +226,7 @@ class ToolProcess {
     std::string tool_;
     std::string stderr_tail_;
     std::chrono::milliseconds inactivity_timeout_;
+    std::stop_token stop_;
 };
 
 // Reads the whole (small) stdout of a tool run, e.g. an ffprobe query.
@@ -270,11 +306,11 @@ VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path
 
 VideoDemux::~VideoDemux() = default;
 
-ProbeInfo VideoDemux::probe() {
+ProbeInfo VideoDemux::probe(std::stop_token stop) {
     ProbeInfo info;
 
     auto run_query = [&](const std::vector<std::string>& argv) -> std::string {
-        ToolProcess tool(argv, impl_->media_fd, impl_->inactivity_timeout);
+        ToolProcess tool(argv, impl_->media_fd, impl_->inactivity_timeout, stop);
         std::string out = collect_output(tool);
         int code = tool.wait_exit();
         if (code == kExecFailed) {
@@ -322,12 +358,12 @@ ProbeInfo VideoDemux::probe() {
     return info;
 }
 
-void VideoDemux::open_audio() {
+void VideoDemux::open_audio(std::stop_token stop) {
     impl_->audio = std::make_unique<ToolProcess>(
         std::vector<std::string>{impl_->ffmpeg, "-v", "error", "-i", kMediaPath, "-map", "a:0",
                                  "-f", "f32le", "-ac", "1", "-ar",
                                  std::to_string(kModelSampleRate), "pipe:1"},
-        impl_->media_fd, impl_->inactivity_timeout);
+        impl_->media_fd, impl_->inactivity_timeout, std::move(stop));
     impl_->partial_sample.clear();
 }
 
@@ -379,14 +415,15 @@ void VideoDemux::cancel_audio() {
 
 void VideoDemux::extract_keyframes(
     uint32_t interval_seconds,
-    const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink) {
+    const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink,
+    std::stop_token stop) {
     // fps=1/N picks the frame nearest each N-second grid point starting at
     // zero, so frame n sits at n*N seconds of media time.
     ToolProcess tool(
         {impl_->ffmpeg, "-v", "error", "-i", kMediaPath, "-map", "v:0", "-vf",
          "fps=1/" + std::to_string(interval_seconds), "-f", "image2pipe", "-c:v", "png",
          "pipe:1"},
-        impl_->media_fd, impl_->inactivity_timeout);
+        impl_->media_fd, impl_->inactivity_timeout, std::move(stop));
 
     constexpr std::string_view kSignature{"\x89PNG\r\n\x1a\n", 8};
     std::string buffer;

@@ -1,12 +1,16 @@
 #include "service/asr_service.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 
+#include "cancellation.h"
 #include "document/document_fold.h"
 #include "engine/transcriber.h"
 #include "media/audio_decoder.h"
@@ -24,6 +28,11 @@ namespace {
 #ifndef GRPC_ASR_VERSION
 #define GRPC_ASR_VERSION "0.0.0-dev"
 #endif
+
+// How often the RPC thread asks gRPC whether the call is still alive
+// once the upload is in: the bound on how long work outlives a cancel or
+// a passed deadline before its stop is requested.
+constexpr std::chrono::milliseconds kCallWatchInterval{100};
 
 // gRPC stream Write is not thread-safe; the transcription worker and the
 // keyframe thread share the stream through this lock. write() returning
@@ -141,9 +150,12 @@ void fill_segment(const engine::EngineSegment& source, asrv1::Segment* out) {
 // The transcription pipeline, run on a worker thread concurrently with
 // the upload so segments stream while media is still arriving. Returns
 // the final RPC status; on success the Complete trailer has been written.
+// stop fires when the call is gone (cancelled, past its deadline, or its
+// upload failed); every blocking step watches it.
 grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                             const asrv1::TranscribeOptions& options, media::ByteStream& upload,
-                            LockedWriter& writer, std::atomic<long>& audio_ms) {
+                            LockedWriter& writer, std::atomic<long>& audio_ms,
+                            std::stop_token stop) {
     const uint64_t max_duration_ms =
         static_cast<uint64_t>(config_.max_duration_seconds) * 1000ULL;
 
@@ -156,6 +168,20 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         .window_seconds = config_.window_seconds,
         .max_duration_seconds = config_.max_duration_seconds,
     };
+
+    // Until the queue deadline a stream waits for a free whisper state;
+    // 0 leaves the wait to the stop token alone.
+    auto acquire_state = [&] {
+        return pool_.acquire(options.model(), stop,
+                             config_.queue_timeout_seconds == 0
+                                 ? std::chrono::steady_clock::time_point::max()
+                                 : std::chrono::steady_clock::now() +
+                                       std::chrono::seconds(config_.queue_timeout_seconds));
+    };
+    // A failure that follows a stop is the stop's doing, not the media's.
+    auto gone = [&] { return upload.is_aborted() || stop.stop_requested(); };
+    const grpc::Status cancelled{grpc::StatusCode::CANCELLED,
+                                 "the stream went away mid-transcription"};
 
     try {
         // Sniff the container from the first bytes; blocks only until the
@@ -199,20 +225,22 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             info->set_sample_rate_hz(decoder.info().sample_rate_hz);
             info->set_channels(decoder.info().channels);
             info->set_has_video(false);
-            writer.write(info_response);
+            if (!writer.write(info_response)) {
+                return cancelled;
+            }
 
-            engine::ModelPool::Lease lease = pool_.acquire(options.model());
+            engine::ModelPool::Lease lease = acquire_state();
             result = engine::Transcriber::run(
                 lease.context(), lease.state(), engine_options,
                 [&](float* out, size_t max_samples) { return decoder.read(out, max_samples); },
-                segment_sink);
+                segment_sink, stop);
         } else {
             // Video path: a classic mp4's moov index can trail the file,
             // so ffmpeg needs the complete bytes in the (seekable) memfd.
             // Streamable containers (mpeg-ts, fragmented mp4) via a pipe
             // are the designed follow-up; see docs/design.md.
             upload.wait_complete();
-            if (upload.is_aborted()) {
+            if (gone()) {
                 return {grpc::StatusCode::CANCELLED, "upload aborted"};
             }
             const std::string& media_bytes = upload.completed_bytes();
@@ -220,7 +248,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 reinterpret_cast<const uint8_t*>(media_bytes.data()), media_bytes.size(),
                 config_.ffmpeg, config_.ffprobe,
                 std::chrono::milliseconds(config_.tool_inactivity_seconds * 1000));
-            media::ProbeInfo probe = demux.probe();
+            media::ProbeInfo probe = demux.probe(stop);
             if (!probe.has_audio) {
                 return {grpc::StatusCode::INVALID_ARGUMENT,
                         "video has no audio track to transcribe"};
@@ -236,9 +264,11 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             info->set_channels(probe.channels);
             info->set_has_video(probe.has_video);
             info->set_video_codec(probe.video_codec);
-            writer.write(info_response);
+            if (!writer.write(info_response)) {
+                return cancelled;
+            }
 
-            engine::ModelPool::Lease lease = pool_.acquire(options.model());
+            std::optional<engine::ModelPool::Lease> lease(acquire_state());
 
             // Keyframes stream from their own ffmpeg child concurrently
             // with transcription; the LockedWriter interleaves the two.
@@ -247,7 +277,8 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             // destroys the jthread, which asks the extraction to stop and
             // joins it: a running std::thread there would call
             // std::terminate and take every other stream down with this
-            // one. Everything the thread touches is declared before it.
+            // one. Everything the thread touches is declared before it,
+            // and the call's stop reaches it through forward_stop below.
             std::exception_ptr keyframe_error;
             std::jthread keyframe_thread;
             if (options.emit_keyframes() && probe.has_video) {
@@ -276,18 +307,26 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                                 }
                                 keyframe_count++;
                                 return true;
-                            });
+                            },
+                            keyframe_stop);
                     } catch (...) {
                         keyframe_error = std::current_exception();
                     }
                 });
             }
+            std::stop_callback forward_stop(
+                stop, [source = keyframe_thread.get_stop_source()]() mutable {
+                    source.request_stop();
+                });
 
-            demux.open_audio();
+            demux.open_audio(stop);
             result = engine::Transcriber::run(
-                lease.context(), lease.state(), engine_options,
+                lease->context(), lease->state(), engine_options,
                 [&](float* out, size_t max_samples) { return demux.read_audio(out, max_samples); },
-                segment_sink);
+                segment_sink, stop);
+            // The whisper state goes back to the pool now: a queued stream
+            // need not wait for this one's stills to finish decoding.
+            lease.reset();
             if (result.aborted) {
                 // The transcription stopped reading mid-stream, so the
                 // audio child is blocked on its full pipe: kill it rather
@@ -306,8 +345,8 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             }
         }
 
-        if (result.aborted || upload.is_aborted()) {
-            return {grpc::StatusCode::CANCELLED, "the stream went away mid-transcription"};
+        if (result.aborted || gone()) {
+            return cancelled;
         }
 
         // Name the folded Document. The event stream carries no filename
@@ -331,18 +370,30 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
 
         audio_ms += static_cast<long>(result.duration_ms);
         return grpc::Status::OK;
+    } catch (const Cancelled&) {
+        return cancelled;
+    } catch (const engine::QueueTimeout& error) {
+        return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+                std::string(error.what()) + " for GRPC_ASR_QUEUE_TIMEOUT_SECONDS=" +
+                    std::to_string(config_.queue_timeout_seconds)};
     } catch (const media::DecodeError& error) {
         // An aborted upload surfaces to the decoder as truncation; report
         // the disconnect, not a media defect.
-        if (upload.is_aborted()) {
+        if (gone()) {
             return {grpc::StatusCode::CANCELLED, "upload aborted mid-decode"};
         }
         return {grpc::StatusCode::INVALID_ARGUMENT, error.what()};
     } catch (const engine::DurationCapExceeded& error) {
         return {grpc::StatusCode::RESOURCE_EXHAUSTED, error.what()};
     } catch (const media::ToolError& error) {
+        if (gone()) {
+            return cancelled;
+        }
         return {grpc::StatusCode::INTERNAL, error.what()};
     } catch (const std::exception& error) {
+        if (gone()) {
+            return cancelled;
+        }
         return {grpc::StatusCode::INTERNAL,
                 std::string("transcription failed: ") + error.what()};
     }
@@ -389,9 +440,19 @@ grpc::Status AsrServiceImpl::Transcribe(
                      doc::FoldOptions{.word_provenance = config_.document_word_provenance});
     }
     LockedWriter writer(stream, fold.has_value() ? &*fold : nullptr);
+    // Requested the moment the call is gone; the worker's decoder, media
+    // children and pool wait all watch it.
+    std::stop_source stop;
     grpc::Status worker_status = grpc::Status::OK;
+    std::mutex worker_mutex;
+    std::condition_variable worker_finished;
+    bool worker_done = false;
     std::thread worker([&] {
-        worker_status = process_stream(config_, pool_, options, upload, writer, audio_ms);
+        worker_status =
+            process_stream(config_, pool_, options, upload, writer, audio_ms, stop.get_token());
+        std::lock_guard<std::mutex> lock(worker_mutex);
+        worker_done = true;
+        worker_finished.notify_all();
     });
 
     // Upload loop, concurrent with the worker. Reader-side failures
@@ -416,14 +477,34 @@ grpc::Status AsrServiceImpl::Transcribe(
         upload.append(data.data(), data.size());
     }
 
+    // Stop before abort: the decoder sees the aborted upload as its end of
+    // stream, and must find the stop already requested rather than decode
+    // what it has as a last window.
     if (!reader_status.ok() || context->IsCancelled()) {
+        stop.request_stop();
         upload.abort();
     } else if (!saw_bytes) {
         reader_status = {grpc::StatusCode::INVALID_ARGUMENT,
                          "stream ended without media bytes"};
+        stop.request_stop();
         upload.abort();
     } else {
         upload.complete();
+    }
+
+    // With the upload in, a gone client surfaces only as a failed write,
+    // and the worker can go minutes without one: a silent stretch, a
+    // queue, the video probes. Watch the call instead, so a cancel or a
+    // passed deadline (gRPC cancels the call at its deadline) stops the
+    // work within one interval.
+    {
+        std::unique_lock<std::mutex> lock(worker_mutex);
+        while (!worker_finished.wait_for(lock, kCallWatchInterval, [&] { return worker_done; })) {
+            if (context->IsCancelled()) {
+                stop.request_stop();
+                break;
+            }
+        }
     }
     worker.join();
 

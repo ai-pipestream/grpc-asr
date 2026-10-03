@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 
 namespace asr::media {
@@ -41,6 +42,11 @@ struct ProbeInfo {
 // file, seekable, so mp4 trailing-moov layouts work), and every child
 // reads it via /dev/fd. PCM and PNG output stream back through pipes with
 // backpressure, so memory stays bounded no matter the media length.
+//
+// Every child watches the stop token its call was given: a stop request
+// kills the child within a fraction of a second and throws Cancelled from
+// that call (from read_audio for the audio child), whether the child was
+// streaming or silent.
 class VideoDemux {
   public:
     // Copies nothing to disk: creates a memfd and writes the media bytes
@@ -55,13 +61,13 @@ class VideoDemux {
 
     // Runs ffprobe over the container. Throws DecodeError when ffprobe
     // rejects the media, ToolError when ffprobe itself fails.
-    ProbeInfo probe();
+    ProbeInfo probe(std::stop_token stop = {});
 
     // Opens an ffmpeg child decoding the first audio track to mono f32
     // PCM at the model rate. Read pulls samples with pipe backpressure;
     // returns 0 at end of stream. A non-zero ffmpeg exit surfaces as
     // DecodeError from read() or close_audio().
-    void open_audio();
+    void open_audio(std::stop_token stop = {});
     size_t read_audio(float* out, size_t max_samples);
     void close_audio();
     // Kills and reaps the audio child without reading its exit status.
@@ -78,7 +84,8 @@ class VideoDemux {
     void extract_keyframes(
         uint32_t interval_seconds,
         const std::function<bool(uint64_t timestamp_ms, uint32_t width, uint32_t height,
-                                 std::string png)>& sink);
+                                 std::string png)>& sink,
+        std::stop_token stop = {});
 
   private:
     struct Impl;

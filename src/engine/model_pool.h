@@ -1,7 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <map>
 #include <memory>
+#include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -11,6 +14,13 @@ struct whisper_context;
 struct whisper_state;
 
 namespace asr::engine {
+
+// Thrown when every state of a model stayed busy until the queue deadline.
+// The service maps this to RESOURCE_EXHAUSTED.
+class QueueTimeout : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
 
 // Lists the model names a models directory serves with zero configuration:
 // every ggml-*.bin weight file, minus the OpenVINO encoder IR payloads
@@ -64,9 +74,13 @@ class ModelPool {
     // True when the model name was loaded at startup.
     bool has_model(const std::string& model) const;
 
-    // Blocks until a state for the model is free. The caller must have
+    // Blocks until a state for the model is free, the stream's stop fires
+    // (throws Cancelled), or the deadline passes (throws QueueTimeout); the
+    // default deadline waits as long as stop allows. The caller must have
     // checked has_model first; unknown names throw.
-    Lease acquire(const std::string& model);
+    Lease acquire(const std::string& model, std::stop_token stop = {},
+                  std::chrono::steady_clock::time_point deadline =
+                      std::chrono::steady_clock::time_point::max());
 
     // Loaded model names, for GetServiceInfo.
     std::vector<std::string> model_names() const;

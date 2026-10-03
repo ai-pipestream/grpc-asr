@@ -34,6 +34,10 @@ struct RunState {
     uint32_t window_base_speaker = 0;
     // Set when the sink returns false; makes whisper abort mid-window.
     std::atomic<bool> abort{false};
+    // The stream's stop; whisper polls it through on_abort as well.
+    std::stop_token stop;
+
+    bool stopped() const { return abort.load() || stop.stop_requested(); }
 };
 
 // Builds an EngineSegment from whisper's committed segment i (window
@@ -117,15 +121,15 @@ void on_new_segment(whisper_context* /*ctx*/, whisper_state* state, int n_new, v
 }
 
 bool on_abort(void* user_data) {
-    return static_cast<RunState*>(user_data)->abort.load();
+    return static_cast<RunState*>(user_data)->stopped();
 }
 
 }  // namespace
 
 EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
                               const EngineOptions& options, const PcmRead& read,
-                              const SegmentSink& sink) {
-    RunState run{.ctx = ctx, .options = &options, .sink = &sink};
+                              const SegmentSink& sink, std::stop_token stop) {
+    RunState run{.ctx = ctx, .options = &options, .sink = &sink, .stop = std::move(stop)};
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.print_progress = false;
@@ -160,6 +164,10 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
         // Fill the window. buffer may already hold the carried-over tail
         // of the previous window's unfinalized last segment.
         while (!source_done && buffer.size() < window_samples) {
+            if (run.stopped()) {
+                result.aborted = true;
+                return result;
+            }
             size_t space = window_samples - buffer.size();
             size_t old_size = buffer.size();
             buffer.resize(old_size + space);
@@ -187,15 +195,19 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
             buffer.resize(kModelSampleRate, 0.0f);
         }
 
+        if (run.stopped()) {
+            result.aborted = true;
+            return result;
+        }
         if (whisper_full_with_state(ctx, state, params, buffer.data(),
                                     static_cast<int>(buffer.size())) != 0) {
-            if (run.abort.load()) {
+            if (run.stopped()) {
                 result.aborted = true;
                 return result;
             }
             throw std::runtime_error("whisper_full failed mid-transcription");
         }
-        if (run.abort.load()) {
+        if (run.stopped()) {
             result.aborted = true;
             return result;
         }

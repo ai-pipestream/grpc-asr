@@ -86,6 +86,13 @@ demuxed by ffmpeg (video needs an audio track). Errors: cap overruns are
 `RESOURCE_EXHAUSTED`, undecodable media is `INVALID_ARGUMENT`, unknown
 containers are `UNIMPLEMENTED`, decoder faults are `INTERNAL`.
 
+A stream stops working the moment its client cancels or its deadline
+passes, whether it is decoding speech or a silent stretch that commits no
+segment, waiting for a free model state, probing a video, or extracting
+keyframes: the decoder and every ffmpeg child watch the call. A stream
+that waits for a model state longer than `GRPC_ASR_QUEUE_TIMEOUT_SECONDS`
+fails `RESOURCE_EXHAUSTED`.
+
 ## Build and test
 
 ```bash
@@ -124,6 +131,7 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
 | `GRPC_ASR_CONCURRENCY` | `2` | whisper states per model (concurrent transcriptions) |
+| `GRPC_ASR_QUEUE_TIMEOUT_SECONDS` | `1800` | how long a stream waits for a free whisper state before `RESOURCE_EXHAUSTED`; `0` waits as long as the client does |
 | `GRPC_ASR_MAX_MEDIA_BYTES` | `268435456` | upload cap, overrun is `RESOURCE_EXHAUSTED` |
 | `GRPC_ASR_MAX_DURATION_SECONDS` | `14400` | media duration cap, overrun is `RESOURCE_EXHAUSTED` |
 | `GRPC_ASR_WINDOW_SECONDS` | `480` | PCM window per `whisper_full`; bounds resident PCM |

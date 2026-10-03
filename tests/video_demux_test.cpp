@@ -5,15 +5,20 @@
 
 #include "media/video_demux.h"
 
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <print>
+#include <stop_token>
+#include <thread>
 #include <vector>
 
+#include "cancellation.h"
 #include "fixture.h"
 #include "media/audio_decoder.h"
 
@@ -145,6 +150,80 @@ void verify_audio_cancel(const std::string& media) {
     demux.close_audio();  // nothing left to close: a no-op, not an error
 }
 
+// A stand-in tool that never writes a byte, like ffmpeg seeking or
+// decoding toward its next still on a long video.
+std::string write_silent_tool() {
+    std::string path = "/tmp/grpc-asr-silent-tool-XXXXXX";
+    int fd = mkstemp(path.data());
+    require(fd >= 0, "temp tool path");
+    const std::string script = "#!/bin/sh\nexec sleep 60\n";
+    require(::write(fd, script.data(), script.size()) == static_cast<ssize_t>(script.size()),
+            "tool script written");
+    ::close(fd);
+    require(::chmod(path.c_str(), 0700) == 0, "tool script executable");
+    return path;
+}
+
+void verify_stop_reaches_a_silent_child(const std::string& media) {
+    // The stop lands while the child produces nothing: the read must not
+    // sit out the (60 s) inactivity timeout before noticing.
+    const std::string tool = write_silent_tool();
+    VideoDemux demux(reinterpret_cast<const uint8_t*>(media.data()), media.size(), "ffmpeg", tool,
+                     kToolTimeout);
+    std::stop_source stop;
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        stop.request_stop();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    bool cancelled = false;
+    try {
+        demux.probe(stop.get_token());
+    } catch (const asr::Cancelled&) {
+        cancelled = true;
+    }
+    const auto waited = std::chrono::steady_clock::now() - started;
+    stopper.join();
+    std::remove(tool.c_str());
+    require(cancelled, "a stopped probe throws Cancelled");
+    require(waited < std::chrono::seconds(2),
+            "the stop reached the silent child within a poll interval, not the inactivity timeout");
+    require(no_children_left(), "the stopped child was killed and reaped");
+}
+
+void verify_stop_before_start(const std::string& media) {
+    VideoDemux demux = open(media);
+    std::stop_source stop;
+    stop.request_stop();
+    bool cancelled = false;
+    try {
+        demux.probe(stop.get_token());
+    } catch (const asr::Cancelled&) {
+        cancelled = true;
+    }
+    require(cancelled, "a probe for a stream that is already gone throws Cancelled");
+    require(no_children_left(), "and never starts ffprobe");
+}
+
+void verify_stop_mid_audio(const std::string& media) {
+    VideoDemux demux = open(media);
+    std::stop_source stop;
+    demux.open_audio(stop.get_token());
+    std::vector<float> pcm(1024);
+    require(demux.read_audio(pcm.data(), pcm.size()) > 0, "the audio child streams PCM");
+    stop.request_stop();
+    bool cancelled = false;
+    try {
+        while (demux.read_audio(pcm.data(), pcm.size()) != 0) {
+        }
+    } catch (const asr::Cancelled&) {
+        cancelled = true;
+    }
+    require(cancelled, "the next audio read after a stop throws Cancelled");
+    demux.cancel_audio();
+    require(no_children_left(), "the stopped audio child was killed and reaped");
+}
+
 void verify_video_without_audio() {
     std::string media = make_video_only_mp4();
     VideoDemux demux = open(media);
@@ -191,6 +270,9 @@ int main() {
         verify_keyframes(media);
         verify_keyframes_stop(media);
         verify_audio_cancel(media);
+        verify_stop_reaches_a_silent_child(media);
+        verify_stop_before_start(media);
+        verify_stop_mid_audio(media);
         verify_video_without_audio();
         verify_garbage_rejected();
         verify_png_dimensions();

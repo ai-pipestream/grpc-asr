@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string_view>
 
+#include "cancellation.h"
 #include "ggml-backend.h"
 #include "whisper.h"
 
@@ -66,7 +67,8 @@ std::vector<std::string> discover_models(const std::string& models_dir) {
 struct ModelPool::Entry {
     whisper_context* ctx = nullptr;
     std::mutex mutex;
-    std::condition_variable available;
+    // _any for the stop_token-aware waits in acquire.
+    std::condition_variable_any available;
     std::deque<whisper_state*> free_states;
     std::vector<whisper_state*> all_states;
 
@@ -165,14 +167,27 @@ bool ModelPool::has_model(const std::string& model) const {
     return entries_.contains(model);
 }
 
-ModelPool::Lease ModelPool::acquire(const std::string& model) {
+ModelPool::Lease ModelPool::acquire(const std::string& model, std::stop_token stop,
+                                    std::chrono::steady_clock::time_point deadline) {
     auto found = entries_.find(model);
     if (found == entries_.end()) {
         throw std::invalid_argument("model '" + model + "' is not loaded");
     }
     Entry& entry = *found->second;
     std::unique_lock<std::mutex> lock(entry.mutex);
-    entry.available.wait(lock, [&] { return !entry.free_states.empty(); });
+    const auto state_free = [&] { return !entry.free_states.empty(); };
+    // A cancelled or timed-out stream leaves the queue at once instead of
+    // holding its RPC thread and its whole upload until a state frees.
+    const bool got_state =
+        deadline == std::chrono::steady_clock::time_point::max()
+            ? entry.available.wait(lock, stop, state_free)
+            : entry.available.wait_until(lock, stop, deadline, state_free);
+    if (!got_state) {
+        if (stop.stop_requested()) {
+            throw Cancelled("the stream went away while waiting for a '" + model + "' state");
+        }
+        throw QueueTimeout("every '" + model + "' state stayed busy");
+    }
     whisper_state* state = entry.free_states.front();
     entry.free_states.pop_front();
     return Lease(this, model, entry.ctx, state);

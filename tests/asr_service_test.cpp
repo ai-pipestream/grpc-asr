@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -189,8 +190,8 @@ grpc::Status transcribe_and_cancel(
     return stream->Finish();
 }
 
-// Streams whose handler has returned, whatever the status. The cases run
-// one stream at a time, so this moves by one per finished stream.
+// Streams of this service whose handler has returned, whatever the
+// status: it moves by one per finished stream.
 long handlers_finished(const asr::AsrServiceImpl& service) {
     return service.transcribed.load() + service.rejected.load() + service.failed.load();
 }
@@ -206,6 +207,86 @@ bool eventually(const std::function<bool()>& condition, std::chrono::millisecond
     }
     return true;
 }
+
+// Uploads the whole media under a client deadline and reads to the end.
+grpc::Status transcribe_with_deadline(const std::shared_ptr<grpc::Channel>& channel,
+                                      const asrv1::TranscribeOptions& options,
+                                      const std::string& media,
+                                      std::chrono::milliseconds deadline) {
+    auto stub = asrv1::AsrService::NewStub(channel);
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + deadline);
+    auto stream = stub->Transcribe(&context);
+    asrv1::TranscribeRequest request;
+    *request.mutable_options() = options;
+    stream->Write(request);
+    for (size_t offset = 0; offset < media.size(); offset += kChunk) {
+        request.Clear();
+        request.mutable_chunk()->set_data(
+            media.substr(offset, std::min(kChunk, media.size() - offset)));
+        if (!stream->Write(request)) {
+            break;
+        }
+    }
+    stream->WritesDone();
+    asrv1::TranscribeResponse response;
+    while (stream->Read(&response)) {
+    }
+    return stream->Finish();
+}
+
+// Keeps the pool's only state (the suite runs with concurrency 1) busy
+// with a long speech-free transcription on its own thread until cancel().
+class StateHolder {
+  public:
+    StateHolder(const std::shared_ptr<grpc::Channel>& channel, const std::string& hiss)
+        : thread_([this, channel, &hiss] {
+              auto stub = asrv1::AsrService::NewStub(channel);
+              auto stream = stub->Transcribe(&context_);
+              asrv1::TranscribeRequest request;
+              request.mutable_options()->set_model("tiny.en");
+              stream->Write(request);
+              for (size_t offset = 0; offset < hiss.size(); offset += kChunk) {
+                  request.Clear();
+                  request.mutable_chunk()->set_data(
+                      hiss.substr(offset, std::min(kChunk, hiss.size() - offset)));
+                  if (!stream->Write(request)) {
+                      break;
+                  }
+              }
+              stream->WritesDone();
+              asrv1::TranscribeResponse response;
+              while (stream->Read(&response)) {
+                  if (response.has_media_info()) {
+                      started_ = true;
+                  }
+              }
+              status_ = stream->Finish();
+          }) {
+        require(eventually([&] { return started_.load(); }, std::chrono::seconds(30)),
+                "the holding stream started");
+        // MediaInfo goes out just before the state is taken.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+
+    ~StateHolder() {
+        if (thread_.joinable()) {
+            cancel();
+        }
+    }
+
+    grpc::Status cancel() {
+        context_.TryCancel();
+        thread_.join();
+        return status_;
+    }
+
+  private:
+    grpc::ClientContext context_;
+    std::atomic<bool> started_{false};
+    grpc::Status status_;
+    std::thread thread_;
+};
 
 asrv1::TranscribeOptions options_for(const std::string& model) {
     asrv1::TranscribeOptions options;
@@ -394,6 +475,100 @@ void verify_silence(const std::shared_ptr<grpc::Channel>& channel) {
                     transcript.find('[') != std::string::npos,
                 "silence produced words: " + transcript);
     }
+}
+
+void verify_cancel_without_speech(const std::shared_ptr<grpc::Channel>& channel,
+                                  const asr::AsrServiceImpl& service, const std::string& hiss,
+                                  const std::string& jfk) {
+    // A speech-free stretch commits no segment, so nothing is written and
+    // a gone client never showed up as a failed write: whisper went on
+    // decoding it for nobody, holding the only model state.
+    const long finished = handlers_finished(service);
+    grpc::Status status = transcribe_and_cancel(
+        channel, options_for("tiny.en"), hiss,
+        [](const asrv1::TranscribeResponse& response) { return response.has_media_info(); },
+        std::chrono::milliseconds(500));
+    require(status.error_code() == grpc::StatusCode::CANCELLED,
+            "the client sees its own cancel, got " + status.error_message());
+    require(eventually([&] { return handlers_finished(service) > finished; },
+                       std::chrono::seconds(10)),
+            "a cancel during a speech-free stretch stops the stream within seconds");
+    StreamResult next = transcribe(channel, options_for("tiny.en"), jfk);
+    require(next.status.ok() && lower(final_text(next)).find("country") != std::string::npos,
+            "the state serves the next stream after that cancel: " +
+                next.status.error_message());
+}
+
+void verify_deadline_without_speech(const std::shared_ptr<grpc::Channel>& channel,
+                                    const asr::AsrServiceImpl& service, const std::string& hiss) {
+    // The same for a client deadline, which is how gRParse bounds an ASR
+    // call: once it passes the server stops too, rather than finishing a
+    // transcription nobody waits for.
+    const long finished = handlers_finished(service);
+    grpc::Status status = transcribe_with_deadline(channel, options_for("tiny.en"), hiss,
+                                                   std::chrono::seconds(4));
+    require(status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED,
+            "the client sees its deadline pass, got " + status.error_message());
+    require(eventually([&] { return handlers_finished(service) > finished; },
+                       std::chrono::seconds(10)),
+            "the server stops the stream within seconds of its deadline");
+}
+
+void verify_cancel_while_queued(const std::shared_ptr<grpc::Channel>& channel,
+                                const asr::AsrServiceImpl& service, const std::string& hiss,
+                                const std::string& jfk) {
+    StateHolder holder(channel, hiss);
+    // This stream queues for the only state; its MediaInfo goes out before
+    // it starts waiting. Cancelled there, it must leave the queue at once
+    // rather than hold its RPC thread and upload until the holder is done.
+    const long finished = handlers_finished(service);
+    grpc::Status status = transcribe_and_cancel(
+        channel, options_for("tiny.en"), jfk,
+        [](const asrv1::TranscribeResponse& response) { return response.has_media_info(); },
+        std::chrono::milliseconds(300));
+    require(status.error_code() == grpc::StatusCode::CANCELLED,
+            "the queued client sees its own cancel, got " + status.error_message());
+    require(eventually([&] { return handlers_finished(service) > finished; },
+                       std::chrono::seconds(10)),
+            "a cancelled stream leaves the queue for a model state at once");
+    require(handlers_finished(service) == finished + 1,
+            "while the holder still has the state");
+    holder.cancel();
+    require(eventually([&] { return handlers_finished(service) > finished + 1; },
+                       std::chrono::seconds(10)),
+            "the holder stops on its own cancel");
+}
+
+void verify_queue_timeout(asr::Config config, asr::engine::ModelPool& pool,
+                          const std::shared_ptr<grpc::Channel>& channel,
+                          const std::string& hiss, const std::string& jfk) {
+    // A second service over the same pool whose streams wait at most a
+    // second for a state.
+    config.queue_timeout_seconds = 1;
+    asr::AsrServiceImpl impatient(config, pool);
+    int port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&impatient);
+    auto server = builder.BuildAndStart();
+    require(server != nullptr, "queue timeout server started");
+    auto impatient_channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                                 grpc::InsecureChannelCredentials());
+
+    StateHolder holder(channel, hiss);
+    const auto started = std::chrono::steady_clock::now();
+    StreamResult result = transcribe(impatient_channel, options_for("tiny.en"), jfk);
+    const auto waited = std::chrono::steady_clock::now() - started;
+    require(result.status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "a stream that waited out the queue timeout is RESOURCE_EXHAUSTED, got " +
+                result.status.error_message());
+    require(result.status.error_message().find("GRPC_ASR_QUEUE_TIMEOUT_SECONDS") !=
+                std::string::npos,
+            "the error names the knob");
+    require(waited >= std::chrono::seconds(1) && waited < std::chrono::seconds(10),
+            "the wait lasted about the queue timeout");
+    holder.cancel();
+    server->Shutdown();
 }
 
 void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
@@ -593,6 +768,17 @@ int main() {
         verify_streaming_during_upload(channel, jfk);
         verify_document(channel, jfk);
         verify_silence(channel);
+        {
+            // Forty minutes of low hiss: whisper decodes it into no segment
+            // at all, so nothing is ever written, and a server that ignored
+            // the call would decode it for half a minute or more after the
+            // client left, well past the bounds asserted below.
+            const std::string hiss = make_hiss_wav(2400.0);
+            verify_cancel_without_speech(channel, service, hiss, jfk);
+            verify_deadline_without_speech(channel, service, hiss);
+            verify_cancel_while_queued(channel, service, hiss, jfk);
+            verify_queue_timeout(config, pool, channel, hiss, jfk);
+        }
         verify_error_matrix(channel);
         verify_byte_cap(config, pool);
         verify_service_info(channel);
