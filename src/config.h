@@ -16,6 +16,11 @@ struct Config {
     // fallback.
     std::string backend = "cuda";
     int cuda_device = 0;
+    // OpenVINO device the whisper encoder compiles for under the openvino
+    // backend ("GPU", "GPU.1", ...; other devices need their OpenVINO
+    // plugin, and the OpenVINO image ships only the GPU one). An
+    // unavailable device fails the boot, like every other backend choice.
+    std::string openvino_device = "GPU";
     std::string models_dir = "/models";
     // Model names to serve ("tiny.en", "large-v3", ...). Empty means
     // discover every ggml-*.bin in models_dir. Each name must resolve to

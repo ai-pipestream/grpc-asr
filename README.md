@@ -130,6 +130,7 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_LISTEN_ADDRESS` | `0.0.0.0:50055` | listen address |
 | `GRPC_ASR_BACKEND` | `cuda` | `cuda` \| `openvino` \| `cpu`; never silently substituted |
 | `GRPC_ASR_CUDA_DEVICE` | `0` | CUDA device index |
+| `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the whisper encoder, e.g. `GPU.1` on a multi-GPU host; the OpenVINO image ships only the GPU plugin, and an unavailable device stops the boot |
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
 | `GRPC_ASR_CONCURRENCY` | `2` | whisper states per model (concurrent transcriptions) |
@@ -164,8 +165,9 @@ The OpenVINO image carries OpenVINO 2025.4.1 (Intel APT repo, ubuntu24
 distribution, on an ubuntu:26.04 base), the Intel GPU plugin, and the NEO
 compute runtime (`intel-opencl-icd` 26.05 from Ubuntu's 26.04 archive,
 Battlemage-capable); it defaults to `GRPC_ASR_BACKEND=openvino`. The
-whisper OpenVINO encoder targets an Intel GPU, so the container needs the
-render device, and the models mount needs the converted encoder IR
+whisper OpenVINO encoder targets an Intel GPU (`GRPC_ASR_OPENVINO_DEVICE`,
+default `GPU`), so the container needs the render device, and the models
+mount needs the converted encoder IR
 (`ggml-<name>-encoder-openvino.xml` / `.bin`, produced by whisper.cpp's
 `convert-whisper-to-openvino` tooling) next to the ggml weights:
 

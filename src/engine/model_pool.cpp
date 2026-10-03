@@ -136,13 +136,15 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                 // binary was built without the OpenVINO encoder; either way
                 // the operator asked for something this process cannot do.
                 static const std::string openvino_cache_dir = "/tmp/grpc-asr-openvino-cache";
-                if (whisper_ctx_init_openvino_encoder_with_state(entry->ctx, state, nullptr,
-                                                                 "GPU", openvino_cache_dir.c_str()) != 0) {
+                if (whisper_ctx_init_openvino_encoder_with_state(
+                        entry->ctx, state, nullptr, config.openvino_device.c_str(),
+                        openvino_cache_dir.c_str()) != 0) {
                     throw std::runtime_error(
                         "GRPC_ASR_BACKEND=openvino: OpenVINO encoder init failed for model '" +
-                        name +
-                        "'; use an image built with -DGRPC_ASR_OPENVINO=ON and a converted "
-                        "encoder model next to the weights");
+                        name + "' on device '" + config.openvino_device +
+                        "' (GRPC_ASR_OPENVINO_DEVICE); use an image built with "
+                        "-DGRPC_ASR_OPENVINO=ON, a converted encoder model next to the "
+                        "weights, and a device this host has");
                 }
             }
             entry->free_states.push_back(state);

@@ -19,6 +19,7 @@ namespace {
 void clear_env() {
     for (const char* name :
          {"GRPC_ASR_LISTEN_ADDRESS", "GRPC_ASR_BACKEND", "GRPC_ASR_CUDA_DEVICE",
+          "GRPC_ASR_OPENVINO_DEVICE",
           "GRPC_ASR_MODELS_DIR", "GRPC_ASR_MODELS", "GRPC_ASR_CONCURRENCY",
           "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
@@ -47,6 +48,7 @@ void verify_defaults() {
     const Config config = load_config_from_env();
     require(config.listen_address == "0.0.0.0:50055", "default listen address");
     require(config.backend == "cuda", "cuda is the default backend");
+    require(config.openvino_device == "GPU", "the OpenVINO encoder targets the GPU by default");
     require(config.models_dir == "/models", "default models dir");
     require(config.models.empty(), "no models named means discovery");
     require(config.concurrency == 2, "default concurrency");
@@ -80,11 +82,13 @@ void verify_overrides() {
     ::setenv("GRPC_ASR_LISTEN_ADDRESS", "127.0.0.1:9", 1);
     ::setenv("GRPC_ASR_CONCURRENCY", "5", 1);
     ::setenv("GRPC_ASR_THREADS", "8", 1);
+    ::setenv("GRPC_ASR_OPENVINO_DEVICE", "NPU", 1);
     const Config config = load_config_from_env();
     require(config.backend == "cpu", "backend override");
     require(config.listen_address == "127.0.0.1:9", "listen address override");
     require(config.concurrency == 5, "concurrency override");
     require(config.threads == 8, "threads override");
+    require(config.openvino_device == "NPU", "OpenVINO device override");
 }
 
 void verify_models_list() {
