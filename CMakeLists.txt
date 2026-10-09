@@ -96,6 +96,11 @@ set(ASR_PROTO "${PROTO_DIR}/ai/pipestream/asr/v1/asr_service.proto")
 # protoc run generates both files so the grpc plugin emits its (empty) stubs
 # for it too rather than needing a second command.
 set(DOC_PROTO "${PROTO_DIR}/ai/pipestream/document/v1/document.proto")
+# Vendored verbatim from gRParse beside document.proto, which imports them for
+# Document.analyses (the OpenNLP analyses; this service never fills them).
+set(OPENNLP_PROTOS
+  "${PROTO_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.proto"
+  "${PROTO_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.proto")
 
 add_custom_command(
   OUTPUT
@@ -107,6 +112,14 @@ add_custom_command(
     "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.h"
     "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.cc"
     "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.h"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.cc"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.h"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.grpc.pb.cc"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.grpc.pb.h"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.cc"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.h"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.grpc.pb.cc"
+    "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.grpc.pb.h"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${GENERATED_DIR}"
   COMMAND $<TARGET_FILE:protoc>
   ARGS --proto_path=${PROTO_DIR}
@@ -114,15 +127,19 @@ add_custom_command(
        --cpp_out=${GENERATED_DIR}
        --grpc_out=${GENERATED_DIR}
        --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
-       ${ASR_PROTO} ${DOC_PROTO}
-  DEPENDS ${ASR_PROTO} ${DOC_PROTO} protoc grpc_cpp_plugin
+       ${ASR_PROTO} ${DOC_PROTO} ${OPENNLP_PROTOS}
+  DEPENDS ${ASR_PROTO} ${DOC_PROTO} ${OPENNLP_PROTOS} protoc grpc_cpp_plugin
   VERBATIM)
 
 add_library(asr_proto STATIC
   "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/asr/v1/asr_service.grpc.pb.cc"
   "${GENERATED_DIR}/ai/pipestream/document/v1/document.pb.cc"
-  "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.cc")
+  "${GENERATED_DIR}/ai/pipestream/document/v1/document.grpc.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_document.grpc.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.pb.cc"
+  "${GENERATED_DIR}/org/apache/opennlp/grpc/v1/opennlp_annotations.grpc.pb.cc")
 target_include_directories(asr_proto PUBLIC "${GENERATED_DIR}")
 target_link_libraries(asr_proto PUBLIC grpc++)
 
