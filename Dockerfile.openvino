@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.28
 # grpc-asr — Intel OpenVINO image. Same layout as the CUDA Dockerfile and
 # Dockerfile.cpu: the build stage compiles whisper.cpp with the OpenVINO
 # encoder (WHISPER_OPENVINO) and runs the test suite, and the tests gate
