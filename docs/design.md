@@ -42,6 +42,29 @@ Events, in order:
 3. `Keyframe`: timestamp plus PNG bytes (only if `emit_keyframes`)
 4. `TranscriptComplete`: language, duration, token counts
 
+### 3a. Remote transcription options (docling ApiAsrOptions)
+
+`TranscribeOptions.remote` (field 10, `RemoteTranscriptionOptions`) is the
+typed form of docling's `ApiAsrOptions`: `url`, `headers`
+(`map<string, string>`), `model`, `language`, `initial_prompt`,
+`word_timestamps`, `params` (`map<string, ScalarValue>`, so an integer stays
+an integer) and `timeout_seconds` (unset is docling's 600). The multipart
+form fields are built by `engine::remote_form_fields` and match docling-slim
+2.140.0's `_ApiAsrModel._form_fields` field for field (`response_format`
+pinned to `verbose_json`, empty strings omitted, bools as `true`/`false`).
+The one difference: protobuf maps have no order, so `params` go out sorted
+by key.
+
+Validation runs before the model check and before any media byte is read:
+the url must be http or https with a host and no whitespace, header names
+must be HTTP tokens and values free of CR/LF, every `params` key non-empty
+with its value kind set, and `timeout_seconds` finite and > 0. Failures are
+`INVALID_ARGUMENT` naming the field. This build has no HTTP engine, so a
+valid set is `UNIMPLEMENTED` by name. It is never silently run on the local
+pool. The engine is a follow-up that needs an outbound HTTP client and a
+policy for which endpoints a server may call (docling gates the same path
+behind `enable_remote_services`).
+
 ## 4. Mapping to Document (implemented in-repo)
 
 The fold lives here (`src/document/document_fold.{h,cpp}`), following the

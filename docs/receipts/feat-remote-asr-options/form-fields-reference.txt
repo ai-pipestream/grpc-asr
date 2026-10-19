@@ -1,0 +1,19 @@
+docling-slim 2.140.0 class _ApiAsrModel
+default timeout 600.0
+== defaults
+response_format=verbose_json
+== full
+response_format=verbose_json
+model=whisper-1
+language=en
+prompt=NATO alphabet
+timestamp_granularities[]=segment
+timestamp_granularities[]=word
+a_flag=true
+b_off=false
+beam=5
+temperature=0.0
+top=0.25
+vad=silero
+== empty strings omitted
+response_format=verbose_json

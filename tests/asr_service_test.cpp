@@ -648,6 +648,23 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
     result = transcribe(channel, options_for("tiny.en"), "");
     require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
             "empty media is INVALID_ARGUMENT");
+
+    // Remote options are checked before the model and the media: a bad set
+    // is INVALID_ARGUMENT, a valid set is refused by name (no HTTP engine),
+    // never run on the local pool.
+    asrv1::TranscribeOptions remote = options_for("");
+    remote.mutable_remote()->set_url("file:///etc/passwd");
+    result = transcribe(channel, remote, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.status.error_message().find("RemoteTranscriptionOptions.url") !=
+                    std::string::npos,
+            "a file:// remote url is INVALID_ARGUMENT, got " + result.status.error_message());
+    remote.mutable_remote()->set_url("http://localhost:8000/v1/audio/transcriptions");
+    result = transcribe(channel, remote, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::UNIMPLEMENTED &&
+                result.status.error_message().find("TranscribeOptions.remote") != std::string::npos,
+            "valid remote options are UNIMPLEMENTED, got " + result.status.error_message());
+    require(result.finals.empty() && !result.got_media_info, "remote options never run the local pool");
 }
 
 void verify_byte_cap(asr::Config config, asr::engine::ModelPool& pool) {

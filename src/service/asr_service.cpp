@@ -12,6 +12,7 @@
 
 #include "cancellation.h"
 #include "document/document_fold.h"
+#include "engine/remote_options.h"
 #include "engine/transcriber.h"
 #include "media/audio_decoder.h"
 #include "media/byte_stream.h"
@@ -423,6 +424,18 @@ grpc::Status AsrServiceImpl::Transcribe(
                 "the first message must carry TranscribeOptions"};
     }
     const asrv1::TranscribeOptions options = request.options();
+    if (options.has_remote()) {
+        // Remote transcription (docling ApiAsrOptions) is typed and
+        // validated on the wire; this build has no HTTP engine, so a valid
+        // request is refused by name rather than silently run locally.
+        rejected++;
+        if (grpc::Status status = engine::validate_remote_options(options.remote()); !status.ok()) {
+            return status;
+        }
+        return {grpc::StatusCode::UNIMPLEMENTED,
+                "TranscribeOptions.remote is not served by this build: remote transcription has "
+                "no HTTP engine yet; omit it to transcribe with the local whisper.cpp pool"};
+    }
     if (options.model().empty()) {
         rejected++;
         return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.model is required"};

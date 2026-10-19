@@ -91,6 +91,59 @@ message TranscribeOptions {
   // folded Document and its origin; empty means the server derives a name
   // from the sniffed container.
   string filename = 9;
+
+  // Transcribe through a remote, OpenAI-compatible
+  // /audio/transcriptions endpoint instead of the local whisper.cpp pool
+  // (docling's ApiAsrOptions). When set, `model`, `language` and
+  // `word_timestamps` above are not used: the remote options carry their
+  // own. Validated before any media byte is read; this build has no HTTP
+  // engine yet, so a valid request fails with UNIMPLEMENTED and an invalid
+  // one with INVALID_ARGUMENT.
+  RemoteTranscriptionOptions remote = 10;
+}
+
+// Options for a remote, OpenAI-compatible transcription service: the
+// typed form of docling's ApiAsrOptions. The media is posted as
+// multipart/form-data with response_format=verbose_json, and the timed
+// segments of the answer become Segment events.
+message RemoteTranscriptionOptions {
+  // Transcription endpoint, e.g. http://whisper:8000/v1/audio/transcriptions.
+  // Required; http or https only.
+  string url = 1;
+  // HTTP headers sent with the request, e.g. Authorization. Names must be
+  // HTTP tokens; values must not contain CR or LF.
+  map<string, string> headers = 2;
+  // Value of the `model` form field. Unset or empty omits the field.
+  optional string model = 3;
+  // ISO 639-1 language of the audio, sent as `language`. Unset or empty
+  // omits the field so the server detects the language.
+  optional string language = 4;
+  // Sent as the `prompt` form field to condition style or vocabulary.
+  // Unset or empty omits the field.
+  optional string initial_prompt = 5;
+  // Ask for word timestamps: timestamp_granularities[] = segment and word.
+  bool word_timestamps = 6;
+  // Additional form fields for service-specific settings (temperature,
+  // vad_filter, ...), typed. A bool is sent as "true"/"false". The key
+  // response_format is ignored: verbose_json is required for timings.
+  // Keys must be non-empty and every value must set its kind.
+  map<string, ScalarValue> params = 7;
+  // Seconds to wait for the answer. Unset means 600 (docling's default);
+  // a set value must be finite and greater than zero.
+  optional double timeout_seconds = 8;
+}
+
+// One typed scalar where the upstream model holds dict[str, Any]. Same
+// shape as ai.pipestream.parse.v1.ScalarValue in gRParse.
+message ScalarValue {
+  oneof kind {
+    string string_value = 1;
+    int64 int_value = 2;
+    double double_value = 3;
+    bool bool_value = 4;
+    // Integers above int64 range.
+    uint64 uint_value = 5;
+  }
 }
 
 // Whisper decoding task.
