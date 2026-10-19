@@ -136,10 +136,15 @@ message RemoteTranscriptionOptions {
 // One typed scalar where the upstream model holds dict[str, Any]. Same
 // shape as ai.pipestream.parse.v1.ScalarValue in gRParse.
 message ScalarValue {
+  // Exactly one kind; an unset kind is rejected where a value is required.
   oneof kind {
+    // A text value, sent as is.
     string string_value = 1;
+    // A signed integer, sent in decimal.
     int64 int_value = 2;
+    // A float, sent as Python's str() prints it (0.0, 0.25).
     double double_value = 3;
+    // A boolean, sent as "true" or "false".
     bool bool_value = 4;
     // Integers above int64 range.
     uint64 uint_value = 5;
