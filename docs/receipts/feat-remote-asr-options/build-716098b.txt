@@ -1,0 +1,6 @@
+commit 716098b
+$ cmake --build /work/tmp/grpc-asr-remote-build --parallel 20
+[28/30] Linking CXX executable document-fold-test
+[29/30] Linking CXX executable grpc-asr-server
+[30/30] Linking CXX executable asr-service-test
+build-exit 0

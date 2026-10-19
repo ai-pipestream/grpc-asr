@@ -1,0 +1,3 @@
+commit 716098b
+$ buf lint
+buf-exit 0
