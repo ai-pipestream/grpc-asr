@@ -108,10 +108,11 @@ message TranscribeOptions {
 // segments of the answer become Segment events.
 message RemoteTranscriptionOptions {
   // Transcription endpoint, e.g. http://whisper:8000/v1/audio/transcriptions.
-  // Required; http or https only.
+  // Required; http or https only, with a non-empty host, an optional port
+  // in 1-65535 and no userinfo (credentials go in `headers`).
   string url = 1;
   // HTTP headers sent with the request, e.g. Authorization. Names must be
-  // HTTP tokens; values must not contain CR or LF.
+  // HTTP tokens and unique ignoring case; values must not contain CR or LF.
   map<string, string> headers = 2;
   // Value of the `model` form field. Unset or empty omits the field.
   optional string model = 3;
@@ -129,7 +130,7 @@ message RemoteTranscriptionOptions {
   // Keys must be non-empty and every value must set its kind.
   map<string, ScalarValue> params = 7;
   // Seconds to wait for the answer. Unset means 600 (docling's default);
-  // a set value must be finite and greater than zero.
+  // a set value must be greater than zero and at most 3600.
   optional double timeout_seconds = 8;
 }
 

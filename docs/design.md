@@ -56,9 +56,13 @@ The one difference: protobuf maps have no order, so `params` go out sorted
 by key.
 
 Validation runs before the model check and before any media byte is read:
-the url must be http or https with a host and no whitespace, header names
-must be HTTP tokens and values free of CR/LF, every `params` key non-empty
-with its value kind set, and `timeout_seconds` finite and > 0. Failures are
+the url must be http or https with a non-empty host, an optional port in
+1-65535, no userinfo and no whitespace; header names must be HTTP tokens,
+unique ignoring case, and values free of CR/LF; every `params` key must be
+non-empty with its value kind set; and `timeout_seconds` must be > 0 and at
+most 3600. A `double` param prints as Python's `str()` does (shortest
+round-trip digits, fixed for decimal exponents in [-4, 16), otherwise
+`1e+16` style). Failures are
 `INVALID_ARGUMENT` naming the field. This build has no HTTP engine, so a
 valid set is `UNIMPLEMENTED` by name. It is never silently run on the local
 pool. The engine is a follow-up that needs an outbound HTTP client and a

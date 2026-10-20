@@ -15,6 +15,9 @@ namespace asr::engine {
 // docling's ApiAsrOptions.timeout default, in seconds.
 inline constexpr double kDefaultRemoteTimeoutSeconds = 600.0;
 
+// Largest timeout_seconds a request may set: one hour.
+inline constexpr double kMaxRemoteTimeoutSeconds = 3600.0;
+
 // OK, or INVALID_ARGUMENT naming the first bad field.
 grpc::Status validate_remote_options(const ai::pipestream::asr::v1::RemoteTranscriptionOptions& options);
 

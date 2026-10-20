@@ -1,0 +1,23 @@
+Standalone build of remote-options-test. The full CMake build compiles
+grpc v1.83.0 from source, so this compiles only the code under test.
+Toolchain: g++ 15.3.0, system protobuf 3.21.12 and protoc 3.21.12.
+
+$ protoc -I proto --cpp_out=gen $(find proto -name '*.proto')
+$ g++ -std=c++23 -O1 -I gen -I src -I tests gen/**/*.pb.cc \
+    src/engine/remote_options.cpp tests/remote_options_test.cpp \
+    -lprotobuf -lgrpc++ -lgpr -o remote-options-test
+$ ./remote-options-test
+remote-options-test passed
+exit 0
+
+Revert to red: the same test linked with the previous
+src/engine/remote_options.cpp (a40dff3) fails on the floats case
+(f01=1e+05, f02=1e+15, f04=1e-04), exit 1.
+
+Random floats: scalar_form_value over 20000 values (random bit patterns,
+random magnitudes from 1e-330 to 1e310, some rounded to 3 decimals),
+each compared with python3 str() of the same bits:
+compared 20000 mismatches 0
+
+-Wall -Wextra -Wpedantic -Wconversion: no warnings in remote_options.cpp
+or remote_options_test.cpp. buf lint: exit 0.
