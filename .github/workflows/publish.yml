@@ -12,6 +12,9 @@ name: Publish Images
 #
 # When it runs and what it tags:
 #   push to main     republishes :latest, :latest-cpu, :latest-openvino
+#   push of a v* tag the same, plus :<version>, :<version>-cpu,
+#                    :<version>-openvino, where <version> is the tag
+#                    without its leading v (v0.3.0 publishes :0.3.0)
 #   workflow_dispatch
 #     version input  the same, plus :<version>, :<version>-cpu,
 #                    :<version>-openvino
@@ -40,6 +43,7 @@ name: Publish Images
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
@@ -178,11 +182,27 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Resolve the version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF_NAME#v}" ;;
+            *) version="${INPUT_VERSION:-}" ;;
+          esac
+          if [ -n "$version" ] && ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]{0,63})?$ ]]; then
+            echo "::error::version '$version' is not a semantic version such as 0.3.0"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Create the manifest lists and prove them
         env:
           SUFFIX: ${{ matrix.suffix }}
           PLATFORMS: ${{ matrix.platforms }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           digests=()
