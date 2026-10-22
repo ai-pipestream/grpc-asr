@@ -59,6 +59,9 @@ env:
 
 jobs:
   build:
+    # Images publish from GitHub, the fleet's publishing forge; the Forgejo
+    # mirror of this workflow does not push a second copy.
+    if: ${{ github.server_url == 'https://github.com' }}
     name: Build ${{ matrix.variant }} ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -151,7 +154,7 @@ jobs:
     # Runs even when a build leg failed, so one variant's failure does not
     # hold the others back: a variant whose leg is missing has fewer
     # digests than platforms and scripts/publish-manifests.sh refuses it.
-    if: ${{ !cancelled() }}
+    if: ${{ github.server_url == 'https://github.com' && (!cancelled()) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
