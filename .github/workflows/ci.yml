@@ -3,7 +3,7 @@
 # image build mean the same thing; the smoke test then boot-proofs each
 # runtime image (library closure, uid 65532, boot to model loading, and an
 # LGPL-only ffmpeg). The legs match the publish workflow's: CUDA, CPU on
-# both architectures (each built natively), and OpenVINO.
+# both architectures, and OpenVINO.
 name: ci
 
 on:
@@ -25,8 +25,10 @@ env:
 
 jobs:
   image:
-    name: image ${{ matrix.variant }} ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
+    name: image ${{ matrix.variant }} ${{ matrix.arch }}
+    # GitHub has native arm64 runners. Forgejo has none, so its arm64 entry
+    # builds and boots the image under QEMU on an x64 runner.
+    runs-on: ${{ matrix.arch == 'arm64' && github.server_url == 'https://github.com' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -38,26 +40,33 @@ jobs:
           # them and must not skip.
           - variant: cuda
             dockerfile: Dockerfile
-            runner: ubuntu-latest
+            arch: amd64
             models: false
           - variant: cpu
             dockerfile: Dockerfile.cpu
-            runner: ubuntu-latest
+            arch: amd64
             models: true
           - variant: cpu
             dockerfile: Dockerfile.cpu
-            runner: ubuntu-24.04-arm
+            arch: arm64
             models: true
           - variant: openvino
             dockerfile: Dockerfile.openvino
-            runner: ubuntu-latest
+            arch: amd64
             models: true
     steps:
       - uses: actions/checkout@v7
       # The CUDA devel base alone is several GB; the hosted runner's
-      # preinstalled SDKs are not needed here.
+      # preinstalled SDKs are not needed here. A Forgejo job container has
+      # neither those directories nor sudo, and runs as root.
       - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: $(command -v sudo || true) rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      # QEMU and buildx let the same steps build the arm64 image on an x64
+      # host; on a native arm64 runner QEMU is unused.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       # models/ is in the build context (.dockerignore keeps it), so COPY
       # . . puts the weights in the build stage for ctest; the runtime stage
       # copies only the server binary and ffmpeg, never /src.
@@ -71,7 +80,7 @@ jobs:
       # tests pass in a clean container with no host toolchain state.
       - name: docker build
         run: |
-          docker build -f ${{ matrix.dockerfile }} \
+          docker buildx build --load --platform linux/${{ matrix.arch }} -f ${{ matrix.dockerfile }} \
             --build-arg GRPC_ASR_TEST_REQUIRE_MODELS=${{ matrix.models && '1' || '0' }} \
             -t grpc-asr:ci .
       - name: Boot-proof the runtime image
