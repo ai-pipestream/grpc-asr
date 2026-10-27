@@ -176,6 +176,7 @@ install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
 if(BUILD_TESTING)
   set(GRPC_ASR_TESTS
     sniff-test
+    pcm-scrub-test
     byte-stream-test
     config-test
     remote-options-test

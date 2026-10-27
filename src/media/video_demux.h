@@ -67,8 +67,9 @@ class VideoDemux {
     ProbeInfo probe(std::stop_token stop = {});
 
     // Opens an ffmpeg child decoding the first audio track to mono f32
-    // PCM at the model rate. Read pulls samples with pipe backpressure;
-    // returns 0 at end of stream. A non-zero ffmpeg exit surfaces as
+    // PCM at the model rate. Read pulls samples with pipe backpressure,
+    // scrubbed to finite values in [-1, 1] (media/pcm_scrub.h); returns 0
+    // at end of stream. A non-zero ffmpeg exit surfaces as
     // DecodeError from read() or close_audio().
     void open_audio(std::stop_token stop = {});
     size_t read_audio(float* out, size_t max_samples);

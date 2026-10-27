@@ -53,6 +53,7 @@ class AudioDecoder {
     const Info& info() const { return info_; }
 
     // Decodes up to max_samples mono samples at the model rate into out,
+    // scrubbed to finite values in [-1, 1] (media/pcm_scrub.h),
     // blocking while the upload is behind. Returns the number written; 0
     // means end of stream (or an aborted upload — the caller checks the
     // ByteStream). Throws DecodeError on a mid-stream decode failure.
