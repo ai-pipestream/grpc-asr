@@ -122,6 +122,35 @@ void verify_silence() {
     }
 }
 
+void verify_non_finite_samples_scrubbed() {
+    // A float WAV may carry any bit pattern: NaN, infinities, and values
+    // far outside [-1, 1]. The model contract is finite PCM in that range,
+    // and whisper given a single NaN sample spins for minutes over seconds
+    // of audio; the decoder must scrub what it hands out, never forward.
+    ByteStream stream;
+    fill(stream, make_float_wav(hostile_float_samples()));
+    AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+    require(decoder.info().sample_rate_hz == 16000 && decoder.info().channels == 1,
+            "float wav opens with its declared format");
+    std::vector<float> pcm(kModelSampleRate + 1024);
+    size_t total = 0;
+    while (true) {
+        size_t got = decoder.read(pcm.data() + total, 4096);
+        if (got == 0) {
+            break;
+        }
+        total += got;
+    }
+    require(total > 15000 && total <= pcm.size(),
+            "the whole second decoded, got " + std::to_string(total));
+    for (size_t i = 0; i < total; i++) {
+        require(std::isfinite(pcm[i]), "sample " + std::to_string(i) + " is not finite");
+        require(pcm[i] >= -1.0f && pcm[i] <= 1.0f,
+                "sample " + std::to_string(i) + " is outside [-1, 1]: " +
+                    std::to_string(pcm[i]));
+    }
+}
+
 void verify_bad_input() {
     ByteStream mp3_stream;
     fill(mp3_stream, make_truncated_mp3());
@@ -152,6 +181,7 @@ int main() {
         verify_streaming_decode();
         verify_aborted_upload();
         verify_silence();
+        verify_non_finite_samples_scrubbed();
         verify_bad_input();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
