@@ -30,6 +30,11 @@ struct Fixture {
   std::string url;
   explicit Fixture(std::function<void(int, Fixture&)> serve, uint16_t port = 0) {
     listener = ::socket(AF_INET, SOCK_STREAM, 0); http_fixture_check(listener >= 0, "fixture socket failed");
+    const int reuse = 1;
+    if (::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
+      ::close(listener); listener = -1;
+      throw std::runtime_error("fixture socket reuse setup failed");
+    }
     sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(port);
     http_fixture_check(::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "fixture bind failed");
