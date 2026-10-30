@@ -28,6 +28,59 @@ sequenceDiagram
     S-->>C: TranscriptComplete
 ```
 
+## Unified media streaming
+
+This repository is the consolidation target for the former `whisper-grpc`
+prototype. The implementation is being qualified before the duplicate projects
+are retired. One `grpc-asr-server` registers the existing `AsrService` and the
+additive `MediaService` and `SpeechWorkerService` contracts on port 50055.
+Existing ASR protobuf messages remain unchanged.
+
+The media API supports incremental direct and allowlisted HTTP input, original
+source bytes with checksums, native encoded packets and audio, stream UUIDs,
+explicit open/finish accounting, filtered subscriptions and bounded hydration.
+An empty subscription UUID list follows all streams on this server, including
+future streams. There is no durable replay store. Native FFmpeg calls process
+streamable containers without request files or subprocesses. The existing
+collector API retains its Document projection, keyframes and seekable-video
+compatibility path.
+
+Whisper processing borrows the existing CPU/CUDA/OpenVINO model pool. The two
+APIs share loaded weights and concurrency limits. The media-to-worker call uses
+an in-process gRPC channel by default; `GRPC_ASR_WORKER_TARGET=host:port`
+selects a separately deployed worker using the same typed contract. `GRPC_ASR_STREAM_MODEL`
+selects a loaded model for the window worker (defaults to the first loaded model).
+`GRPC_ASR_STREAM_BACKEND=parakeet` instead selects the native CPU Parakeet
+adapter, with weights at `GRPC_ASR_PARAKEET_MODEL_PATH`; the existing collector
+API continues to serve its configured Whisper models. Parakeet supports
+transcription, not translation or language hints.
+
+Speech requests select fixed windows or speech-aware boundaries. Mount Silero
+weights and set `GRPC_ASR_VAD_MODEL_PATH` for speech-aware chunking. Maximum
+window limits still apply when there is no pause; the caller selects failure
+or a forced cut with overlap. Raw hypotheses remain available alongside
+reconciled revisions, including unresolved joins.
+
+HTTP ingestion is disabled unless `GRPC_ASR_HTTP_ORIGINS` contains exact comma-
+separated `scheme://host:port` origins. Private addresses additionally require
+`GRPC_ASR_HTTP_ALLOW_PRIVATE=1`. Redirects and nested media URLs are refused.
+`GRPC_ASR_MACHINE_ID` optionally supplies a stable UUID for producer metadata.
+
+For a single CPU deployment, put weights in `models/` and run
+`docker compose up --build`. All three interfaces use port 50055, bound to
+loopback by default. For smart chunking set
+`GRPC_ASR_VAD_MODEL_PATH=/models/ggml-silero-v5.1.2.bin` before starting Compose.
+Models are mounted read-only and never fetched by requests. Keep
+`GRPC_ASR_MODELS` explicit when the directory also contains VAD or Parakeet
+weights; automatic Whisper discovery expects only Whisper weights.
+
+For local qualification, provision the weights and run
+`bash scripts/qualify-unified.sh build models /path/to/silero.bin whisper`.
+The same command with `parakeet` additionally requires
+`GRPC_ASR_PARAKEET_MODEL_PATH`. It tests the actual unified server, including
+HTTP, fixed/smart video windows, subscription delivery and hydration. Native
+ARM and GPU results must be reported separately from CPU results.
+
 ## Wire API
 
 `ai.pipestream.asr.v1.AsrService` (see
@@ -196,14 +249,14 @@ and OpenVINO images are linux/amd64 only.
 
 ## Licensing
 
-grpc-asr-server links only permissively licensed code: whisper.cpp and
+grpc-asr-server links whisper.cpp and
 ggml (MIT), miniaudio (public domain or MIT-0), and gRPC (Apache-2.0) with
 the libraries it builds. The container images also ship `ffmpeg` and
 `ffprobe`, built from the upstream FFmpeg 9.0.2 release by
 [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh) without `--enable-gpl` or
 `--enable-nonfree` and with only the demuxers and decoders the service uses,
-so they are LGPL-2.1-or-later. The server runs them as separate processes
-for video and Ogg input and never links them. Each image says so in its
+so they are LGPL-2.1-or-later. The streaming API links the FFmpeg shared libraries directly; the existing
+collector video and keyframe path also uses the executables. Each image says so in its
 `ai.pipestream.ffmpeg.license` label, carries the license text, the exact
 configure line and the source tarball under `/opt/ffmpeg/share/doc/ffmpeg`,
 and carries the details at `/usr/share/doc/grpc-asr/NOTICE` (this

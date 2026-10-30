@@ -72,6 +72,8 @@ class ModelPool {
     };
 
     // True when the model name was loaded at startup.
+    std::string model_hash(const std::string& model) const;
+
     bool has_model(const std::string& model) const;
 
     // Blocks until a state for the model is free, the stream's stop fires

@@ -3,6 +3,8 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <openssl/sha.h>
 #include <mutex>
 #include <print>
 #include <ranges>
@@ -65,6 +67,7 @@ std::vector<std::string> discover_models(const std::string& models_dir) {
 }
 
 struct ModelPool::Entry {
+    std::string hash;
     whisper_context* ctx = nullptr;
     std::mutex mutex;
     // _any for the stop_token-aware waits in acquire.
@@ -113,7 +116,18 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                                         path.string());
         }
         auto entry = std::make_unique<Entry>();
-        entry->ctx = whisper_init_from_file_with_params_no_state(path.c_str(), cparams);
+        std::ifstream weights(path, std::ios::binary | std::ios::ate);
+        const auto size = weights.tellg();
+        if (!weights || size <= 0 || size > INT64_C(8589934592))
+            throw std::runtime_error("invalid model file size");
+        std::vector<char> bytes(static_cast<size_t>(size));
+        weights.seekg(0);
+        if (!weights.read(bytes.data(), size)) throw std::runtime_error("cannot read model weights");
+        unsigned char digest[SHA256_DIGEST_LENGTH];
+        SHA256(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(), digest);
+        entry->hash.assign(reinterpret_cast<const char*>(digest), sizeof(digest));
+        entry->ctx = whisper_init_from_buffer_with_params_no_state(bytes.data(), bytes.size(), cparams);
+        std::vector<char>().swap(bytes);
         if (entry->ctx == nullptr) {
             throw std::runtime_error("loading model '" + name + "' from " + path.string() +
                                      " failed");
@@ -125,19 +139,15 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                                          " for model '" + name + "' failed");
             }
             if (backend_ == "openvino") {
-                // nullptr model_path: whisper then derives the encoder IR as
-                // <stem>-encoder-openvino.xml next to the ggml weights.
-                // Passing the ggml path here makes OpenVINO read the ggml
-                // bin as its IR, which can never work. The compile cache
-                // cannot live next to the weights either (the models mount
-                // is read-only), so point it at tmpfs /tmp.
+                // Buffer-loaded weights do not retain a filesystem path. Pass
+                // the matching encoder XML explicitly; cache stays on tmpfs.
                 // Returns non-zero both when the converted encoder is
                 // missing, when the device is unavailable, and when this
                 // binary was built without the OpenVINO encoder; either way
                 // the operator asked for something this process cannot do.
                 static const std::string openvino_cache_dir = "/tmp/grpc-asr-openvino-cache";
                 if (whisper_ctx_init_openvino_encoder_with_state(
-                        entry->ctx, state, nullptr, config.openvino_device.c_str(),
+                        entry->ctx, state, (path.parent_path() / (path.stem().string() + "-encoder-openvino.xml")).c_str(), config.openvino_device.c_str(),
                         openvino_cache_dir.c_str()) != 0) {
                     throw std::runtime_error(
                         "GRPC_ASR_BACKEND=openvino: OpenVINO encoder init failed for model '" +
@@ -158,6 +168,10 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
 }
 
 ModelPool::~ModelPool() = default;
+
+std::string ModelPool::model_hash(const std::string& model) const {
+    return entries_.at(model)->hash;
+}
 
 ModelPool::Lease::~Lease() {
     if (pool_ != nullptr) {

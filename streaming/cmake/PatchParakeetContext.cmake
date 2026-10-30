@@ -1,0 +1,16 @@
+# Encoder padding is model context, not additional source frames to decode.
+set(context_source "${whisper_SOURCE_DIR}/src/parakeet.cpp")
+file(READ "${context_source}" context_text)
+set(context_old "    const int  n_frames                 = pstate.n_frames;")
+set(context_new [=[    const int  n_frames                 = std::min(pstate.n_frames,
+        (pstate.mel.n_len_org + hparams.subsampling_factor - 1) / hparams.subsampling_factor);]=])
+string(FIND "${context_text}" "${context_old}" context_position)
+if(NOT context_position EQUAL -1)
+  string(REPLACE "${context_old}" "${context_new}" context_text "${context_text}")
+  file(WRITE "${context_source}" "${context_text}")
+else()
+  string(FIND "${context_text}" "${context_new}" context_position)
+  if(context_position EQUAL -1)
+    message(FATAL_ERROR "Pinned Parakeet context patch no longer matches")
+  endif()
+endif()

@@ -67,6 +67,9 @@ jobs:
           mkdir -p models
           curl -fsSL --retry 5 --retry-all-errors -o models/ggml-tiny.en.bin "$TEST_MODEL_URL"
           echo "$TEST_MODEL_SHA256  models/ggml-tiny.en.bin" | sha256sum -c -
+      - name: Provision streaming qualification weights
+        if: matrix.models
+        run: bash scripts/fetch-test-models.sh models
       # The image build runs the test suite itself, so this also proves the
       # tests pass in a clean container with no host toolchain state.
       - name: docker build
