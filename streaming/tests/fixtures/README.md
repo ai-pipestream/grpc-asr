@@ -57,7 +57,7 @@ The base model (`ggml-base.bin`) also failed the synthetic case, misrecognizing
 `biblioteca` in the Spanish transcription. Keep the strict challenge available:
 
 ```sh
-./build/translation_tests /path/to/multilingual-model.bin tests/fixtures/spanish.wav synthetic
+./build/streaming/translation_tests /path/to/multilingual-model.bin streaming/tests/fixtures/spanish.wav synthetic
 ```
 
 The human-recording gate uses `MEDIA_TEST_MULTILINGUAL_MODEL` and
