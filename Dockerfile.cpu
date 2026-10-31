@@ -41,7 +41,7 @@ COPY . .
 # cache.
 # Reset architecture options when reusing a cache created with GGML_NATIVE=ON.
 # Otherwise cached OFF SIMD defaults survive the move to a portable build.
-RUN --mount=type=cache,id=grpc-asr-ubuntu26-cpu-cxx23-grpc1.83.0-whisper1.9.3-r2-${TARGETARCH},target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu26-cpu-cxx23-grpc1.83.0-whisper1.9.5-r2-${TARGETARCH},target=/build \
     cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_QUALIFY_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} -DGRPC_ASR_WERROR=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \

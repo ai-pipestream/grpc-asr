@@ -38,7 +38,7 @@ COPY . .
 
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
 # whisper.cpp, CUDA, or the toolchain moves.
-RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda12.9-gcc14-cxx23-grpc1.83.0-whisper1.9.3,target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda12.9-gcc14-cxx23-grpc1.83.0-whisper1.9.5,target=/build \
     cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_CUDA=ON \

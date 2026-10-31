@@ -99,8 +99,8 @@ if(GRPC_ASR_OPENVINO)
       /opt/intel/openvino/runtime/lib/intel64)
 endif()
 FetchContent_Declare(whisper
-  URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/7246b7311e089fe092c4abe7cfad5d0921f8be00
-  URL_HASH SHA256=e9a8bfbd84b77979a0e524ddf6d235592570134650779fa4001733f3b6ff25f0)
+  URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037
+  URL_HASH SHA256=645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4)
 FetchContent_MakeAvailable(whisper)
 include(streaming/cmake/PatchWhisperVad.cmake)
 include(streaming/cmake/PatchGgmlDepthwise.cmake)
