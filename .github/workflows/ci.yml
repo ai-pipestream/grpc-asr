@@ -3,7 +3,7 @@
 # image build mean the same thing; the smoke test then boot-proofs each
 # runtime image (library closure, uid 65532, boot to model loading, and an
 # LGPL-only ffmpeg). The legs match the publish workflow's: CUDA, CPU on
-# both architectures (each built natively), and OpenVINO.
+# both architectures, and OpenVINO.
 name: ci
 
 on:
@@ -25,39 +25,23 @@ env:
 
 jobs:
   image:
-    name: image ${{ matrix.variant }} ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
+    name: image ${{ matrix.variant }} ${{ matrix.arch }}
+    # GitHub provides native aarch64 qualification. Forgejo covers amd64.
+    runs-on: ${{ matrix.arch == 'arm64' && github.server_url == 'https://github.com' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # models: false on CUDA because a docker build has no driver
-          # library, so CMake disables the whisper-linked tests there at
-          # configure time (GPU hosts still run them); the other legs run
-          # them and must not skip.
-          - variant: cuda
-            dockerfile: Dockerfile
-            runner: ubuntu-latest
-            models: false
-          - variant: cpu
-            dockerfile: Dockerfile.cpu
-            runner: ubuntu-latest
-            models: true
-          - variant: cpu
-            dockerfile: Dockerfile.cpu
-            runner: ubuntu-24.04-arm
-            models: true
-          - variant: openvino
-            dockerfile: Dockerfile.openvino
-            runner: ubuntu-latest
-            models: true
+        include: ${{ fromJSON(github.server_url == 'https://github.com' && '[{"variant":"cuda","dockerfile":"Dockerfile","arch":"amd64","models":false},{"variant":"cpu","dockerfile":"Dockerfile.cpu","arch":"amd64","models":true},{"variant":"openvino","dockerfile":"Dockerfile.openvino","arch":"amd64","models":true},{"variant":"cpu","dockerfile":"Dockerfile.cpu","arch":"arm64","models":true}]' || '[{"variant":"cuda","dockerfile":"Dockerfile","arch":"amd64","models":false},{"variant":"cpu","dockerfile":"Dockerfile.cpu","arch":"amd64","models":true},{"variant":"openvino","dockerfile":"Dockerfile.openvino","arch":"amd64","models":true}]') }}
     steps:
       - uses: actions/checkout@v7
       # The CUDA devel base alone is several GB; the hosted runner's
-      # preinstalled SDKs are not needed here.
+      # preinstalled SDKs are not needed here. A Forgejo job container has
+      # neither those directories nor sudo, and runs as root.
       - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: $(command -v sudo || true) rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       # models/ is in the build context (.dockerignore keeps it), so COPY
       # . . puts the weights in the build stage for ctest; the runtime stage
       # copies only the server binary and ffmpeg, never /src.
@@ -67,11 +51,14 @@ jobs:
           mkdir -p models
           curl -fsSL --retry 5 --retry-all-errors -o models/ggml-tiny.en.bin "$TEST_MODEL_URL"
           echo "$TEST_MODEL_SHA256  models/ggml-tiny.en.bin" | sha256sum -c -
+      - name: Provision streaming qualification weights
+        if: matrix.models
+        run: bash scripts/fetch-test-models.sh models
       # The image build runs the test suite itself, so this also proves the
       # tests pass in a clean container with no host toolchain state.
       - name: docker build
         run: |
-          docker build -f ${{ matrix.dockerfile }} \
+          docker buildx build --load --platform linux/${{ matrix.arch }} -f ${{ matrix.dockerfile }} \
             --build-arg GRPC_ASR_TEST_REQUIRE_MODELS=${{ matrix.models && '1' || '0' }} \
             -t grpc-asr:ci .
       - name: Boot-proof the runtime image

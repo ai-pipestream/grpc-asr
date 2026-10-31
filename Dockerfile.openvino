@@ -29,7 +29,7 @@ FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl g++ git gpg make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg \
+        ca-certificates cmake curl g++ git gpg make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libssl-dev libcurl4-openssl-dev libopenh264-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Intel's OpenVINO APT repo, 2025 stream, ubuntu24 (noble) distribution.
@@ -50,6 +50,7 @@ RUN curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
 # /opt/ffmpeg, which comes first on PATH for ctest.
 COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
 RUN /tmp/build-ffmpeg.sh /opt/ffmpeg
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 
 # CI downloads models/ggml-tiny.en.bin into the build context (COPY . .
 # brings it into this stage only; the runtime stage never sees /src) and
@@ -64,13 +65,15 @@ COPY . .
 # concurrent multi-platform builds from sharing one /build (see
 # Dockerfile.cpu for the failure mode that causes).
 RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-cxx23-grpc1.83.0-whisper1.9.5-${TARGETARCH},target=/build \
-    cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-        -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
+    cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+        -DGRPC_ASR_QUALIFY_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
         GRPC_ASR_TEST_REQUIRE_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} \
         ctest --test-dir /build -L asr --output-on-failure \
-    && mkdir -p /out && cp /build/grpc-asr-server /out/
+    && mkdir -p /out && cp /build/grpc-asr-server /out/ \
+    && cp -L /usr/lib/$(gcc -dumpmachine)/libopenh264.so.* /opt/ffmpeg/lib/ \
+    && cp /usr/share/doc/libopenh264-dev/copyright /out/openh264-copyright
 
 FROM ubuntu:26.04
 
@@ -81,7 +84,7 @@ FROM ubuntu:26.04
 # (26.05, Battlemage-capable). The repo is removed again once the debs are in.
 # libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gpg libgomp1 \
+        ca-certificates curl gpg libgomp1 libcurl4t64 libssl3t64 \
     && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
         | gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu24 main" \
@@ -104,7 +107,9 @@ COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 # scripts/smoke-test.sh checks the label, NOTICE and that the build is not
 # a GPL one.
 COPY --from=build /opt/ffmpeg /opt/ffmpeg
+RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf && ldconfig
 COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
+COPY --from=build /out/openh264-copyright /usr/share/doc/grpc-asr/openh264-copyright
 LABEL ai.pipestream.ffmpeg.license="LGPL-2.1-or-later" \
       ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are built from the upstream FFmpeg release without --enable-gpl or --enable-nonfree; source, configure line and license: /opt/ffmpeg/share/doc/ffmpeg. Details: /usr/share/doc/grpc-asr/NOTICE"
 

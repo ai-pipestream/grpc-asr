@@ -18,6 +18,7 @@
 #include "config.h"
 #include "engine/model_pool.h"
 #include "service/asr_service.h"
+#include "service/streaming_runtime.h"
 #include "whisper.h"
 
 namespace {
@@ -67,6 +68,7 @@ int main() {
         // RPC.
         asr::engine::ModelPool pool(config);
         asr::AsrServiceImpl service(config, pool);
+        asr::StreamingRuntime streaming(pool, config);
 
         grpc::EnableDefaultHealthCheckService(true);
         grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -74,11 +76,14 @@ int main() {
         builder.AddListeningPort(config.listen_address, grpc::InsecureServerCredentials());
         builder.SetMaxReceiveMessageSize(4 * 1024 * 1024);
         builder.RegisterService(&service);
+        streaming.register_services(builder);
         std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
         if (server == nullptr) {
             std::println(stderr, "Unable to listen on {}", config.listen_address);
             return 1;
         }
+
+        streaming.connect(server->InProcessChannel(grpc::ChannelArguments{}));
 
         std::thread shutdown_thread([&server] {
             char byte = 0;

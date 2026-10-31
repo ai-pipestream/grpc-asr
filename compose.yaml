@@ -1,0 +1,30 @@
+services:
+  asr:
+    image: ${GRPC_ASR_IMAGE:-grpc-asr:unified}
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    read_only: true
+    user: "65532:65532"
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${GRPC_ASR_PORT:-50055}:50055"
+    volumes:
+      - "${GRPC_ASR_MODEL_DIR:-./models}:/models:ro"
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      GRPC_ASR_BACKEND: cpu
+      GRPC_ASR_LISTEN_ADDRESS: 0.0.0.0:50055
+      GRPC_ASR_MODELS_DIR: /models
+      GRPC_ASR_MODELS: ${GRPC_ASR_MODELS:-tiny.en}
+      GRPC_ASR_WORKER_TARGET: ${GRPC_ASR_WORKER_TARGET:-}
+      GRPC_ASR_STREAM_BACKEND: ${GRPC_ASR_STREAM_BACKEND:-whisper}
+      GRPC_ASR_STREAM_MODEL: ${GRPC_ASR_STREAM_MODEL:-tiny.en}
+      GRPC_ASR_VAD_MODEL_PATH: ${GRPC_ASR_VAD_MODEL_PATH:-}
+      GRPC_ASR_PARAKEET_MODEL_PATH: ${GRPC_ASR_PARAKEET_MODEL_PATH:-}
+      GRPC_ASR_HTTP_ORIGINS: ${GRPC_ASR_HTTP_ORIGINS:-}
+      GRPC_ASR_HTTP_ALLOW_PRIVATE: ${GRPC_ASR_HTTP_ALLOW_PRIVATE:-0}
+    stop_grace_period: 15s

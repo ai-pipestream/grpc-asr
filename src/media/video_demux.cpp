@@ -11,11 +11,13 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <span>
 #include <string_view>
 #include <vector>
 
 #include "cancellation.h"
 #include "media/audio_decoder.h"
+#include "media/pcm_scrub.h"
 
 namespace asr::media {
 
@@ -440,6 +442,7 @@ size_t VideoDemux::read_audio(float* out, size_t max_samples) {
         impl_->partial_sample.assign(reinterpret_cast<char*>(bytes) + whole * sizeof(float),
                                      leftover);
     }
+    scrub_pcm(std::span<float>(out, whole));
     return whole;
 }
 

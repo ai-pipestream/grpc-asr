@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <print>
 #include <stdexcept>
@@ -57,6 +58,58 @@ inline std::string make_wav(double seconds, double frequency, uint32_t sample_ra
         push_u16(static_cast<uint16_t>(static_cast<int16_t>(sample * 32767.0)));
     }
     return wav;
+}
+
+// Builds a 16 kHz mono 32-bit IEEE float WAV (format tag 3) from the given
+// samples, written verbatim: the way to put a NaN, an infinity, or an
+// out-of-range value on the wire, which a 16-bit PCM fixture never can.
+inline std::string make_float_wav(const std::vector<float>& samples) {
+    const uint32_t data_bytes = static_cast<uint32_t>(samples.size() * sizeof(float));
+    std::string wav;
+    wav.reserve(44 + data_bytes);
+    auto push_u32 = [&](uint32_t v) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            wav.push_back(static_cast<char>((v >> shift) & 0xFF));
+        }
+    };
+    auto push_u16 = [&](uint16_t v) {
+        wav.push_back(static_cast<char>(v & 0xFF));
+        wav.push_back(static_cast<char>((v >> 8) & 0xFF));
+    };
+    wav += "RIFF";
+    push_u32(36 + data_bytes);
+    wav += "WAVEfmt ";
+    push_u32(16);
+    push_u16(3);  // IEEE float
+    push_u16(1);  // mono
+    push_u32(16000);
+    push_u32(16000 * sizeof(float));
+    push_u16(sizeof(float));
+    push_u16(32);
+    wav += "data";
+    push_u32(data_bytes);
+    for (const float sample : samples) {
+        char bytes[sizeof(float)];
+        std::memcpy(bytes, &sample, sizeof bytes);
+        wav.append(bytes, sizeof bytes);
+    }
+    return wav;
+}
+
+// One second of a quiet sine with a non-finite or out-of-range value
+// every 1000th sample: NaN, both infinities, and magnitudes far outside
+// the [-1, 1] the model contract allows, the way a hostile float WAV
+// would carry them.
+inline std::vector<float> hostile_float_samples() {
+    const float poison[] = {std::nanf(""), INFINITY, -INFINITY, 1e30f, -1e30f};
+    std::vector<float> samples(16000);
+    for (size_t i = 0; i < samples.size(); i++) {
+        samples[i] = i % 1000 == 0
+                         ? poison[(i / 1000) % 5]
+                         : 0.1f * static_cast<float>(std::sin(2.0 * 3.14159265358979 * 440.0 *
+                                                              static_cast<double>(i) / 16000.0));
+    }
+    return samples;
 }
 
 // Builds a 16 kHz mono 16-bit PCM WAV of low white noise from a fixed-seed

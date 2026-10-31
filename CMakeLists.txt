@@ -34,9 +34,22 @@ if(GRPC_ASR_SANITIZE)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 include(FetchContent)
 
+option(GRPC_ASR_SYSTEM_GRPC "Use installed protobuf and gRPC" OFF)
+if(GRPC_ASR_SYSTEM_GRPC)
+  find_package(Protobuf REQUIRED)
+  find_package(gRPC CONFIG REQUIRED)
+  add_executable(protoc ALIAS protobuf::protoc)
+  add_executable(grpc_cpp_plugin ALIAS gRPC::grpc_cpp_plugin)
+  add_library(grpc++ ALIAS gRPC::grpc++)
+  add_library(grpc++_reflection ALIAS gRPC::grpc++_reflection)
+  set(protobuf_SOURCE_DIR "${Protobuf_INCLUDE_DIRS}/..")
+  set(ASR_PROTOBUF_INCLUDE "${Protobuf_INCLUDE_DIRS}")
+else()
+set(gRPC_SSL_PROVIDER package CACHE STRING "" FORCE)
 set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
 set(gRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -49,8 +62,14 @@ FetchContent_Declare(grpc
   GIT_SUBMODULES_RECURSE TRUE)
 FetchContent_MakeAvailable(grpc)
 
+  set(ASR_PROTOBUF_INCLUDE "${protobuf_SOURCE_DIR}/src")
+endif()
+
 # whisper.cpp is the ASR system of record. Examples/tests/server are the
 # upstream demo surface, not this service.
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA ${GRPC_ASR_CUDA} CACHE BOOL "" FORCE)
+set(WHISPER_OPENVINO ${GRPC_ASR_OPENVINO} CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
@@ -80,10 +99,25 @@ if(GRPC_ASR_OPENVINO)
       /opt/intel/openvino/runtime/lib/intel64)
 endif()
 FetchContent_Declare(whisper
-  GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
-  GIT_TAG v1.9.5
-  GIT_SHALLOW TRUE)
+  URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037
+  URL_HASH SHA256=645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4)
 FetchContent_MakeAvailable(whisper)
+include(streaming/cmake/PatchWhisperVad.cmake)
+include(streaming/cmake/PatchGgmlDepthwise.cmake)
+include(streaming/cmake/PatchParakeetContext.cmake)
+option(GRPC_ASR_QUALIFY_MODELS "Require the full speech qualification model set" OFF)
+if(GRPC_ASR_QUALIFY_MODELS)
+  set(MEDIA_TEST_MODEL "${PROJECT_SOURCE_DIR}/models/ggml-tiny.en.bin" CACHE FILEPATH "" FORCE)
+  set(MEDIA_TEST_MULTILINGUAL_MODEL "${PROJECT_SOURCE_DIR}/models/ggml-base.bin" CACHE FILEPATH "" FORCE)
+  set(MEDIA_TEST_VAD_MODEL "${PROJECT_SOURCE_DIR}/models/ggml-silero-v5.1.2.bin" CACHE FILEPATH "" FORCE)
+  set(MEDIA_TEST_PARAKEET_MODEL "${PROJECT_SOURCE_DIR}/models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin" CACHE FILEPATH "" FORCE)
+  foreach(model MEDIA_TEST_MODEL MEDIA_TEST_MULTILINGUAL_MODEL MEDIA_TEST_VAD_MODEL MEDIA_TEST_PARAKEET_MODEL)
+    if(NOT EXISTS "${${model}}")
+      message(FATAL_ERROR "Missing qualification weights: ${${model}}; run scripts/fetch-test-models.sh")
+    endif()
+  endforeach()
+endif()
+add_subdirectory(streaming)
 
 # ---------------------------------------------------------------------------
 # Generated proto code. protoc and grpc_cpp_plugin are the fetched targets,
@@ -123,7 +157,7 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory "${GENERATED_DIR}"
   COMMAND $<TARGET_FILE:protoc>
   ARGS --proto_path=${PROTO_DIR}
-       --proto_path=${protobuf_SOURCE_DIR}/src
+       --proto_path=${ASR_PROTOBUF_INCLUDE}
        --cpp_out=${GENERATED_DIR}
        --grpc_out=${GENERATED_DIR}
        --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
@@ -160,11 +194,13 @@ target_include_directories(asr_core PUBLIC src)
 target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
 target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}")
 target_link_libraries(asr_core
-  PUBLIC asr_proto whisper Threads::Threads
+  PUBLIC asr_proto whisper Threads::Threads OpenSSL::Crypto
   PRIVATE asr_flags)
 
+add_library(asr_streaming STATIC src/engine/stream_backend.cpp src/service/streaming_runtime.cpp)
+target_link_libraries(asr_streaming PUBLIC asr_core media_processing PRIVATE asr_flags)
 add_executable(grpc-asr-server src/main.cpp)
-target_link_libraries(grpc-asr-server PRIVATE asr_core asr_flags grpc++_reflection)
+target_link_libraries(grpc-asr-server PRIVATE asr_streaming asr_flags grpc++_reflection)
 
 install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
 
@@ -176,6 +212,7 @@ install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
 if(BUILD_TESTING)
   set(GRPC_ASR_TESTS
     sniff-test
+    pcm-scrub-test
     byte-stream-test
     config-test
     remote-options-test
@@ -220,5 +257,25 @@ if(BUILD_TESTING)
     set_tests_properties(transcriber-test asr-service-test model-discovery-test PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: OpenVINO runtime library (libopenvino.so) not found; "
       "disabling transcriber-test, asr-service-test, and model-discovery-test. Hosts with the OpenVINO runtime installed still run them.")
+  endif()
+endif()
+
+if(BUILD_TESTING)
+  add_executable(stream-backend-test tests/stream_backend_test.cpp)
+  target_link_libraries(stream-backend-test PRIVATE asr_streaming asr_flags)
+  add_test(NAME stream-backend-test COMMAND stream-backend-test)
+  set_tests_properties(stream-backend-test PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77
+    ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin")
+endif()
+
+if(BUILD_TESTING)
+  set(STREAM_TEST_TARGETS reconcile_tests http_tests ggml_depthwise_tests
+      pipeline_policy_tests windowing_tests decoder_tests media_tests stream-backend-test)
+  add_dependencies(grpc-asr-tests ${STREAM_TEST_TARGETS} speech_tests parakeet_tests
+      speech_window_probe vad_tests translation_tests pipeline_tests pipeline_cancellation_tests)
+  set_tests_properties(stream-backend-test PROPERTIES LABELS "asr;streaming")
+  if((GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER) OR
+     (GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME))
+    set_tests_properties(stream-backend-test PROPERTIES DISABLED TRUE)
   endif()
 endif()

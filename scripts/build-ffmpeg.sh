@@ -29,7 +29,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 tarball="$work/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-curl -fsSL --retry 3 -o "$tarball" "$FFMPEG_URL"
+curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 -o "$tarball" "$FFMPEG_URL"
 echo "${FFMPEG_SHA256}  ${tarball}" | sha256sum -c -
 tar -xJf "$tarball" -C "$work"
 cd "$work/ffmpeg-${FFMPEG_VERSION}"
@@ -42,16 +42,16 @@ cd "$work/ffmpeg-${FFMPEG_VERSION}"
 configure_args=(
   --prefix="$prefix" --cc="${CC:-gcc}"
   --enable-shared --disable-static --enable-rpath
-  --disable-autodetect --enable-pthreads --enable-zlib --disable-iconv
+  --disable-autodetect --enable-pthreads --enable-zlib --enable-libopenh264 --disable-iconv
   --disable-everything --disable-doc --disable-ffplay --disable-avdevice
   --disable-network --disable-debug
   --enable-protocol=file,pipe
-  --enable-demuxer=ogg,mov,matroska,wav,mp3,flac,aac
+  --enable-demuxer=ogg,mov,matroska,wav,mp3,flac,aac,mpegts,nut
   --enable-decoder=aac,aac_fixed,aac_latm,mp3,mp3float,mp2,mp2float,flac,alac,vorbis,opus,ac3,eac3,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,pcm_alaw,pcm_mulaw
   --enable-decoder=h264,hevc,vp8,vp9,mpeg4,mpeg1video,mpeg2video,mjpeg,h263,theora,prores
   --enable-parser=aac,aac_latm,mpegaudio,flac,vorbis,opus,ac3,h264,hevc,vp8,vp9,mpeg4video,mpegvideo,mjpeg,h263
-  --enable-encoder=pcm_f32le,png
-  --enable-muxer=pcm_f32le,image2pipe
+  --enable-encoder=pcm_f32le,png,mjpeg,aac,libopenh264
+  --enable-muxer=pcm_f32le,image2pipe,nut,matroska,mp4
   --enable-filter=aresample,aformat,format,scale,fps,null,anull
 )
 ./configure "${configure_args[@]}"
@@ -71,8 +71,7 @@ mkdir -p "$doc"
 cp COPYING.LGPLv2.1 LICENSE.md "$doc/"
 cp "$tarball" "$doc/"
 printf '%s\n' "./configure ${configure_args[*]}" > "$doc/CONFIGURE"
-# Headers, pkg-config files and the share/ffmpeg presets are not needed
-# at run time.
-rm -rf "$prefix/include" "$prefix/lib/pkgconfig" "$prefix/share/ffmpeg"
+# Keep headers and pkg-config files for the native server build.
+rm -rf "$prefix/share/ffmpeg"
 
 "$prefix/bin/ffmpeg" -hide_banner -buildconf

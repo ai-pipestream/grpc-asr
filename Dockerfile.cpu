@@ -10,7 +10,7 @@ FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl g++ git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg \
+        ca-certificates cmake curl g++ git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libssl-dev libcurl4-openssl-dev libopenh264-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # /opt/ffmpeg, which comes first on PATH for ctest.
 COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
 RUN /tmp/build-ffmpeg.sh /opt/ffmpeg
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 
 # CI downloads models/ggml-tiny.en.bin into the build context (COPY . .
 # brings it into this stage only; the runtime stage never sees /src) and
@@ -38,19 +39,23 @@ COPY . .
 # libggml-cpu.a, or a configure that reads the other platform's
 # half-written CMakeCache). The r2 suffix retires the poisoned pre-split
 # cache.
+# Reset architecture options when reusing a cache created with GGML_NATIVE=ON.
+# Otherwise cached OFF SIMD defaults survive the move to a portable build.
 RUN --mount=type=cache,id=grpc-asr-ubuntu26-cpu-cxx23-grpc1.83.0-whisper1.9.5-r2-${TARGETARCH},target=/build \
-    cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-        -DGRPC_ASR_WERROR=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
+    cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+        -DGRPC_ASR_QUALIFY_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} -DGRPC_ASR_WERROR=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
         GRPC_ASR_TEST_REQUIRE_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} \
         ctest --test-dir /build -L asr --output-on-failure \
-    && mkdir -p /out && cp /build/grpc-asr-server /out/
+    && mkdir -p /out && cp /build/grpc-asr-server /out/ \
+    && cp -L /usr/lib/$(gcc -dumpmachine)/libopenh264.so.* /opt/ffmpeg/lib/ \
+    && cp /usr/share/doc/libopenh264-dev/copyright /out/openh264-copyright
 
 FROM ubuntu:26.04
 
 # libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libcurl4t64 libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
@@ -62,7 +67,9 @@ COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 # scripts/smoke-test.sh checks the label, NOTICE and that the build is not
 # a GPL one.
 COPY --from=build /opt/ffmpeg /opt/ffmpeg
+RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf && ldconfig
 COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
+COPY --from=build /out/openh264-copyright /usr/share/doc/grpc-asr/openh264-copyright
 LABEL ai.pipestream.ffmpeg.license="LGPL-2.1-or-later" \
       ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are built from the upstream FFmpeg release without --enable-gpl or --enable-nonfree; source, configure line and license: /opt/ffmpeg/share/doc/ffmpeg. Details: /usr/share/doc/grpc-asr/NOTICE"
 

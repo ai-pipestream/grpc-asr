@@ -1,7 +1,11 @@
 # AGENTS.md: grpc-asr
 
-You are implementing **grpc-asr** from scratch in this repo. There is no
-application code yet. Specs are the source of truth.
+This is the canonical **grpc-asr** implementation. Preserve the existing
+AsrService contract while consolidating the native media and speech-worker
+interfaces in this repository. `streaming/` came from whisper-grpc commit
+b440304b304a016297763138d227b6a2987621be; it is maintained here now.
+Do not restore a separate media-server executable or duplicate Whisper model
+loading in the production runtime. Streaming Whisper uses the existing pool.
 
 ## Read this first, in order
 

@@ -19,7 +19,7 @@ ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu24.04
 FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl gcc-14 g++-14 git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg \
+        ca-certificates cmake curl gcc-14 g++-14 git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libssl-dev libcurl4-openssl-dev libopenh264-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # /opt/ffmpeg, which comes first on PATH for ctest.
 COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
 RUN CC=gcc-14 /tmp/build-ffmpeg.sh /opt/ffmpeg
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 
 WORKDIR /src
 COPY . .
@@ -38,18 +39,20 @@ COPY . .
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
 # whisper.cpp, CUDA, or the toolchain moves.
 RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda12.9-gcc14-cxx23-grpc1.83.0-whisper1.9.5,target=/build \
-    cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+    cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_CUDA=ON \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
     && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
         ctest --test-dir /build -L asr --output-on-failure \
-    && mkdir -p /out && cp /build/grpc-asr-server /out/
+    && mkdir -p /out && cp /build/grpc-asr-server /out/ \
+    && cp -L /usr/lib/$(gcc -dumpmachine)/libopenh264.so.* /opt/ffmpeg/lib/ \
+    && cp /usr/share/doc/libopenh264-dev/copyright /out/openh264-copyright
 
 FROM ${GRPC_ASR_RUNTIME_IMAGE}
 
 # libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libcurl4t64 libssl3t64 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -62,7 +65,9 @@ COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 # scripts/smoke-test.sh checks the label, NOTICE and that the build is not
 # a GPL one.
 COPY --from=build /opt/ffmpeg /opt/ffmpeg
+RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf && ldconfig
 COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
+COPY --from=build /out/openh264-copyright /usr/share/doc/grpc-asr/openh264-copyright
 LABEL ai.pipestream.ffmpeg.license="LGPL-2.1-or-later" \
       ai.pipestream.ffmpeg.notice="ffmpeg and ffprobe are built from the upstream FFmpeg release without --enable-gpl or --enable-nonfree; source, configure line and license: /opt/ffmpeg/share/doc/ffmpeg. Details: /usr/share/doc/grpc-asr/NOTICE"
 
