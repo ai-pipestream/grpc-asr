@@ -11,7 +11,10 @@
 
 #include "media/audio_decoder.h"
 
+#include <span>
 #include <string>
+
+#include "media/pcm_scrub.h"
 
 namespace asr::media {
 
@@ -140,7 +143,9 @@ size_t AudioDecoder::read(float* out, size_t max_samples) {
         throw DecodeError(std::string("decode failed mid-stream: ") +
                           ma_result_description(result));
     }
-    return static_cast<size_t>(frames_read);
+    const size_t samples = static_cast<size_t>(frames_read);
+    scrub_pcm(std::span<float>(out, samples));
+    return samples;
 }
 
 }  // namespace asr::media

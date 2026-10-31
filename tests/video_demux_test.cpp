@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -401,6 +402,44 @@ void verify_ogg_audio() {
     }
 }
 
+void verify_non_finite_samples_scrubbed() {
+    // A float PCM track in a mov carries its bit patterns verbatim through
+    // ffmpeg: NaN in, NaN out on the f32le pipe. The demux path hands the
+    // model the same contract the in-process decoder does, finite samples
+    // in [-1, 1], so the scrub has to happen on this side of the pipe too.
+    std::string wav_path = "/tmp/grpc-asr-fixture-XXXXXX.wav";
+    int fd = mkstemps(wav_path.data(), 4);
+    require(fd >= 0, "temp wav path");
+    {
+        const std::string wav = make_float_wav(hostile_float_samples());
+        require(::write(fd, wav.data(), wav.size()) == static_cast<ssize_t>(wav.size()),
+                "wrote the float wav");
+    }
+    ::close(fd);
+    const std::string media = generate_media("-i " + wav_path + " -c:a pcm_f32le", ".mov");
+    std::remove(wav_path.c_str());
+
+    VideoDemux demux = open(media);
+    const asr::media::ProbeInfo info = demux.probe();
+    require(info.has_audio && info.audio_codec == "pcm_f32le",
+            "float pcm track probed, got " + info.audio_codec);
+    demux.open_audio();
+    std::vector<float> pcm(16000);
+    size_t total = 0;
+    size_t bad = 0;
+    while (size_t got = demux.read_audio(pcm.data(), pcm.size())) {
+        for (size_t i = 0; i < got; i++) {
+            if (!std::isfinite(pcm[i]) || pcm[i] < -1.0f || pcm[i] > 1.0f) {
+                bad++;
+            }
+        }
+        total += got;
+    }
+    demux.close_audio();
+    require(total > 15000, "the whole second demuxed, got " + std::to_string(total));
+    require(bad == 0, std::to_string(bad) + " samples reached the caller non-finite or out of range");
+}
+
 void verify_video_without_audio() {
     std::string media = make_video_only_mp4();
     VideoDemux demux = open(media);
@@ -454,6 +493,7 @@ int main() {
         verify_media_on_fd_3(media);
         verify_stray_descriptors_stay_out(media);
         verify_ogg_audio();
+        verify_non_finite_samples_scrubbed();
         verify_video_without_audio();
         verify_garbage_rejected();
         verify_png_dimensions();
