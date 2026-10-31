@@ -909,6 +909,21 @@ message TextItemBase {
   // list only names who disagreed, on the item where they disagreed.
   // Empty for single-source items. Extension beyond the upstream dialect.
   repeated FieldSource field_sources = 25;
+
+  // Markup attributes in source order, including lexical presence and locations.
+  repeated SourceAttribute source_attributes = 26;
+}
+
+// A markup attribute's decoded value and source spelling. Presence distinguishes
+// a bare attribute from an explicitly empty value without inventing source bytes.
+message SourceAttribute {
+  string name = 1;
+  string name_raw = 2;
+  optional string value = 3;
+  optional ByteSpan name_span = 4;
+  optional ByteSpan value_span = 5;
+  // Absent when an older producer cannot distinguish lexical value presence.
+  optional bool value_present = 6;
 }
 
 // TitleItem represents a document title or major heading.
@@ -1381,6 +1396,18 @@ message TableData {
   // The fixed-record layout this table was decoded with; extension beyond
   // the upstream dialect.
   optional RecordLayoutMeta record_layout = 10;
+  // Named source table declarations, distinct from the sheet-wide cell grid.
+  repeated DeclaredSheetTable declared_tables = 11;
+}
+
+// One named table declared by a workbook, preserving its own schema and bands.
+message DeclaredSheetTable {
+  string name = 1;
+  // Absolute sheet coordinates with inclusive last row and column.
+  GridSpan range = 2;
+  uint32 header_row_count = 3;
+  uint32 totals_row_count = 4;
+  repeated string columns = 5;
 }
 
 // TableRow represents a single row in the table.
@@ -1753,6 +1780,14 @@ message DocumentMeta {
   // Extension beyond the upstream dialect.
   repeated FieldSource field_sources = 35;
   map<string, string> extra = 100;
+  // Source-declared workbook/document properties, retained as typed metadata.
+  optional string description = 36;
+  optional string category = 37;
+  optional string content_status = 38;
+  optional string revision = 39;
+  optional string application_version = 40;
+  optional string company = 41;
+  optional string manager = 42;
 }
 
 // Identifier is one source-scoped identifier.
@@ -1835,6 +1870,14 @@ message CellValue {
   }
   // The source's display format string for the value.
   optional string number_format = 10;
+  // The source formula alongside its cached typed result in `kind`. Older
+  // producers may instead use the legacy `formula` arm without a cached value.
+  optional string formula_source = 11;
+  // Source workbook style index when the reader exposes it.
+  optional uint32 style_id = 12;
+  // Source number-format identifier, including reserved/localized formats
+  // whose display code is unavailable.
+  optional uint32 number_format_id = 13;
 }
 
 // CivilDateTime is a wall-clock date or datetime as the source wrote it,
@@ -1939,11 +1982,47 @@ message GenerationSource {
   string model = 1;
   optional string endpoint = 2;
   // The provider's stop reason, verbatim; a length stop means the content
-  // is truncated.
+  // is truncated. This is the raw companion of `stop_reason`: it is kept
+  // even when stop_reason classifies it, and it is the only carrier when
+  // the value has no VlmStopReason.
   optional string finish_reason = 3;
   optional uint64 prompt_tokens = 4;
   optional uint64 completion_tokens = 5;
   optional double temperature = 6;
+  // Why the generation ended early, when it did; unset when it ran to its
+  // natural end or the producer does not say.
+  optional GenerationTruncation truncation = 7;
+  // finish_reason classified the way docling 2.140 classifies a VLM
+  // response (VlmPrediction.stop_reason). UNSPECIFIED when the producer
+  // gave no stop reason or one docling has no name for; finish_reason then
+  // keeps the verbatim value.
+  VlmStopReason stop_reason = 8;
+}
+
+// VlmStopReason mirrors docling's VlmStopReason (docling 2.140): why a VLM
+// generation ended. Upstream's "unspecified" member is the zero value.
+enum VlmStopReason {
+  VLM_STOP_REASON_UNSPECIFIED = 0;
+  // The token budget ran out ("length"); the content is truncated.
+  VLM_STOP_REASON_LENGTH = 1;
+  // A configured stop sequence matched ("stop_sequence").
+  VLM_STOP_REASON_STOP_SEQUENCE = 2;
+  // The model emitted its end-of-text token ("end_of_sequence"; OpenAI
+  // "stop").
+  VLM_STOP_REASON_END_OF_SEQUENCE = 3;
+  // The provider withheld content under its safety policy
+  // ("content_filter").
+  VLM_STOP_REASON_CONTENT_FILTERED = 4;
+  // The inference call failed and produced no output ("inference_error").
+  VLM_STOP_REASON_INFERENCE_ERROR = 5;
+}
+
+// GenerationTruncation names why a model generation was cut short.
+enum GenerationTruncation {
+  GENERATION_TRUNCATION_UNSPECIFIED = 0;
+  // The generation kept repeating the same short unit and was cancelled
+  // while streaming; the content is the output before the repeated tail.
+  GENERATION_TRUNCATION_REPETITION = 1;
 }
 
 // OutlineEntry is one row of the source's own table of contents.

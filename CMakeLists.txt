@@ -81,7 +81,7 @@ if(GRPC_ASR_OPENVINO)
 endif()
 FetchContent_Declare(whisper
   GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
-  GIT_TAG v1.9.3
+  GIT_TAG v1.9.5
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(whisper)
 
