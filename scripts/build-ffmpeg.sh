@@ -29,7 +29,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 tarball="$work/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-curl -fsSL --retry 3 -o "$tarball" "$FFMPEG_URL"
+curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 -o "$tarball" "$FFMPEG_URL"
 echo "${FFMPEG_SHA256}  ${tarball}" | sha256sum -c -
 tar -xJf "$tarball" -C "$work"
 cd "$work/ffmpeg-${FFMPEG_VERSION}"
