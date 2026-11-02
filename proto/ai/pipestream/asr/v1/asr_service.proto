@@ -100,6 +100,99 @@ message TranscribeOptions {
   // engine yet, so a valid request fails with UNIMPLEMENTED and an invalid
   // one with INVALID_ARGUMENT.
   RemoteTranscriptionOptions remote = 10;
+
+  // Docling-slim AsrModelType preset (2.145.0). When set, and `model` is
+  // empty, the server resolves a whisper.cpp model id for the presets this
+  // build can serve; every other preset is UNIMPLEMENTED by name.
+  optional AsrModelType model_type = 11;
+  // Raw preset string when the closed enum has no match yet.
+  optional string model_type_raw = 12;
+  // Engine arm (docling AsrEngineConfig). Unset or WHISPER_CPP uses the
+  // local pool; TRANSFORMERS / MLX_WHISPER / NATIVE_WHISPER are typed and
+  // return UNIMPLEMENTED; REMOTE requires `remote` above.
+  optional AsrEngineKind engine = 13;
+  // Inline transformers options (docling InlineAsrTransformersOptions).
+  // Accepted on the wire; this build returns UNIMPLEMENTED when set.
+  optional InlineAsrTransformersOptions transformers = 14;
+  // mlx-whisper options including slim 2.145.0 fields. UNIMPLEMENTED here.
+  optional InlineAsrMlxWhisperOptions mlx_whisper = 15;
+  // openai-whisper native options. UNIMPLEMENTED here.
+  optional InlineAsrNativeWhisperOptions native_whisper = 16;
+}
+
+// Docling slim AsrModelFamily (transformers / NeMo families).
+enum AsrModelFamily {
+  ASR_MODEL_FAMILY_UNSPECIFIED = 0;
+  ASR_MODEL_FAMILY_WHISPER = 1;
+  ASR_MODEL_FAMILY_GRANITE = 2;
+  ASR_MODEL_FAMILY_GRANITE_CTC = 3;
+  ASR_MODEL_FAMILY_PARAKEET = 4;
+  ASR_MODEL_FAMILY_NEMOTRON = 5;
+}
+
+// Closed preset enum matching docling slim AsrModelType (2.145.0).
+enum AsrModelType {
+  ASR_MODEL_TYPE_UNSPECIFIED = 0;
+  ASR_MODEL_TYPE_WHISPER_TINY = 1;
+  ASR_MODEL_TYPE_WHISPER_SMALL = 2;
+  ASR_MODEL_TYPE_WHISPER_MEDIUM = 3;
+  ASR_MODEL_TYPE_WHISPER_BASE = 4;
+  ASR_MODEL_TYPE_WHISPER_LARGE = 5;
+  ASR_MODEL_TYPE_WHISPER_TURBO = 6;
+  ASR_MODEL_TYPE_WHISPER_TINY_MLX = 7;
+  ASR_MODEL_TYPE_WHISPER_SMALL_MLX = 8;
+  ASR_MODEL_TYPE_WHISPER_MEDIUM_MLX = 9;
+  ASR_MODEL_TYPE_WHISPER_BASE_MLX = 10;
+  ASR_MODEL_TYPE_WHISPER_LARGE_MLX = 11;
+  ASR_MODEL_TYPE_WHISPER_TURBO_MLX = 12;
+  ASR_MODEL_TYPE_WHISPER_NATIVE = 13;
+  ASR_MODEL_TYPE_WHISPER_S2T = 14;
+  ASR_MODEL_TYPE_GRANITE_SPEECH_5_0_2B = 15;
+  ASR_MODEL_TYPE_GRANITE_SPEECH_5_0_470M_TURBOCTC = 16;
+  ASR_MODEL_TYPE_GRANITE_SPEECH_5_0_470M_TURBOCTC_NC = 17;
+  ASR_MODEL_TYPE_GRANITE_SPEECH_4_1_2B = 18;
+  ASR_MODEL_TYPE_GRANITE_SPEECH_4_1_2B_PLUS = 19;
+  ASR_MODEL_TYPE_NEMOTRON_SPEECH_STREAMING_EN_0_6B = 20;
+  ASR_MODEL_TYPE_PARAKEET_CTC_1_1B = 21;
+  ASR_MODEL_TYPE_GRANITE_4_0_1B_SPEECH = 22;
+  ASR_MODEL_TYPE_NEMOTRON_3_5_ASR_STREAMING = 23;
+  ASR_MODEL_TYPE_WHISPER_TINY_TRANSFORMERS = 24;
+  ASR_MODEL_TYPE_WHISPER_BASE_TRANSFORMERS = 25;
+  ASR_MODEL_TYPE_WHISPER_SMALL_TRANSFORMERS = 26;
+  ASR_MODEL_TYPE_WHISPER_MEDIUM_TRANSFORMERS = 27;
+  ASR_MODEL_TYPE_WHISPER_LARGE_TRANSFORMERS = 28;
+  ASR_MODEL_TYPE_WHISPER_TURBO_TRANSFORMERS = 29;
+}
+
+// Engine arm for ASR (docling AsrEngineConfig / inline vs API).
+enum AsrEngineKind {
+  ASR_ENGINE_KIND_UNSPECIFIED = 0;
+  ASR_ENGINE_KIND_WHISPER_CPP = 1;       // local whisper.cpp pool
+  ASR_ENGINE_KIND_TRANSFORMERS = 2;     // not served: UNIMPLEMENTED
+  ASR_ENGINE_KIND_MLX_WHISPER = 3;      // not served: UNIMPLEMENTED
+  ASR_ENGINE_KIND_NATIVE_WHISPER = 4;   // not served: UNIMPLEMENTED
+  ASR_ENGINE_KIND_REMOTE = 5;           // requires RemoteTranscriptionOptions
+}
+
+message InlineAsrTransformersOptions {
+  optional string revision = 1;
+  optional AsrModelFamily model_family = 2;
+  optional string model_family_raw = 3;
+  optional string prompt = 4;
+  optional string language = 5;
+  optional Task task = 6;
+  optional string task_raw = 7;
+}
+
+message InlineAsrMlxWhisperOptions {
+  // Unset leaves the mlx-whisper default (true); explicit false is distinct.
+  optional bool condition_on_previous_text = 1;
+  optional double hallucination_silence_threshold = 2;
+  optional string initial_prompt = 3;
+}
+
+message InlineAsrNativeWhisperOptions {
+  optional bool condition_on_previous_text = 1;
 }
 
 // Options for a remote, OpenAI-compatible transcription service: the

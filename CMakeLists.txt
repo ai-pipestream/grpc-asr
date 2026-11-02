@@ -188,6 +188,7 @@ add_library(asr_core STATIC
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
+  src/engine/docling_asr_options.cpp
   src/document/document_fold.cpp
   src/service/asr_service.cpp)
 target_include_directories(asr_core PUBLIC src)
@@ -216,6 +217,7 @@ if(BUILD_TESTING)
     byte-stream-test
     config-test
     remote-options-test
+    docling-asr-options-test
     audio-decoder-test
     document-fold-test
     model-discovery-test

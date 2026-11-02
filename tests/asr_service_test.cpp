@@ -665,6 +665,31 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
                 result.status.error_message().find("TranscribeOptions.remote") != std::string::npos,
             "valid remote options are UNIMPLEMENTED, got " + result.status.error_message());
     require(result.finals.empty() && !result.got_media_info, "remote options never run the local pool");
+
+    // Docling-slim engine / model_type: unsupported arms are UNIMPLEMENTED
+    // before any media is decoded; a whisper.cpp-servable preset fills model.
+    asrv1::TranscribeOptions transformers = options_for("tiny.en");
+    transformers.set_engine(asrv1::ASR_ENGINE_KIND_TRANSFORMERS);
+    result = transcribe(channel, transformers, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::UNIMPLEMENTED &&
+                result.status.error_message().find("TRANSFORMERS") != std::string::npos,
+            "TRANSFORMERS engine is UNIMPLEMENTED, got " + result.status.error_message());
+
+    asrv1::TranscribeOptions mlx = options_for("");
+    mlx.set_model_type(asrv1::ASR_MODEL_TYPE_WHISPER_TINY_MLX);
+    result = transcribe(channel, mlx, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::UNIMPLEMENTED &&
+                result.status.error_message().find("model_type") != std::string::npos,
+            "unmapped model_type is UNIMPLEMENTED, got " + result.status.error_message());
+
+    asrv1::TranscribeOptions preset = options_for("");
+    preset.set_model_type(asrv1::ASR_MODEL_TYPE_WHISPER_TINY);
+    // tiny may not be loaded (tiny.en is); either loads or names the missing model.
+    result = transcribe(channel, preset, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::OK ||
+                (result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                 result.status.error_message().find("tiny") != std::string::npos),
+            "whisper_tiny preset resolves to model tiny, got " + result.status.error_message());
 }
 
 void verify_byte_cap(asr::Config config, asr::engine::ModelPool& pool) {
