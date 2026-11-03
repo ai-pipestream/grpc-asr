@@ -108,17 +108,41 @@ void verify_model_type_resolution() {
   options.Clear();
   options.set_model("tiny.en");
   options.set_model_type(asrv1::ASR_MODEL_TYPE_WHISPER_TINY_MLX);
-  expect_ok(options, "explicit model wins over unmapped preset");
+  expect_unimplemented(options, "model_type", "explicit model cannot select an unsupported preset");
 
   options.Clear();
   options.set_model_type_raw("some-future-preset");
   expect_unimplemented(options, "model_type_raw", "raw without enum");
 }
 
+void verify_conflicts_and_unknown_values() {
+  asrv1::TranscribeOptions options;
+  options.set_model("tiny.en");
+  options.set_model_type(static_cast<asrv1::AsrModelType>(999));
+  expect_invalid(options, "model_type", "unknown enum with explicit model");
+  options.clear_model_type();
+  options.set_model_type_raw("future-backend");
+  expect_unimplemented(options, "model_type_raw", "raw preset with explicit model");
+  options.clear_model_type_raw();
+  options.set_engine(asrv1::ASR_ENGINE_KIND_WHISPER_CPP);
+  options.mutable_remote();
+  expect_invalid(options, "engine", "local engine with remote options");
+  options.clear_remote();
+  options.mutable_mlx_whisper();
+  expect_invalid(options, "engine", "local engine with mlx options");
+  options.clear_engine();
+  options.mutable_transformers();
+  expect_invalid(options, "options", "multiple inline option messages");
+  options.clear_transformers();
+  options.mutable_remote();
+  expect_invalid(options, "options", "remote and inline options");
+}
+
 }  // namespace
 
 int main() {
   try {
+    verify_conflicts_and_unknown_values();
     verify_whisper_cpp_presets_map();
     verify_engine_arms();
     verify_inline_options_unimplemented();

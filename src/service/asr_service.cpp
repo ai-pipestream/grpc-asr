@@ -425,6 +425,13 @@ grpc::Status AsrServiceImpl::Transcribe(
                 "the first message must carry TranscribeOptions"};
     }
     const asrv1::TranscribeOptions options = request.options();
+    // Docling-slim typed ASR fields (engine / model_type / inline options):
+    // accept them on the wire, refuse unsupported engines by name, and map
+    // whisper.cpp-servable presets onto TranscribeOptions.model.
+    if (grpc::Status status = engine::validate_docling_asr_options(options); !status.ok()) {
+        rejected++;
+        return status;
+    }
     if (options.has_remote()) {
         // Remote transcription (docling ApiAsrOptions) is typed and
         // validated on the wire; this build has no HTTP engine, so a valid
@@ -436,13 +443,6 @@ grpc::Status AsrServiceImpl::Transcribe(
         return {grpc::StatusCode::UNIMPLEMENTED,
                 "TranscribeOptions.remote is not served by this build: remote transcription has "
                 "no HTTP engine yet; omit it to transcribe with the local whisper.cpp pool"};
-    }
-    // Docling-slim typed ASR fields (engine / model_type / inline options):
-    // accept them on the wire, refuse unsupported engines by name, and map
-    // whisper.cpp-servable presets onto TranscribeOptions.model.
-    if (grpc::Status status = engine::validate_docling_asr_options(options); !status.ok()) {
-        rejected++;
-        return status;
     }
     asrv1::TranscribeOptions resolved = options;
     engine::apply_model_type_default(&resolved);

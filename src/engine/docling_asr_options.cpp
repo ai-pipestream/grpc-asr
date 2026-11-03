@@ -32,6 +32,26 @@ std::optional<std::string> whisper_cpp_model_for(asrv1::AsrModelType type) {
 }
 
 grpc::Status validate_docling_asr_options(const asrv1::TranscribeOptions& options) {
+  if (options.has_model_type() && !asrv1::AsrModelType_IsValid(options.model_type())) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.model_type has an unknown value"};
+  }
+  if (options.has_engine() && !asrv1::AsrEngineKind_IsValid(options.engine())) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.engine has an unknown value"};
+  }
+  const int arms = options.has_remote() + options.has_transformers() +
+                   options.has_mlx_whisper() + options.has_native_whisper();
+  if (arms > 1) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions engine options are mutually exclusive"};
+  }
+  if (arms && options.has_engine() && options.engine() != asrv1::ASR_ENGINE_KIND_UNSPECIFIED) {
+    const auto selected = options.has_remote() ? asrv1::ASR_ENGINE_KIND_REMOTE :
+        options.has_transformers() ? asrv1::ASR_ENGINE_KIND_TRANSFORMERS :
+        options.has_mlx_whisper() ? asrv1::ASR_ENGINE_KIND_MLX_WHISPER :
+                                  asrv1::ASR_ENGINE_KIND_NATIVE_WHISPER;
+    if (options.engine() != selected) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.engine conflicts with its options"};
+    }
+  }
   if (options.has_engine()) {
     switch (options.engine()) {
       case asrv1::ASR_ENGINE_KIND_UNSPECIFIED:
@@ -75,21 +95,18 @@ grpc::Status validate_docling_asr_options(const asrv1::TranscribeOptions& option
   }
 
   if (options.has_model_type() &&
-      options.model_type() != asrv1::ASR_MODEL_TYPE_UNSPECIFIED && options.model().empty()) {
+      options.model_type() != asrv1::ASR_MODEL_TYPE_UNSPECIFIED) {
     if (!whisper_cpp_model_for(options.model_type()).has_value()) {
       return {grpc::StatusCode::UNIMPLEMENTED,
               "TranscribeOptions.model_type preset is not mapped to a whisper.cpp "
-              "model in this build; set TranscribeOptions.model explicitly for a "
-              "loaded whisper.cpp id, or omit model_type"};
+              "model in this build"};
     }
   }
 
   if (options.has_model_type_raw() && !options.model_type_raw().empty() &&
-      (!options.has_model_type() || options.model_type() == asrv1::ASR_MODEL_TYPE_UNSPECIFIED) &&
-      options.model().empty()) {
+      (!options.has_model_type() || options.model_type() == asrv1::ASR_MODEL_TYPE_UNSPECIFIED)) {
     return {grpc::StatusCode::UNIMPLEMENTED,
-            "TranscribeOptions.model_type_raw has no closed-enum match in this build; "
-            "set TranscribeOptions.model for a loaded whisper.cpp id"};
+            "TranscribeOptions.model_type_raw has no closed-enum match in this build"};
   }
 
   return grpc::Status::OK;

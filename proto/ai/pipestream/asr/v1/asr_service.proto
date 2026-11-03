@@ -101,9 +101,9 @@ message TranscribeOptions {
   // one with INVALID_ARGUMENT.
   RemoteTranscriptionOptions remote = 10;
 
-  // Docling-slim AsrModelType preset (2.145.0). When set, and `model` is
-  // empty, the server resolves a whisper.cpp model id for the presets this
-  // build can serve; every other preset is UNIMPLEMENTED by name.
+  // Typed ASR preset. Unsupported presets are rejected even with `model` set.
+  // When `model` is empty, a supported preset resolves to a whisper.cpp id.
+  // An explicit model id overrides only a supported preset.
   optional AsrModelType model_type = 11;
   // Raw preset string when the closed enum has no match yet.
   optional string model_type_raw = 12;
@@ -111,6 +111,8 @@ message TranscribeOptions {
   // local pool; TRANSFORMERS / MLX_WHISPER / NATIVE_WHISPER are typed and
   // return UNIMPLEMENTED; REMOTE requires `remote` above.
   optional AsrEngineKind engine = 13;
+  // At most one of remote, transformers, mlx_whisper, and native_whisper
+  // may be set, and it must agree with an explicitly selected engine.
   // Inline transformers options (docling InlineAsrTransformersOptions).
   // Accepted on the wire; this build returns UNIMPLEMENTED when set.
   optional InlineAsrTransformersOptions transformers = 14;
@@ -122,76 +124,132 @@ message TranscribeOptions {
 
 // Docling slim AsrModelFamily (transformers / NeMo families).
 enum AsrModelFamily {
+  // No explicit selection; use the enclosing request defaults.
   ASR_MODEL_FAMILY_UNSPECIFIED = 0;
+  // Whisper selection.
   ASR_MODEL_FAMILY_WHISPER = 1;
+  // Granite selection.
   ASR_MODEL_FAMILY_GRANITE = 2;
+  // Granite ctc selection.
   ASR_MODEL_FAMILY_GRANITE_CTC = 3;
+  // Parakeet selection.
   ASR_MODEL_FAMILY_PARAKEET = 4;
+  // Nemotron selection.
   ASR_MODEL_FAMILY_NEMOTRON = 5;
 }
 
-// Closed preset enum matching docling slim AsrModelType (2.145.0).
+// Subset of the 2.145.0 preset vocabulary. Other names use model_type_raw.
+// Explicit native and S2T model-size presets are not yet enumerated here.
 enum AsrModelType {
+  // No explicit selection; use the enclosing request defaults.
   ASR_MODEL_TYPE_UNSPECIFIED = 0;
+  // Whisper tiny selection.
   ASR_MODEL_TYPE_WHISPER_TINY = 1;
+  // Whisper small selection.
   ASR_MODEL_TYPE_WHISPER_SMALL = 2;
+  // Whisper medium selection.
   ASR_MODEL_TYPE_WHISPER_MEDIUM = 3;
+  // Whisper base selection.
   ASR_MODEL_TYPE_WHISPER_BASE = 4;
+  // Whisper large selection.
   ASR_MODEL_TYPE_WHISPER_LARGE = 5;
+  // Whisper turbo selection.
   ASR_MODEL_TYPE_WHISPER_TURBO = 6;
+  // Whisper tiny mlx selection.
   ASR_MODEL_TYPE_WHISPER_TINY_MLX = 7;
+  // Whisper small mlx selection.
   ASR_MODEL_TYPE_WHISPER_SMALL_MLX = 8;
+  // Whisper medium mlx selection.
   ASR_MODEL_TYPE_WHISPER_MEDIUM_MLX = 9;
+  // Whisper base mlx selection.
   ASR_MODEL_TYPE_WHISPER_BASE_MLX = 10;
+  // Whisper large mlx selection.
   ASR_MODEL_TYPE_WHISPER_LARGE_MLX = 11;
+  // Whisper turbo mlx selection.
   ASR_MODEL_TYPE_WHISPER_TURBO_MLX = 12;
+  // Local generic Python Whisper selector; not an upstream preset name.
   ASR_MODEL_TYPE_WHISPER_NATIVE = 13;
+  // Local generic WhisperS2T selector; not an upstream preset name.
   ASR_MODEL_TYPE_WHISPER_S2T = 14;
+  // Granite speech 5 0 2b selection.
   ASR_MODEL_TYPE_GRANITE_SPEECH_5_0_2B = 15;
+  // Granite speech 5 0 470m turboctc selection.
   ASR_MODEL_TYPE_GRANITE_SPEECH_5_0_470M_TURBOCTC = 16;
+  // Granite speech 5 0 470m turboctc nc selection.
   ASR_MODEL_TYPE_GRANITE_SPEECH_5_0_470M_TURBOCTC_NC = 17;
+  // Granite speech 4 1 2b selection.
   ASR_MODEL_TYPE_GRANITE_SPEECH_4_1_2B = 18;
+  // Granite speech 4 1 2b plus selection.
   ASR_MODEL_TYPE_GRANITE_SPEECH_4_1_2B_PLUS = 19;
+  // Nemotron speech streaming en 0 6b selection.
   ASR_MODEL_TYPE_NEMOTRON_SPEECH_STREAMING_EN_0_6B = 20;
+  // Parakeet ctc 1 1b selection.
   ASR_MODEL_TYPE_PARAKEET_CTC_1_1B = 21;
+  // Granite 4 0 1b speech selection.
   ASR_MODEL_TYPE_GRANITE_4_0_1B_SPEECH = 22;
+  // Nemotron 3 5 asr streaming selection.
   ASR_MODEL_TYPE_NEMOTRON_3_5_ASR_STREAMING = 23;
+  // Whisper tiny transformers selection.
   ASR_MODEL_TYPE_WHISPER_TINY_TRANSFORMERS = 24;
+  // Whisper base transformers selection.
   ASR_MODEL_TYPE_WHISPER_BASE_TRANSFORMERS = 25;
+  // Whisper small transformers selection.
   ASR_MODEL_TYPE_WHISPER_SMALL_TRANSFORMERS = 26;
+  // Whisper medium transformers selection.
   ASR_MODEL_TYPE_WHISPER_MEDIUM_TRANSFORMERS = 27;
+  // Whisper large transformers selection.
   ASR_MODEL_TYPE_WHISPER_LARGE_TRANSFORMERS = 28;
+  // Whisper turbo transformers selection.
   ASR_MODEL_TYPE_WHISPER_TURBO_TRANSFORMERS = 29;
 }
 
 // Engine arm for ASR (docling AsrEngineConfig / inline vs API).
 enum AsrEngineKind {
+  // No explicit selection; use the enclosing request defaults.
   ASR_ENGINE_KIND_UNSPECIFIED = 0;
+  // Whisper cpp selection.
   ASR_ENGINE_KIND_WHISPER_CPP = 1;       // local whisper.cpp pool
+  // Transformers selection.
   ASR_ENGINE_KIND_TRANSFORMERS = 2;     // not served: UNIMPLEMENTED
+  // Mlx whisper selection.
   ASR_ENGINE_KIND_MLX_WHISPER = 3;      // not served: UNIMPLEMENTED
+  // Native whisper selection.
   ASR_ENGINE_KIND_NATIVE_WHISPER = 4;   // not served: UNIMPLEMENTED
+  // Remote selection.
   ASR_ENGINE_KIND_REMOTE = 5;           // requires RemoteTranscriptionOptions
 }
 
+// Options for a Transformers ASR backend; unavailable in this collector.
 message InlineAsrTransformersOptions {
+  // Model repository revision.
   optional string revision = 1;
+  // Model architecture family.
   optional AsrModelFamily model_family = 2;
+  // Original family name when the enum has no matching value.
   optional string model_family_raw = 3;
+  // Prompt supplied to the model.
   optional string prompt = 4;
+  // Requested transcription language.
   optional string language = 5;
+  // Requested transcription or translation task.
   optional Task task = 6;
+  // Original task name when the enum has no matching value.
   optional string task_raw = 7;
 }
 
+// Options for an MLX Whisper backend; unavailable in this collector.
 message InlineAsrMlxWhisperOptions {
   // Unset leaves the mlx-whisper default (true); explicit false is distinct.
   optional bool condition_on_previous_text = 1;
+  // Silence threshold in seconds used by the MLX backend.
   optional double hallucination_silence_threshold = 2;
+  // Initial prompt supplied to the MLX backend.
   optional string initial_prompt = 3;
 }
 
+// Options for the Python Whisper backend; unavailable in this collector.
 message InlineAsrNativeWhisperOptions {
+  // Whether later windows are conditioned on previous text.
   optional bool condition_on_previous_text = 1;
 }
 
