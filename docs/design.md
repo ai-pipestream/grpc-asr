@@ -14,8 +14,8 @@ path is diskless; model weights are the only files, mounted read-only.
 
 Training, fine-tuning, or serving as a general STT platform. mlx-whisper,
 which is macOS-only; Linux CUDA, OpenVINO, and CPU cover the fleet.
-Subtitle burn-in or video transcode. Overlapping speech, music, or VAD
-productization beyond what whisper.cpp already does.
+Subtitle burn-in or video transcode. Separation of overlapping speech and
+music. The media API does support Silero VAD for speech-aware windowing.
 
 ## 3. Wire API
 
@@ -42,7 +42,34 @@ Events, in order:
 3. `Keyframe`: timestamp plus PNG bytes (only if `emit_keyframes`)
 4. `TranscriptComplete`: language, duration, token counts
 
-### 3a. Remote transcription options (docling ApiAsrOptions)
+### 3a. Consolidated media and worker APIs
+
+`ai.pipestream.media.v1.MediaService` and `SpeechWorkerService` are implemented
+in the same server as AsrService. Their contract is
+`proto/ai/pipestream/media/v1/media.proto`; their implementation lives under
+`streaming/` and is registered by `src/service/streaming_runtime.cpp`.
+
+MediaService accepts ordered direct input through `Ingest`, pulls allowlisted
+HTTP inputs through `Pull`, and exposes UUID-filtered `Subscribe` with bounded
+in-memory hydration. Open, chunk and finish messages make lifecycle accounting
+explicit. Source bytes and checksums remain available alongside decoded
+packets, audio and optional speech results. Empty subscription filters follow
+all streams, including future streams. Restarting the process loses retained
+events; the server epoch identifies that boundary.
+
+Native FFmpeg handles streamable containers incrementally without request
+files or subprocesses. SpeechWorkerService supports pooled Whisper and native
+CPU Parakeet TDT transcription. Whisper supports English translation; Parakeet
+does not. Fixed windows or Silero speech-aware windows feed the worker;
+uninterrupted speech still reaches a configured maximum window, where the
+caller chooses failure or a forced cut with overlap. Raw hypotheses and
+reconciled revisions remain separate results.
+
+The default worker connection is an in-process gRPC channel sharing the loaded
+Whisper pool. `GRPC_ASR_WORKER_TARGET` selects an external worker. This media
+path does not change AsrService's seekable-video compatibility behavior below.
+
+### 3b. Remote transcription options (docling ApiAsrOptions)
 
 `TranscribeOptions.remote` (field 10, `RemoteTranscriptionOptions`) is the
 typed form of docling's `ApiAsrOptions`: `url`, `headers`
@@ -94,7 +121,7 @@ Every item carries `CollectorSource{collector: "asr", model: <whisper model
 id>, version: <server build>}`. Partial segments are not folded (their
 finals supersede them), and segment indexes and the trailer's counts stay on
 the typed stream. The document schema is vendored verbatim from gRParse;
-gRParse `COLLECTOR_ASR` wiring is a follow-up in that repo.
+gRParse dials the collector through `GRPARSE_ASR_TARGET`.
 
 Video without an audio track is `INVALID_ARGUMENT`. Audio-only files never
 emit keyframes.
@@ -108,7 +135,9 @@ writes only to a pipe or memfd; no temp files on the container root. Media
 above a configured byte cap or duration cap fails with
 `RESOURCE_EXHAUSTED`.
 
-## 5a. Implementation notes (v1, as built)
+## 5a. Collector AsrService implementation notes
+
+These notes describe AsrService, not the consolidated MediaService above.
 
 **Streaming input.** For wav, mp3 and flac the decoder pulls from the
 growing upload buffer, so `MediaInfo` and the first segments are emitted
@@ -133,12 +162,10 @@ its memfd copy hold up to twice `GRPC_ASR_MAX_MEDIA_BYTES` in memory per
 stream. Ogg pages are streamable, so the pipe-fed path below would make it
 live.
 
-**Live feeds (follow-up).** Streamable containers (MPEG-TS, fragmented
-MP4/CMAF, mkv/webm) can be demuxed from a pipe as bytes arrive. Routing
-those through a pipe-fed ffmpeg while keeping the memfd path for classic
-mp4 would extend transcribe-during-upload to video, and an edge relay
-(`ffmpeg -i rtsp://… -f mpegts -` into a gRPC client) bridges RTSP/RTMP
-sources without this server speaking those protocols.
+**Live feeds.** Use MediaService for incremental native demux of streamable
+containers. AsrService retains the sealed-memfd path for seekable video. An
+external relay can turn RTSP/RTMP into a streamable container supplied through
+gRPC; the server itself does not implement those transport protocols.
 
 ## 6. Tests
 

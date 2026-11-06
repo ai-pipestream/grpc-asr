@@ -1,7 +1,7 @@
 # grpc-asr architecture
 
-**Status:** spec (no implementation yet)
-**Updated:** 2026-08-13
+**Status:** implemented; canonical home of the consolidated media services
+**Updated:** 2026-11-06
 
 Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, and `guidelines.md`.
 
@@ -32,6 +32,23 @@ flowchart TD
 
 Keep ASR out of gRParse itself: OCR and layout session pools and Whisper
 weights do not share a device arena.
+
+The diagram above describes the collector's `AsrService`. The same
+`grpc-asr-server` also registers `ai.pipestream.media.v1.MediaService` and
+`SpeechWorkerService` on port 50055. These interfaces were consolidated from
+the retired whisper-grpc prototype; there is no separate media executable.
+MediaService uses native FFmpeg for incremental direct or allowlisted HTTP
+input and preserves source bytes, packet metadata and stream lifecycle events.
+UUID-filtered subscriptions can hydrate retained events before following live
+events. An empty filter follows all streams on the instance; retention is
+bounded in memory, not durable storage.
+
+The speech worker shares the collector's Whisper pool by default. The media
+worker can instead use native CPU Parakeet TDT transcription; this does not
+change the collector's Whisper backend. Fixed windows and Silero speech-aware
+windows are implemented for the media API, including explicit maximum-window
+behavior and transcript reconciliation. See the README for configuration and
+the design document for the distinction between the two ingestion APIs.
 
 ## Live results
 

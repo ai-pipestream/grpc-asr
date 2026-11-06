@@ -99,8 +99,9 @@ requirement if the fleet sibling doesn't.
 
 - `origin` is Forgejo (`https://git.rokkon.com/ai-pipestream/<repo>.git`).
   **Push `main` there.** GitHub is a push-mirror of `main`.
-- Do not merge or commit on GitHub `main`. GitHub's default branch is
-  `development` so LLM/`gh` PRs land there instead of fighting the mirror.
+- The default branch is `main` on both hosts. Land changes on Forgejo first
+  and verify the GitHub mirror agrees. Never merge only on GitHub: a later
+  Forgejo mirror push can overwrite that history.
 - No `git reset --hard`, no force-push of `main`.
 - Do not skip hooks.
 
