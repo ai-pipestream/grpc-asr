@@ -42,5 +42,5 @@ Checkout path: `/work/main/grpc-services/grpc-asr`.
 Git: `origin` = Forgejo (push `main` here). `github` = GitHub mirror.
 Never merge GitHub `main`. See `docs/guidelines.md`.
 
-gRParse wiring (`COLLECTOR_*` enum, endpoint env) is a **follow-up**.
-Ship a working server in this repo first.
+gRParse already dials AsrService through `GRPARSE_ASR_TARGET`. Changes to the
+collector contract must also update its vendored gRParse and demo-shell copies.
