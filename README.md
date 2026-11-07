@@ -30,9 +30,8 @@ sequenceDiagram
 
 ## Unified media streaming
 
-This repository is the consolidation target for the former `whisper-grpc`
-prototype. The implementation is being qualified before the duplicate projects
-are retired. One `grpc-asr-server` registers the existing `AsrService` and the
+This repository is the canonical maintained service, incorporating the former
+`whisper-grpc` prototype. Both duplicate projects are now archived. One `grpc-asr-server` registers the existing `AsrService` and the
 additive `MediaService` and `SpeechWorkerService` contracts on port 50055.
 Existing ASR protobuf messages remain unchanged.
 

@@ -61,6 +61,7 @@ FetchContent_Declare(grpc
   GIT_SHALLOW TRUE
   GIT_SUBMODULES_RECURSE TRUE)
 FetchContent_MakeAvailable(grpc)
+include(cmake/PatchGrpcOpenSSL.cmake)
 
   set(ASR_PROTOBUF_INCLUDE "${protobuf_SOURCE_DIR}/src")
 endif()
@@ -188,6 +189,7 @@ add_library(asr_core STATIC
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
+  src/engine/docling_asr_options.cpp
   src/document/document_fold.cpp
   src/service/asr_service.cpp)
 target_include_directories(asr_core PUBLIC src)
@@ -216,6 +218,7 @@ if(BUILD_TESTING)
     byte-stream-test
     config-test
     remote-options-test
+    docling-asr-options-test
     audio-decoder-test
     document-fold-test
     model-discovery-test
@@ -229,6 +232,14 @@ if(BUILD_TESTING)
     target_link_libraries(${test_name} PRIVATE asr_core asr_flags)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  if(NOT GRPC_ASR_SYSTEM_GRPC)
+    add_executable(grpc-openssl-test tests/grpc_openssl_test.cpp)
+    target_include_directories(grpc-openssl-test SYSTEM PRIVATE
+      $<TARGET_PROPERTY:grpc,INCLUDE_DIRECTORIES>)
+    target_link_libraries(grpc-openssl-test PRIVATE grpc OpenSSL::SSL asr_flags)
+    add_test(NAME grpc-openssl-test COMMAND grpc-openssl-test)
+    list(APPEND GRPC_ASR_TESTS grpc-openssl-test)
+  endif()
   add_custom_target(grpc-asr-tests DEPENDS ${GRPC_ASR_TESTS})
   # 300 is generous on native hardware (asr-service-test finishes in ~3s);
   # QEMU-emulated arm64 image builds override it, whisper inference there

@@ -12,6 +12,7 @@
 
 #include "cancellation.h"
 #include "document/document_fold.h"
+#include "engine/docling_asr_options.h"
 #include "engine/remote_options.h"
 #include "engine/transcriber.h"
 #include "media/audio_decoder.h"
@@ -424,6 +425,13 @@ grpc::Status AsrServiceImpl::Transcribe(
                 "the first message must carry TranscribeOptions"};
     }
     const asrv1::TranscribeOptions options = request.options();
+    // Docling-slim typed ASR fields (engine / model_type / inline options):
+    // accept them on the wire, refuse unsupported engines by name, and map
+    // whisper.cpp-servable presets onto TranscribeOptions.model.
+    if (grpc::Status status = engine::validate_docling_asr_options(options); !status.ok()) {
+        rejected++;
+        return status;
+    }
     if (options.has_remote()) {
         // Remote transcription (docling ApiAsrOptions) is typed and
         // validated on the wire; this build has no HTTP engine, so a valid
@@ -436,26 +444,30 @@ grpc::Status AsrServiceImpl::Transcribe(
                 "TranscribeOptions.remote is not served by this build: remote transcription has "
                 "no HTTP engine yet; omit it to transcribe with the local whisper.cpp pool"};
     }
-    if (options.model().empty()) {
+    asrv1::TranscribeOptions resolved = options;
+    engine::apply_model_type_default(&resolved);
+    if (resolved.model().empty()) {
         rejected++;
         return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.model is required"};
     }
-    if (!pool_.has_model(options.model())) {
+    if (!pool_.has_model(resolved.model())) {
         std::string loaded;
         for (const std::string& name : pool_.model_names()) {
             loaded += loaded.empty() ? name : ", " + name;
         }
         rejected++;
         return {grpc::StatusCode::INVALID_ARGUMENT,
-                "model '" + options.model() + "' is not loaded (loaded: " + loaded + ")"};
+                "model '" + resolved.model() + "' is not loaded (loaded: " + loaded + ")"};
     }
+    // Prefer the resolved copy so model_type defaults reach the worker.
+    const asrv1::TranscribeOptions& run_options = resolved;
 
     media::ByteStream upload;
     // The fold only exists when the client asked for the Document
     // projection; otherwise the hot path never touches it.
     std::optional<doc::AsrDocumentFold> fold;
-    if (options.emit_document()) {
-        fold.emplace(options.model(), GRPC_ASR_VERSION,
+    if (run_options.emit_document()) {
+        fold.emplace(run_options.model(), GRPC_ASR_VERSION,
                      doc::FoldOptions{.word_provenance = config_.document_word_provenance});
     }
     LockedWriter writer(stream, fold.has_value() ? &*fold : nullptr);
@@ -468,7 +480,7 @@ grpc::Status AsrServiceImpl::Transcribe(
     bool worker_done = false;
     std::thread worker([&] {
         worker_status =
-            process_stream(config_, pool_, options, upload, writer, audio_ms, stop.get_token());
+            process_stream(config_, pool_, run_options, upload, writer, audio_ms, stop.get_token());
         std::lock_guard<std::mutex> lock(worker_mutex);
         worker_done = true;
         worker_finished.notify_all();
