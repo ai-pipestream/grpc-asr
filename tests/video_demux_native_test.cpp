@@ -2,6 +2,7 @@
 #include "media/audio_decoder.h"
 #include "cancellation.h"
 #include "fixture.h"
+#include "native_media_fixture.h"
 #include <array>
 #include <stop_token>
 
@@ -52,18 +53,20 @@ int main() {
         try { auto bad = open_native("not media"); bad.probe(); }
         catch (const asr::media::DecodeError&) { rejected = true; }
         require(rejected, "invalid native media rejected");
+        rejected = false;
+        try { auto missing = open_native(""); }
+        catch (const asr::media::DecodeError&) { rejected = true; }
+        require(rejected, "empty native media rejected");
+        rejected = false;
+        try { VideoDemux invalid(reinterpret_cast<const uint8_t*>(wav.data()), wav.size(), "", "", std::chrono::milliseconds(0)); }
+        catch (const asr::media::ToolError&) { rejected = true; }
+        require(rejected, "nonpositive native operation timeout rejected");
 
         // Generate a tiny video+audio container entirely through a pipe.
-        const std::string command = fixture_ffmpeg() +
-            " -v error -threads 1 -f lavfi -i testsrc2=size=64x48:rate=4"
+        const std::string video = pipe_fixture(
+            " -f lavfi -i testsrc2=size=64x48:rate=4"
             " -f lavfi -i sine=frequency=440:sample_rate=16000 -t 2"
-            " -c:v mpeg4 -threads:v 1 -c:a pcm_s16le -f matroska pipe:1";
-        FILE* pipe = ::popen(command.c_str(), "r");
-        require(pipe != nullptr, "fixture generator started");
-        std::string video;
-        std::array<char, 4096> buffer;
-        while (size_t n = ::fread(buffer.data(), 1, buffer.size(), pipe)) video.append(buffer.data(), n);
-        require(::pclose(pipe) == 0 && !video.empty(), "in-memory video fixture generated");
+            " -c:v mpeg4 -threads:v 1 -c:a aac -f matroska pipe:1");
         auto movie = open_native(video);
         require(movie.probe().has_video && movie.probe().has_audio, "native video and audio tracks");
         size_t frames = 0; uint64_t last = 0;
@@ -77,6 +80,30 @@ int main() {
         frames = 0;
         movie.extract_keyframes(1, [&](uint64_t, uint32_t, uint32_t, std::string) { ++frames; return false; });
         require(frames == 1, "native keyframe sink cancellation");
+        const auto mp4 = trailing_moov_fixture(video);
+        require(mp4.find("moov") > mp4.find("mdat"), "fixture has trailing moov");
+        auto seekable = open_native(mp4);
+        require(seekable.probe().has_audio && seekable.probe().has_video, "trailing-moov MP4 probe");
+        seekable.open_audio(); size_t mp4_samples = 0; std::array<float, 1024> block;
+        while (auto n = seekable.read_audio(block.data(), block.size())) mp4_samples += n;
+        require(mp4_samples >= 32000 && mp4_samples < 35000, "trailing-moov MP4 decodes complete audio");
+        for (const auto length : {size_t{8}, mp4.find("moov") - 4}) {
+            rejected = false;
+            try { auto truncated = open_native(mp4.substr(0, length)); truncated.probe(); }
+            catch (const asr::media::DecodeError&) { rejected = true; }
+            require(rejected, "truncated MP4 rejected");
+        }
+        const auto dual = pipe_fixture("-f lavfi -i sine=frequency=220:sample_rate=16000"
+            " -f lavfi -i sine=frequency=880:sample_rate=24000 -t 2 -map 0:a -map 1:a"
+            " -disposition:a:0 0 -disposition:a:1 default -c:a pcm_s16le -f matroska pipe:1");
+        auto tracks = open_native(dual);
+        require(tracks.probe().sample_rate_hz == 16000, "probe selects first audio despite second default");
+        tracks.open_audio(); size_t crossings = 0; float previous = 0;
+        while (auto n = tracks.read_audio(block.data(), block.size())) for (size_t i = 0; i < n; ++i) {
+            if (previous <= 0 && block[i] > 0) ++crossings;
+            previous = block[i];
+        }
+        require(crossings > 400 && crossings < 480, "decoded source is first 220Hz track, not default 880Hz track");
         std::println("native-video-demux-test passed");
         return 0;
     } catch (const std::exception& error) {
