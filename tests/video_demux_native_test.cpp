@@ -78,6 +78,10 @@ void verify_timeline_origins() {
                     " -avoid_negative_ts disabled -f matroska pipe:1");
                 verify_fixture_origin(bytes, origin, delayed_track);
                 auto media = open_native(bytes);
+                const auto info = media.probe();
+                if (origin != 0)
+                    require(info.duration_ms == (delayed_track == 0 ? 2000 : 2500),
+                            label + " container duration uses relative packet endpoints");
                 std::vector<uint64_t> times;
                 media.extract_keyframes(1, [&](uint64_t ms, uint32_t, uint32_t, std::string) {
                     times.push_back(ms); return true;
