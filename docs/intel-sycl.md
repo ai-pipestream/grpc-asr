@@ -56,3 +56,58 @@ Concurrent CI/build activity caused substantial host contention, so these
 are fixture-specific observations, not clean-host throughput guarantees.
 Run 6 follows cancellation and also passed. Full RPC acceptance remains
 pending and is not established by this native receipt.
+
+## Reproduce the native build and RPC gate
+
+Use a private checkout and a compiler/runtime installation that exposes the
+Intel GPU through Level Zero. The krick-1 native run uses Ubuntu26.10,
+oneAPI2025.3.3, `libze1=1.32.0-1`, and
+`libze-intel-gpu1=26.27.39122.14-1`. Preserve those identities in each receipt.
+Install normal CMake/Ninja, OpenSSL, curl, and FFmpeg development dependencies
+in the build environment; the test fixture generator also needs ffmpeg.
+
+```bash
+source /opt/intel/oneapi/setvars.sh
+cmake -S . -B build-sycl -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DGRPC_ASR_SYCL=ON
+cmake --build build-sycl --target grpc-asr-server asr-service-test config-test -j2
+build-sycl/config-test
+# Run these serially on a reserved device; retain stdout and stderr separately.
+export GRPC_ASR_TEST_MODEL=/models/ggml-tiny.en.bin
+export GRPC_ASR_TEST_SAMPLE="$PWD/build-sycl/_deps/whisper-src/samples/jfk.wav"
+export GRPC_ASR_SERVER_BINARY="$PWD/build-sycl/grpc-asr-server"
+export GRPC_ASR_TRACE_PLACEMENT=1 ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+GRPC_ASR_TEST_BACKEND=sycl build-sycl/asr-service-test >sycl-rpc.stdout 2>sycl-rpc.stderr
+scripts/check-placement.sh sycl sycl-rpc.stderr
+GRPC_ASR_TEST_BACKEND=cpu build-sycl/asr-service-test >cpu-rpc.stdout 2>cpu-rpc.stderr
+scripts/check-placement.sh cpu cpu-rpc.stderr
+```
+
+This test includes actual loopback gRPC, repeated content/timestamps,
+cancellation during active speech-free processing, queue cancellation,
+deadlines, recovery, and video/OGG cases when ffmpeg is available. Missing
+video dependencies are a test limitation, not a pass for those cases.
+
+## SYCL container recipe
+
+`Dockerfile.sycl` is separate from the CUDA image. It pins the Ubuntu and
+oneAPI image digests, carries the SYCL/oneMKL runtime and Level Zero driver,
+and builds the existing LGPL FFmpeg recipe with bounded `BUILD_JOBS`.
+It is a recipe, not a published or device-qualified image claim. Package
+repositories must still supply the pinned driver versions. Native receipts
+do not qualify a container built with a different toolchain or driver.
+
+```bash
+docker build --platform linux/amd64 -f Dockerfile.sycl \
+  --build-arg BUILD_JOBS=2 -t grpc-asr:sycl-local .
+docker run --rm --read-only --tmpfs /tmp --device=/dev/dri \
+  --group-add "$(stat -c %g /dev/dri/renderD128)" \
+  -v /work/models/asr:/models:ro -p 127.0.0.1:50055:50055 grpc-asr:sycl-local
+```
+
+The host needs a working kernel driver and firmware for the B70; a container
+cannot supply the host kernel driver. The numeric render-node group grants
+the nonroot image user access to `/dev/dri`. Select the render node for the
+intended card on hosts with more than one GPU. `GRPC_ASR_BACKEND=cpu` remains
+an explicit operator choice; a failed SYCL selection must fail startup.
+Validate live RPC output and actual placement after starting the image.
