@@ -1,0 +1,9 @@
+grpc-asr selected sycl device: Intel(R) Arc(TM) Pro B70 Graphics (SYCL0)
+grpc-asr model loaded: tiny.en (1 state(s), backend sycl)
+grpc-asr backend: sycl (GRPC_ASR_BACKEND=sycl)
+warm_rpc backend=sycl repeat=0 elapsed_us=547698
+warm_rpc backend=sycl repeat=1 elapsed_us=305949
+warm_rpc backend=sycl repeat=2 elapsed_us=403052
+warm_rpc backend=sycl repeat=3 elapsed_us=589428
+warm_rpc backend=sycl repeat=4 elapsed_us=479937
+asr-service-test passed
