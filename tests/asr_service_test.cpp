@@ -810,7 +810,7 @@ void verify_cancel_video(const std::shared_ptr<grpc::Channel>& channel,
             "the server serves the next stream after the cancel: " + next.status.error_message());
 }
 
-void verify_service_info(const std::shared_ptr<grpc::Channel>& channel) {
+void verify_service_info(const std::shared_ptr<grpc::Channel>& channel, const std::string& backend) {
     auto stub = asrv1::AsrService::NewStub(channel);
     grpc::ClientContext context;
     asrv1::GetServiceInfoRequest request;
@@ -818,7 +818,7 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel) {
     require(stub->GetServiceInfo(&context, request, &info).ok(), "GetServiceInfo OK");
     require(!info.version().empty(), "version reported");
     require(!info.whisper_version().empty(), "whisper version reported");
-    require(info.backend() == "cpu", "backend reported");
+    require(info.backend() == backend, "backend reported");
     require(info.models_size() == 1 && info.models(0) == "tiny.en", "models reported");
     require(info.max_media_bytes() > 0 && info.max_duration_ms() > 0, "caps reported");
     require(info.ui().title() == "ASR" && info.ui().path() == "/ui/asr" &&
@@ -869,13 +869,18 @@ int main() {
 
     asr::Config config;
     config.backend = "cpu";
+    if (const char* backend = env_or_null("GRPC_ASR_TEST_BACKEND")) {
+        config.backend = backend;
+        require(config.backend == "cpu" || config.backend == "sycl" || config.backend == "cuda" || config.backend == "metal",
+                "test backend must be cpu, sycl, cuda or metal");
+    }
     config.models_dir = std::filesystem::path(model).parent_path().string();
     config.models = {"tiny.en"};
     config.concurrency = 1;
     // A window smaller than the fixture makes the during-upload assertion
     // possible.
     config.window_seconds = 10;
-    config.threads = 4;
+    config.threads = 2;
 
     try {
         asr::engine::ModelPool pool(config);
@@ -890,7 +895,14 @@ int main() {
         auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
                                            grpc::InsecureChannelCredentials());
 
-        verify_wav(channel, jfk);
+        verify_wav(channel, jfk);  // warmup
+        for (int repeat = 0; repeat < 5; ++repeat) {
+            const auto begin = std::chrono::steady_clock::now();
+            verify_wav(channel, jfk);
+            std::println("warm_rpc backend={} repeat={} elapsed_us={}", config.backend, repeat,
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - begin).count());
+        }
         verify_streaming_during_upload(channel, jfk);
         verify_document(channel, jfk);
         verify_silence(channel);
@@ -908,7 +920,7 @@ int main() {
         }
         verify_error_matrix(channel);
         verify_byte_cap(config, pool);
-        verify_service_info(channel);
+        verify_service_info(channel, config.backend);
         if (have_ffmpeg()) {
             verify_video(channel, sample);
             verify_ogg(channel, sample);
