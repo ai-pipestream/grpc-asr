@@ -18,6 +18,7 @@ extern "C" {
 
 namespace asr::media {
 namespace {
+constexpr int64_t kMaxFramePixels = 16 * 1024 * 1024;
 void check(int result, const char* message) {
     if (result < 0) throw DecodeError(message);
 }
@@ -25,6 +26,8 @@ struct Input {
     std::span<const uint8_t> bytes;
     size_t position = 0;
     std::stop_token stop;
+    std::chrono::milliseconds timeout;
+    std::chrono::steady_clock::time_point deadline;
     AVIOContext* io = nullptr;
     AVFormatContext* format = nullptr;
     ~Input() {
@@ -34,7 +37,7 @@ struct Input {
     }
     static int read(void* opaque, uint8_t* out, int size) {
         auto& s = *static_cast<Input*>(opaque);
-        if (s.stop.stop_requested()) return AVERROR_EXIT;
+        if (s.interrupted()) return AVERROR_EXIT;
         const auto count = std::min(s.bytes.size() - s.position, static_cast<size_t>(size));
         if (!count) return AVERROR_EOF;
         std::memcpy(out, s.bytes.data() + s.position, count);
@@ -43,7 +46,7 @@ struct Input {
     }
     static int64_t seek(void* opaque, int64_t offset, int whence) {
         auto& s = *static_cast<Input*>(opaque);
-        if (s.stop.stop_requested()) return AVERROR_EXIT;
+        if (s.interrupted()) return AVERROR_EXIT;
         if (whence == AVSEEK_SIZE) return static_cast<int64_t>(s.bytes.size());
         whence &= ~AVSEEK_FORCE;
         int64_t base = 0;
@@ -54,9 +57,14 @@ struct Input {
         s.position = static_cast<size_t>(base + offset);
         return static_cast<int64_t>(s.position);
     }
-    void cancelled() const { if (stop.stop_requested()) throw Cancelled("native media decode cancelled"); }
-    void open(std::span<const uint8_t> data, std::stop_token token) {
-        bytes = data; stop = token; cancelled();
+    bool interrupted() const { return stop.stop_requested() || std::chrono::steady_clock::now() >= deadline; }
+    void begin_operation() { deadline = std::chrono::steady_clock::now() + timeout; cancelled(); }
+    void cancelled() const {
+        if (stop.stop_requested()) throw Cancelled("native media decode cancelled");
+        if (std::chrono::steady_clock::now() >= deadline) throw ToolError("native media operation timed out");
+    }
+    void open(std::span<const uint8_t> data, std::stop_token token, std::chrono::milliseconds limit) {
+        bytes = data; stop = token; timeout = limit; begin_operation();
         auto* buffer = static_cast<uint8_t*>(av_malloc(32768));
         if (!buffer) throw std::bad_alloc();
         io = avio_alloc_context(buffer, 32768, 0, this, read, nullptr, seek);
@@ -65,14 +73,27 @@ struct Input {
         if (!format) throw std::bad_alloc();
         format->pb = io; format->flags |= AVFMT_FLAG_CUSTOM_IO;
         format->max_streams = 64;
-        format->interrupt_callback = {[](void* p) { return static_cast<Input*>(p)->stop.stop_requested() ? 1 : 0; }, this};
+        format->interrupt_callback = {[](void* p) { return static_cast<Input*>(p)->interrupted() ? 1 : 0; }, this};
         format->io_open = [](AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) { return AVERROR(EPERM); };
         AVDictionary* options = nullptr;
         av_dict_set(&options, "format_whitelist", "wav,mp3,flac,ogg,mov,matroska,webm,mpegts,aac,nut", 0);
         const int opened = avformat_open_input(&format, nullptr, nullptr, &options);
         av_dict_free(&options);
         cancelled(); check(opened, "native media open failed");
-        const int probed = avformat_find_stream_info(format, nullptr);
+        // Probing may itself decode frames, before Track opens its decoder.
+        std::vector<AVDictionary*> probe_options(format->nb_streams, nullptr);
+        for (unsigned i = 0; i < format->nb_streams; ++i) {
+            const auto* p = format->streams[i]->codecpar;
+            if (p->codec_type == AVMEDIA_TYPE_VIDEO && (p->width > 8192 || p->height > 8192 ||
+                static_cast<int64_t>(p->width) * p->height > kMaxFramePixels)) {
+                for (auto& option : probe_options) av_dict_free(&option);
+                throw DecodeError("native video dimensions exceed limit before probing");
+            }
+            av_dict_set_int(&probe_options[i], "max_pixels", kMaxFramePixels, 0);
+            av_dict_set(&probe_options[i], "threads", "2", 0);
+        }
+        const int probed = avformat_find_stream_info(format, probe_options.data());
+        for (auto& option : probe_options) av_dict_free(&option);
         cancelled(); check(probed, "native media probe failed");
     }
 };
@@ -84,24 +105,35 @@ struct Track {
     int index = -1;
     bool draining = false;
     ~Track() { avcodec_free_context(&codec); av_frame_free(&frame); av_packet_free(&packet); }
-    void open(std::span<const uint8_t> data, std::stop_token stop, AVMediaType type) {
+    void open(std::span<const uint8_t> data, std::stop_token stop, AVMediaType type, std::chrono::milliseconds timeout) {
         if (!frame || !packet) throw std::bad_alloc();
-        input.open(data, stop);
-        index = av_find_best_stream(input.format, type, -1, -1, nullptr, 0);
+        input.open(data, stop, timeout);
+        // Match probe and the established ffmpeg -map a:0 / v:0 contract.
+        for (unsigned i = 0; i < input.format->nb_streams; ++i) {
+            if (input.format->streams[i]->codecpar->codec_type == type) { index = static_cast<int>(i); break; }
+        }
         check(index, "requested media track is missing");
         auto* params = input.format->streams[index]->codecpar;
+        if (type == AVMEDIA_TYPE_VIDEO && (params->width < 0 || params->height < 0 ||
+            params->width > 8192 || params->height > 8192 ||
+            static_cast<int64_t>(params->width) * params->height > kMaxFramePixels))
+            throw DecodeError("native video dimensions exceed limit");
         auto* decoder = avcodec_find_decoder(params->codec_id);
         if (!decoder) throw DecodeError("native codec unavailable");
         codec = avcodec_alloc_context3(decoder);
         if (!codec) throw std::bad_alloc();
         check(avcodec_parameters_to_context(codec, params), "native codec parameters failed");
         codec->thread_count = 2;
+        codec->max_pixels = kMaxFramePixels;
         check(avcodec_open2(codec, decoder, nullptr), "native codec open failed");
+        input.cancelled();
     }
     bool next() {
+        input.begin_operation();
         while (true) {
             input.cancelled();
             const int received = avcodec_receive_frame(codec, frame);
+            input.cancelled();
             if (received == 0) return true;
             if (received == AVERROR_EOF) return false;
             if (received != AVERROR(EAGAIN)) check(received, "native frame decode failed");
@@ -119,6 +151,7 @@ struct Track {
                 check(read_result, "native packet read failed");
                 check(avcodec_send_packet(codec, packet), "native packet decode failed");
             }
+            input.cancelled();
         }
     }
 };
@@ -129,8 +162,8 @@ struct Audio {
     size_t offset = 0;
     bool done = false;
     ~Audio() { swr_free(&swr); }
-    void open(std::span<const uint8_t> data, std::stop_token stop) {
-        track.open(data, stop, AVMEDIA_TYPE_AUDIO);
+    void open(std::span<const uint8_t> data, std::stop_token stop, std::chrono::milliseconds timeout) {
+        track.open(data, stop, AVMEDIA_TYPE_AUDIO, timeout);
         AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
         auto* c = track.codec;
         if (c->sample_rate <= 0) throw DecodeError("invalid native sample rate");
@@ -152,6 +185,7 @@ struct Audio {
         auto* out = reinterpret_cast<uint8_t*>(pending.data());
         const uint8_t** source = frame ? const_cast<const uint8_t**>(track.frame->extended_data) : nullptr;
         const int converted = swr_convert(swr, &out, capacity, source, samples);
+        track.input.cancelled();
         check(converted, "native audio resample failed");
         pending.resize(static_cast<size_t>(converted));
         scrub_pcm(pending);
@@ -164,15 +198,18 @@ struct Audio {
 struct VideoDemux::Impl {
     std::vector<uint8_t> bytes;
     std::unique_ptr<Audio> audio;
+    std::chrono::milliseconds timeout;
 };
 VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string, std::string,
-                     std::chrono::milliseconds) : impl_(std::make_unique<Impl>()) {
+                     std::chrono::milliseconds timeout) : impl_(std::make_unique<Impl>()) {
     if (!data || !size || size > static_cast<size_t>(INT64_MAX)) throw DecodeError("invalid media bytes");
     impl_->bytes.assign(data, data + size);
+    if (timeout.count() <= 0) throw ToolError("native media timeout must be positive");
+    impl_->timeout = timeout;
 }
 VideoDemux::~VideoDemux() = default;
 ProbeInfo VideoDemux::probe(std::stop_token stop) {
-    Input input; input.open(impl_->bytes, stop);
+    Input input; input.open(impl_->bytes, stop, impl_->timeout);
     ProbeInfo info;
     if (input.format->duration > 0) info.duration_ms = static_cast<uint64_t>(input.format->duration / 1000);
     for (unsigned i = 0; i < input.format->nb_streams; ++i) {
@@ -188,12 +225,12 @@ ProbeInfo VideoDemux::probe(std::stop_token stop) {
     return info;
 }
 void VideoDemux::open_audio(std::stop_token stop) {
-    auto audio = std::make_unique<Audio>(); audio->open(impl_->bytes, stop); impl_->audio = std::move(audio);
+    auto audio = std::make_unique<Audio>(); audio->open(impl_->bytes, stop, impl_->timeout); impl_->audio = std::move(audio);
 }
 size_t VideoDemux::read_audio(float* out, size_t size) {
     if (!impl_->audio) throw ToolError("native audio is not open");
     auto& a = *impl_->audio;
-    a.track.input.cancelled();
+    a.track.input.begin_operation();
     while (a.offset == a.pending.size()) if (!a.fill()) return 0;
     const size_t count = std::min(size, a.pending.size() - a.offset);
     std::copy_n(a.pending.data() + a.offset, count, out); a.offset += count; return count;
@@ -213,7 +250,7 @@ void png_dimensions(const std::string& png, uint32_t* width, uint32_t* height) {
 void VideoDemux::extract_keyframes(uint32_t interval,
     const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink, std::stop_token stop) {
     if (!interval) throw DecodeError("keyframe interval must be positive");
-    Track track; track.open(impl_->bytes, stop, AVMEDIA_TYPE_VIDEO);
+    Track track; track.open(impl_->bytes, stop, AVMEDIA_TYPE_VIDEO, impl_->timeout);
     uint64_t next_ms = 0;
     while (track.next()) {
         auto* frame = track.frame;
@@ -221,7 +258,8 @@ void VideoDemux::extract_keyframes(uint32_t interval,
         const int64_t ms = av_rescale_q(frame->best_effort_timestamp,
             track.input.format->streams[track.index]->time_base, AVRational{1, 1000});
         if (ms < 0 || static_cast<uint64_t>(ms) < next_ms) continue;
-        if (frame->width <= 0 || frame->height <= 0 || frame->width > 8192 || frame->height > 8192)
+        if (frame->width <= 0 || frame->height <= 0 || frame->width > 8192 || frame->height > 8192 ||
+            static_cast<int64_t>(frame->width) * frame->height > kMaxFramePixels)
             throw DecodeError("native keyframe dimensions exceed limit");
         struct Image {
             AVCodecContext* codec = nullptr; AVFrame* rgb = av_frame_alloc();

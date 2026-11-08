@@ -24,6 +24,24 @@ on Linux against FFmpeg 62: three resampled WAV runs, known sample count,
 cancel/recovery, invalid input, video/audio probing, PNG dimensions and
 keyframe sink cancellation. No disk file is used even for fixture generation.
 
+Track selection preserves the first audio/video track, including when a later
+track carries the default disposition. A dual-audio regression distinguishes
+220 Hz at 16 kHz from the default second 880 Hz/24 kHz track. The native
+regression also remuxes a trailing-moov MP4 in RAM and rejects missing and
+truncated media. A separate two-second AAC/MPEG4 MP4 comparison against the
+unchanged Linux subprocess path produced byte-identical PCM (SHA256
+21cef8ef1d271f13c01a108c71aa4f799cd75f53808aa5b5e8c60b816cea378f).
+
+The configured tool inactivity timeout becomes a per-native-operation timeout:
+open/probe and each frame decode/conversion check it before and after work,
+and FFmpeg's interrupt/AVIO callbacks check it during demux. Cancellation
+uses the same cooperative boundaries. A native codec call already executing
+cannot be preempted, so this is not a hard wall-clock deadline. Video dimensions
+are rejected before probing/open where known; max_pixels is passed to probe
+decoders and set before codec open, with a 16-million-pixel frame check too.
+The default Linux subprocess path and the separate media HTTP allowlist are
+unchanged. macOS uses no request files, child tools, or nested protocol opens.
+
 Remaining work includes native macOS build verification, per-stage executed
 graph inspection; real transcript and timestamp assertions; cancellation/recovery;
 and repeated warm requests against the same Mac's CPU baseline. No Metal
