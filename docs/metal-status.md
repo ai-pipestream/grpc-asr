@@ -64,6 +64,14 @@ phrases, final segment intervals 0–8000 and 8000–11000 ms, and 22 word timin
 Raw outputs, compressed complete logs and measured samples are retained in
 [`receipts/metal-m2-20261108`](receipts/metal-m2-20261108/summary.json).
 
+After the state-ownership fix, source `d393547` passed an incremental native
+build, the ownership regression test and one complete actual Metal RPC suite
+including cancellation/recovery. All 1724 observed graph-stage records were
+GPU-only. Exact post-fix source/binary hashes and full logs are in
+[`metal-m2-20261108-postownership`](receipts/metal-m2-20261108-postownership/README.md).
+No CPU benchmark was repeated: the latency comparison above remains explicitly
+at source `17b85d2`. The Mac slot was released after the post-fix run.
+
 Run `scripts/build-macos-metal.sh` on the native macOS host, then
 `scripts/run-macos-metal.sh /absolute/read-only/models tiny.en`. The latter
 requires a non-writable `ggml-tiny.en.bin`, binds gRPC to `127.0.0.1:50055`,
