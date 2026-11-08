@@ -260,6 +260,9 @@ if(BUILD_TESTING)
     if(GRPC_ASR_NATIVE_DEMUX AND test_name STREQUAL "video-demux-test")
       target_link_libraries(${test_name} PRIVATE PkgConfig::ASR_NATIVE_FFMPEG)
     endif()
+    if(GRPC_ASR_NATIVE_DEMUX AND test_name STREQUAL "asr-service-test")
+      target_compile_definitions(${test_name} PRIVATE GRPC_ASR_TEST_NATIVE_DEMUX=1)
+    endif()
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
   if(NOT GRPC_ASR_SYSTEM_GRPC)
@@ -282,6 +285,16 @@ if(BUILD_TESTING)
   set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
+  if(GRPC_ASR_NATIVE_DEMUX)
+    add_test(NAME native-media-timeline-rpc-test COMMAND asr-service-test)
+    set_tests_properties(native-media-timeline-rpc-test PROPERTIES
+      TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr SKIP_RETURN_CODE 77
+      ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_TEST_BACKEND=cpu;GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY=1")
+    if((GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER) OR
+       (GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME))
+      set_tests_properties(native-media-timeline-rpc-test PROPERTIES DISABLED TRUE)
+    endif()
+  endif()
   # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
   # they carry a load-time dependency on the driver library. video-demux-test
   # never references whisper symbols and links clean without it.

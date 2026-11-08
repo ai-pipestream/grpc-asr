@@ -59,6 +59,7 @@ struct StreamResult {
     std::vector<asrv1::Segment> partials;
     std::vector<asrv1::Segment> finals;
     size_t keyframes = 0;
+    std::vector<uint64_t> keyframe_times;
     std::vector<asrv1::Keyframe> keyframe_samples;
     bool got_complete = false;
     bool complete_last = true;
@@ -93,6 +94,7 @@ void consume_event(StreamResult& result, const asrv1::TranscribeResponse& respon
             break;
         case asrv1::TranscribeResponse::kKeyframe:
             result.keyframes++;
+            result.keyframe_times.push_back(response.keyframe().timestamp_ms());
             if (result.keyframe_samples.size() < 2) {
                 result.keyframe_samples.push_back(response.keyframe());
             }
@@ -119,6 +121,8 @@ StreamResult transcribe(const std::shared_ptr<grpc::Channel>& channel,
     StreamResult result;
     auto stub = asrv1::AsrService::NewStub(channel);
     grpc::ClientContext context;
+    if (env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY"))
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(90));
     auto stream = stub->Transcribe(&context);
 
     asrv1::TranscribeRequest request;
@@ -756,7 +760,98 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
             "video without an audio track is INVALID_ARGUMENT");
 }
 
-void verify_ogg(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk_path) {
+#ifdef GRPC_ASR_TEST_NATIVE_DEMUX
+void verify_native_media_timeline(const std::shared_ptr<grpc::Channel>& channel,
+                                  const std::string& jfk_path) {
+    // Quote the authored sample path; fixture generation is test-only.
+    std::string quoted = "'";
+    for (char c : jfk_path) quoted += c == '\'' ? "'\\''" : std::string(1, c);
+    quoted += "'";
+    // Identical trailing PCM padding keeps predicted word endpoints within
+    // the authored media, without relaxing exact reference comparisons.
+    uint64_t base_duration = 0;
+    for (int delay_ms : {0, 500}) {
+        const auto reference = generate_media("-threads 1 -i " + quoted +
+            " -af adelay=" + std::to_string(delay_ms) +
+            ":all=1,apad=pad_dur=2 -ar 16000 -ac 1 -c:a pcm_s16le", ".wav");
+        auto options = options_for("tiny.en");
+        options.set_word_timestamps(true);
+        const auto expected = transcribe(channel, options, reference);
+        require(expected.status.ok() && expected.got_complete && expected.complete_last,
+                "timeline reference RPC completes");
+        require(lower(final_text(expected)).find("country") != std::string::npos,
+                "timeline reference contains known JFK speech");
+        if (delay_ms == 0) base_duration = expected.complete.duration_ms();
+        require(base_duration > 12000 && base_duration < 14000 &&
+                expected.complete.duration_ms() == base_duration + delay_ms,
+                "reference duration counts exactly the authored audio delay");
+
+        const auto shifted = generate_media(
+            "-threads 1 -f lavfi -i testsrc2=duration=15:size=64x48:rate=4 -i " + quoted +
+            " -map 0:v -map 1:a -af apad=pad_dur=2,asetpts=PTS+" + std::to_string(delay_ms) +
+            "/1000/TB -c:v mpeg4 -threads:v 1 -fps_mode passthrough"
+            " -c:a pcm_s16le -ar 16000 -ac 1 -shortest"
+            " -output_ts_offset 10 -avoid_negative_ts disabled", ".mkv");
+        options.set_emit_keyframes(true);
+        options.set_keyframe_interval_seconds(2);
+        const auto actual = transcribe(channel, options, shifted);
+        require(actual.status.ok(), "shifted timeline RPC status: " + actual.status.error_message());
+        require(actual.got_media_info && actual.media_info_first && actual.media_info.has_video() &&
+                actual.got_complete && actual.complete_last, "timeline RPC event order and trailer");
+        require(actual.media_info.duration_ms() == expected.complete.duration_ms(),
+                "MediaInfo duration excludes the absolute container origin: got " +
+                    std::to_string(actual.media_info.duration_ms()));
+        require(actual.complete.duration_ms() == expected.complete.duration_ms(),
+                "shifted container duration equals padded PCM reference");
+        require(final_text(actual) == final_text(expected) && actual.finals.size() == expected.finals.size(),
+                "shifted container produces the reference transcript");
+        for (size_t i = 0; i < expected.finals.size(); ++i) {
+            const auto& a = actual.finals[i]; const auto& e = expected.finals[i];
+            require(a.index() == e.index() && a.start_ms() == e.start_ms() && a.end_ms() == e.end_ms(),
+                    "shifted transcript segment times equal the media-relative reference");
+            require(a.end_ms() <= actual.complete.duration_ms() && a.words_size() == e.words_size(),
+                    "transcript bounds: end_ms=" + std::to_string(a.end_ms()) + " duration_ms=" + std::to_string(actual.complete.duration_ms()) + " words=" + std::to_string(a.words_size()) + " reference_words=" + std::to_string(e.words_size()));
+            for (int w = 0; w < a.words_size(); ++w) {
+                require(a.words(w).text() == e.words(w).text() &&
+                        a.words(w).start_ms() == e.words(w).start_ms() &&
+                        a.words(w).end_ms() == e.words(w).end_ms(),
+                        "word timestamps preserve the authored audio delay");
+            }
+        }
+        const std::vector<uint64_t> expected_frames{0, 2000, 4000, 6000, 8000, 10000, 12000};
+        require(actual.keyframe_times == expected_frames, "keyframes start at media zero, not container PTS 10000");
+        require(actual.keyframe_times.back() < actual.complete.duration_ms() &&
+                actual.complete.keyframe_count() == expected_frames.size() &&
+                actual.complete.segment_count() == actual.finals.size(), "timeline trailer counts and time bounds");
+        std::println("native_timeline_rpc PASS origin_ms=10000 audio_delay_ms={} duration_ms={} first_segment_ms={} keyframes={} text={}",
+                     delay_ms, actual.complete.duration_ms(), actual.finals.front().start_ms(),
+                     actual.keyframes, final_text(actual));
+    }
+    // Container duration can outlast PCM duration. All stills must precede
+    // Complete, but a still need not be bounded by the PCM trailer duration.
+    const auto extended_video = generate_media(
+        "-threads 1 -f lavfi -i testsrc2=duration=3:size=64x48:rate=4"
+        " -f lavfi -i sine=frequency=440:sample_rate=16000:duration=2"
+        " -map 0:v -map 1:a -vf setpts=PTS+0.5/TB"
+        " -c:v mpeg4 -threads:v 1 -fps_mode passthrough -c:a pcm_s16le"
+        " -output_ts_offset 10 -avoid_negative_ts disabled", ".mkv");
+    auto options = options_for("tiny.en");
+    options.set_emit_keyframes(true);
+    options.set_keyframe_interval_seconds(1);
+    const auto result = transcribe(channel, options, extended_video);
+    require(result.status.ok() && result.media_info_first && result.got_complete && result.complete_last,
+            "video extending beyond audio emits every keyframe before Complete");
+    require(result.media_info.duration_ms() == 3500 && result.complete.duration_ms() == 2000,
+            "container duration and PCM trailer duration retain distinct meanings");
+    require(result.keyframe_times == std::vector<uint64_t>{500, 1500, 2500} &&
+            result.complete.keyframe_count() == 3, "extended video preserves its 500ms offset and all stills");
+    std::println("native_timeline_rpc PASS extended_video media_duration_ms={} pcm_duration_ms={} keyframes=500,1500,2500 complete_last={}",
+                 result.media_info.duration_ms(), result.complete.duration_ms(), result.complete_last);
+}
+#endif
+
+void verify_ogg
+(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk_path) {
     // Ogg was sniffed as in-process audio, but miniaudio decodes neither
     // Vorbis nor Opus here, so every .ogg/.opus upload failed
     // INVALID_ARGUMENT "cannot decode media". ffmpeg decodes both.
@@ -879,10 +974,14 @@ int main() {
     config.concurrency = 1;
     // A window smaller than the fixture makes the during-upload assertion
     // possible.
-    config.window_seconds = 10;
+    config.window_seconds = env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY") ? 30 : 10;
+    // The focused media-origin cases decode JFK in one window. Existing
+    // anti-batch and window-cut checks retain their original 10-second window.
     config.threads = 2;
 
     try {
+        if (env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY"))
+            require(config.backend == "cpu", "focused timeline qualification uses CPU only");
         asr::engine::ModelPool pool(config);
         asr::AsrServiceImpl service(config, pool);
 
@@ -895,7 +994,19 @@ int main() {
         auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
                                            grpc::InsecureChannelCredentials());
 
+        if (env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY")) {
+#ifdef GRPC_ASR_TEST_NATIVE_DEMUX
+            require(have_ffmpeg(), "timeline fixtures require ffmpeg");
+            verify_native_media_timeline(channel, sample);
+            server->Shutdown();
+            std::println("asr-service-test native timeline passed (loopback TCP RPC)");
+            return 0;
+#else
+            throw std::runtime_error("timeline mode requires GRPC_ASR_NATIVE_DEMUX");
+#endif
+        }
         verify_wav(channel, jfk);  // warmup
+
         for (int repeat = 0; repeat < 5; ++repeat) {
             const auto begin = std::chrono::steady_clock::now();
             verify_wav(channel, jfk);
