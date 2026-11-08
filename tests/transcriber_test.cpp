@@ -7,6 +7,8 @@
 // (whisper.cpp's samples/jfk.wav); skips with 77 otherwise.
 
 #include "engine/transcriber.h"
+#include "engine/model_pool.h"
+#include <filesystem>
 
 #include <algorithm>
 #include <cctype>
@@ -73,8 +75,8 @@ Collected run_over(const std::string& media, const EngineOptions& options) {
 
 void verify_jfk(const std::string& jfk) {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
-    options.threads = 4;
     // jfk.wav is ~11s; a 10s window forces at least two windows, which is
     // what makes the anti-batch assertion meaningful.
     options.window_seconds = 10;
@@ -123,6 +125,7 @@ void verify_jfk(const std::string& jfk) {
 
 void verify_word_timestamps(const std::string& jfk) {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.word_timestamps = true;
     options.window_seconds = 30;
@@ -142,6 +145,7 @@ void verify_word_timestamps(const std::string& jfk) {
 
 void verify_speaker_labels(const std::string& jfk) {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 30;
     Collected quiet = run_over(jfk, options);
@@ -167,6 +171,7 @@ void verify_speaker_labels(const std::string& jfk) {
 
 void verify_silence() {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 30;
     Collected collected = run_over(make_wav(12.0, 0.0), options);
@@ -272,6 +277,7 @@ void verify_empty_windows_before_speech(const std::string& jfk) {
     const size_t total = lead_in + speech.size();
     const uint64_t total_ms = total * 1000ULL / asr::media::kModelSampleRate;
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 10;
     std::vector<EngineSegment> finals;
@@ -322,6 +328,7 @@ void verify_empty_windows_before_speech(const std::string& jfk) {
 
 void verify_duration_cap() {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 10;
     options.max_duration_seconds = 5;
@@ -347,14 +354,24 @@ int main() {
         return missing_model_input("no fixture wav at $GRPC_ASR_TEST_SAMPLE");
     }
 
-    whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = false;
-    g_ctx = whisper_init_from_file_with_params_no_state(model, cparams);
-    require(g_ctx != nullptr, "model loads");
-    g_state = whisper_init_state(g_ctx);
-    require(g_state != nullptr, "state allocates");
-
     try {
+        asr::Config config;
+        config.backend = "cpu";
+        if (const char* backend = env_or_null("GRPC_ASR_TEST_BACKEND")) config.backend = backend;
+        require(config.backend == "cpu" || config.backend == "cuda" ||
+                config.backend == "sycl" || config.backend == "metal",
+                "test backend must be cpu, cuda, sycl or metal");
+        const std::filesystem::path model_path(model);
+        const auto filename = model_path.filename().string();
+        require(filename.starts_with("ggml-") && filename.ends_with(".bin"),
+                "test model must use the ggml-NAME.bin pool naming convention");
+        const auto name = filename.substr(5, filename.size() - 9);
+        config.models_dir = model_path.parent_path().string();
+        config.models = {name}; config.concurrency = 1; config.threads = 2;
+        asr::engine::ModelPool pool(config);
+        auto lease = pool.acquire(name);
+        g_ctx = lease.context(); g_state = lease.state();
+        std::println("transcriber-test requested backend={}", config.backend);
         verify_valid_pcm_bounds(jfk);
         verify_jfk(jfk);
         verify_word_timestamps(jfk);
@@ -366,8 +383,6 @@ int main() {
         std::println(stderr, "{}", error.what());
         return 1;
     }
-    whisper_free_state(g_state);
-    whisper_free(g_ctx);
     std::println("transcriber-test passed");
     return 0;
 }
