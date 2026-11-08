@@ -11,12 +11,20 @@ Local Linux checks: config-test passed; model_pool.cpp passed a C++23
 syntax check against the pinned Whisper headers; configuring Metal on Linux
 failed as required. These do not qualify Metal.
 
-Native Mac build and RPC tests are pending. On 2026-11-08 the configured
-Mac DNS name failed resolution and SSH to the Tailscale peer 100.102.192.43
-timed out. Chip, RAM and native toolchain have not been verified.
+Native Mac build and RPC tests are pending. Access was restored through
+Kristians-MacBook-Air.local on 2026-11-08: Apple M2, 24 GiB, arm64,
+sysctl.proc_translated=0, macOS 27.2 build 26B123. The Tailscale address
+continued to time out.
 
-Remaining work includes macOS portability for the server's pipe2 and the
-collector video path's memfd_create/close_range; per-stage executed graph
-inspection; real transcript and timestamp assertions; cancellation/recovery;
+The server's startup pipe now has a Darwin implementation. macOS defaults
+to GRPC_ASR_NATIVE_DEMUX, which uses native FFmpeg with seekable in-memory
+AVIO rather than Linux memfd or children. It rejects nested file/network
+opens and supports PCM resampling and PNG keyframes. The regression passed
+on Linux against FFmpeg 62: three resampled WAV runs, known sample count,
+cancel/recovery, invalid input, video/audio probing, PNG dimensions and
+keyframe sink cancellation. No disk file is used even for fixture generation.
+
+Remaining work includes native macOS build verification, per-stage executed
+graph inspection; real transcript and timestamp assertions; cancellation/recovery;
 and repeated warm requests against the same Mac's CPU baseline. No Metal
 performance, full-stage offload or actual-device correctness is claimed.

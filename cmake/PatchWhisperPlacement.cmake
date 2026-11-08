@@ -8,7 +8,7 @@ if(NOT _placement_text MATCHES "asr_whisper_state_has_device")
   if(_placement_anchor EQUAL -1)
     message(FATAL_ERROR "Whisper placement accessor needs review for changed upstream source")
   endif()
-  file(APPEND "${_placement_source}" [=[
+  string(APPEND _placement_text [=[
 
 extern "C" bool asr_whisper_state_has_device(whisper_state * state, ggml_backend_dev_t device) {
     for (auto backend : state->backends) {
@@ -18,3 +18,8 @@ extern "C" bool asr_whisper_state_has_device(whisper_state * state, ggml_backend
 }
 ]=])
 endif()
+set(_placement_generated "${CMAKE_CURRENT_BINARY_DIR}/observed-whisper.cpp")
+file(WRITE "${_placement_generated}" "${_placement_text}")
+get_target_property(_placement_sources whisper SOURCES)
+list(FILTER _placement_sources EXCLUDE REGEX "(^|/)whisper\\.cpp$")
+set_property(TARGET whisper PROPERTY SOURCES "${_placement_sources};${_placement_generated}")
