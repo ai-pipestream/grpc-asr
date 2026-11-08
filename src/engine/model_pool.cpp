@@ -93,7 +93,7 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
     whisper_context_params cparams = whisper_context_default_params();
     ggml_backend_dev_t required_device = nullptr;
     if (backend_ == "sycl" || backend_ == "cuda" || backend_ == "metal") {
-        const char* registry_name = backend_ == "sycl" ? "SYCL" : backend_ == "cuda" ? "CUDA" : "Metal";
+        const char* registry_name = backend_ == "sycl" ? "SYCL" : backend_ == "cuda" ? "CUDA" : "MTL";
         const int ordinal = backend_ == "sycl" ? config.sycl_device :
                             backend_ == "cuda" ? config.cuda_device : config.metal_device;
         auto* registry = ggml_backend_reg_by_name(registry_name);
