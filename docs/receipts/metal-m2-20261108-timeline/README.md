@@ -1,9 +1,18 @@
-# Native M2 timeline RPC evidence
+# Intermediate native M2 timeline RPC evidence
 
 Full-suite runtime: `db91b87d4812c3ae94ee75652f14ccaec9fb8601`.
 Focused test: `42474286f21c78dc8420a866c703a502ce3932cb`.
 Imports: efef065 → 397e3aa, 17b2389 → f50a7ee, d1d5809 → db91b87.
-Independent review of d1d5809 was active when these runs completed.
+Status: **intermediate evidence, not final ASR acceptance**. The source and
+binary identities below describe the completed runs only. Later review found
+an unknown-packet-timing duration-cap bypass in d1d5809; Copernicus is fixing
+it. A separate unpadded Whisper timestamp overrun (12400ms versus 11000ms PCM)
+is assigned to Dirac. These receipts do not qualify either pending fix.
+
+The original ASR scope remains open. Further Mac runs must wait for both
+fixes to be reviewed and for Copernicus to release the Mac. Fresh native
+qualification is required on the combined reviewed source; the retained raw
+logs, assertions and manifests are unchanged.
 
 Apple M2, 24 GiB, native Apple Silicon, Rosetta disabled, macOS 27.2
 (26B123), Apple Clang 21. The manifests provide toolchain, model, binary,
@@ -13,7 +22,7 @@ Server SHA256: `2b4b1368cdf752d96eae7f375c0ed7733c4249103ea83396ed496fe73813cae7
 
 ## Results
 
-Native incremental builds: nice 10, 2 jobs. Final video-demux-test passed
+Native incremental builds: nice 10, 2 jobs. Updated video-demux-test passed
 in 0.82s: 9 origin/delay cases plus packet-duration and existing media checks.
 Initial build/unit logs cover f50a7ee; final-* logs cover db91b87.
 
@@ -42,4 +51,4 @@ benchmark: prior performance applies only to 17b85d25071c6d395ae9cceb8fb062d6c5d
 Existing tiny.en cooperative cancellation tests do not prove busy-graph
 preemption. Both suites exited; process check found no owned ASR process,
 64% memory free. Mac access was released. Raw logs/runners are retained;
-.gz files use deterministic gzip headers. Final acceptance awaits parent review.
+.gz files use deterministic gzip headers. Final acceptance requires both fixes and fresh device qualification.

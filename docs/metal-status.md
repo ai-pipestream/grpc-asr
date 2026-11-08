@@ -1,5 +1,16 @@
 # Metal implementation checkpoint
 
+## Open qualification work
+
+The timeline receipts in [metal-m2-20261108-timeline](receipts/metal-m2-20261108-timeline/README.md)
+are intermediate results for runtime db91b87 and test-only 4247428, not final
+ASR acceptance. Review found an unknown-packet duration-cap bypass in d1d5809
+(Copernicus fixing), and the separate unpadded Whisper timestamp overrun
+(12400ms for 11000ms PCM) is assigned to Dirac. Both fixes require review and
+fresh native qualification. No further Mac runs until both are reviewed and
+Copernicus releases the machine. The original ASR scope remains open.
+
+
 `GRPC_ASR_METAL=ON` requires native Apple Silicon at configure time.
 `GRPC_ASR_BACKEND=metal` selects the Metal registration explicitly;
 `GRPC_ASR_METAL_DEVICE` selects its zero-based device index. The selection
