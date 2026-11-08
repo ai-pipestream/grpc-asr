@@ -1,7 +1,7 @@
 # grpc-asr architecture
 
 **Status:** implemented; canonical home of the consolidated media services
-**Updated:** 2026-11-06
+**Updated:** 2026-11-08
 
 Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, and `guidelines.md`.
 
@@ -18,10 +18,10 @@ keyframe stills from video feed the CV path.
 flowchart TD
     A[MediaChunk stream] --> B{container sniff}
     B -->|wav / mp3 / flac| C[in-process decode]
-    B -->|ogg / mp4 / mkv / webm| D[ffmpeg demux over memfd]
+    B -->|ogg / mp4 / mkv / webm| D[Seekable audio/video demux]
     C --> E[PCM windows]
     D --> E
-    D --> K[keyframe ffmpeg child]
+    D --> K[Keyframe extraction]
     E --> F[whisper_full, pooled contexts]
     F --> G[PartialSegment / FinalSegment]
     K --> H[Keyframe PNGs]
@@ -33,7 +33,18 @@ flowchart TD
 Keep ASR out of gRParse itself: OCR and layout session pools and Whisper
 weights do not share a device arena.
 
-The diagram above describes the collector's `AsrService`. The same
+The diagram above describes the collector's `AsrService`. Its container
+path waits for the complete upload so seekable formats such as trailing-index
+MP4 work. `GRPC_ASR_NATIVE_DEMUX` is a CMake option, independent of the speech
+backend: ON by default on macOS, OFF by default on Linux. When enabled, it
+uses native FFmpeg libraries and seekable in-memory AVIO for audio and PNG
+keyframes, without request files or codec subprocesses. Linux can opt in with
+`-DGRPC_ASR_NATIVE_DEMUX=ON` and the required FFmpeg development libraries.
+The legacy Linux mode uses sealed memfd input with ffmpeg/ffprobe subprocesses
+and a separate keyframe child. This option does not make AsrService container
+uploads incremental.
+
+The same
 `grpc-asr-server` also registers `ai.pipestream.media.v1.MediaService` and
 `SpeechWorkerService` on port 50055. These interfaces were consolidated from
 the retired whisper-grpc prototype; there is no separate media executable.
@@ -60,8 +71,8 @@ Partial segments are allowed; finals replace them by index.
 
 ## What this process owns
 
-Audio decode and transcription, on whisper.cpp (GGML, CUDA, Metal, Vulkan,
-or OpenVINO builds), never `openai-whisper`. Video is demuxed to its audio
+Audio decode and transcription use whisper.cpp with explicit CPU, CUDA, SYCL,
+Metal or OpenVINO selection, never `openai-whisper`. Video is demuxed to its audio
 track, with optional keyframe stills emitted as `PictureItem`s or raw PNGs
 so gRParse can run layout on slides. Timed segments (`start`, `end`,
 `text`, optional word timestamps) are projected as `TextItem`s with time
@@ -93,7 +104,28 @@ missing.
 
 ## Hardware
 
-Same doctrine as gRParse: NVIDIA CUDA and Intel OpenVINO are first class,
-CPU is explicit. `GRPC_ASR_BACKEND=cuda|openvino|cpu`; do not silently fall
-back. A separate container from `grparse-server` so a whisper-large load
-cannot evict RapidOCR sessions.
+`GRPC_ASR_BACKEND=cpu|cuda|sycl|metal|openvino` selects the implementation at
+startup. CPU is explicit; unavailable requested backends/devices fail startup.
+Build options and runtime selection are separate:
+
+| Backend | Build option | Runtime device selection and scope |
+|---|---|---|
+| CPU | No accelerator option needed | CPU Whisper graph |
+| CUDA | `GRPC_ASR_CUDA=ON` | `GRPC_ASR_CUDA_DEVICE`, default 0; GGML GPU encoder and decoder path |
+| SYCL | `GRPC_ASR_SYCL=ON` | `GRPC_ASR_SYCL_DEVICE`, default 0; GGML GPU encoder and decoder path |
+| Metal | `GRPC_ASR_METAL=ON` | `GRPC_ASR_METAL_DEVICE`, default 0; GGML GPU encoder and decoder path on native Apple Silicon macOS |
+| OpenVINO | `GRPC_ASR_OPENVINO=ON` | `GRPC_ASR_OPENVINO_DEVICE`; converted encoder model required; encoder-only offload with the GGML decoder on CPU |
+
+CUDA/SYCL/Metal device numbers are zero-based GPU ordinals within the selected
+backend registry. The pool maps these to Whisper's device index and checks
+the initialized state uses that exact device. SYCL is the full native GGML
+speech path, separate from the older OpenVINO encoder-only integration.
+Actual per-stage execution still requires placement evidence; configuration
+and backend names do not prove complete offload.
+
+Metal runs as a native macOS service, not inside a Linux Docker VM. Keep the
+ASR process separate from grparse-server so model allocation is isolated from
+OCR/layout sessions. Current Mac receipts are intermediate: final ASR
+qualification remains open pending the reviewed duration-cap and timestamp
+fixes and a fresh device run. See [Metal status](metal-status.md) for the
+source-pinned results and remaining work.
