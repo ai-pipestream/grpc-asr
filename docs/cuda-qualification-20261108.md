@@ -53,6 +53,12 @@ completion trailer. Their window is 30 seconds; the suite above uses ten.
 
 ## Receipts and limits
 
+The committed [receipt archive](qualification/cuda-20261108-receipts.tar.gz)
+and [SHA256](qualification/cuda-20261108-receipts.sha256) contain the retained
+raw wire outputs and logs, source snapshot, input hashes, build configuration
+and exact tested binary SHA256 manifest. Extract with `tar -xzf` to inspect.
+Executables and model weights are not embedded.
+
 The local handoff bundle is
 `/work/main/grpc-services/hardware-receipts/cuda-20261108/asr/`.
 It contains raw output, traced and untraced logs, a source archive,
