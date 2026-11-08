@@ -63,7 +63,7 @@ if [[ "$license" != *'"LGPL version 2.1 or later"'* ]]; then
   exit 1
 fi
 
-make -j"$(nproc)"
+make -j"${BUILD_JOBS:-$(nproc)}"
 make install
 
 doc="$prefix/share/doc/ffmpeg"
