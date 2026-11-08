@@ -148,15 +148,49 @@ struct Track {
         }
     }
 };
+// All tracks share the container origin. Rebasing each track independently
+// would erase an intentional audio/video offset. When the demuxer cannot
+// supply a container start, use the earliest known A/V stream start; with no
+// timestamp metadata at all, retain the conventional zero origin.
+int64_t timestamp_us(int64_t timestamp, AVRational time_base) {
+    const int64_t value = av_rescale_q(timestamp, time_base, AV_TIME_BASE_Q);
+    if (value == INT64_MIN || value == INT64_MAX)
+        throw DecodeError("native media timestamp exceeds range");
+    return value;
+}
+int64_t media_origin_us(const AVFormatContext* format) {
+    if (format->start_time != AV_NOPTS_VALUE) return format->start_time;
+    int64_t origin = AV_NOPTS_VALUE;
+    for (unsigned i = 0; i < format->nb_streams; ++i) {
+        const auto* stream = format->streams[i];
+        if ((stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO &&
+             stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) || stream->start_time == AV_NOPTS_VALUE) continue;
+        const int64_t start = timestamp_us(stream->start_time, stream->time_base);
+        if (origin == AV_NOPTS_VALUE || start < origin) origin = start;
+    }
+    return origin == AV_NOPTS_VALUE ? 0 : origin;
+}
+int64_t relative_time_us(int64_t timestamp, AVRational time_base, int64_t origin) {
+    const int64_t time = timestamp_us(timestamp, time_base);
+    if ((origin > 0 && time < INT64_MIN + origin) ||
+        (origin < 0 && time > INT64_MAX + origin))
+        throw DecodeError("native media relative timestamp exceeds range");
+    return time - origin;
+}
 struct Audio {
     Track track;
     SwrContext* swr = nullptr;
     std::vector<float> pending;
     size_t offset = 0;
     bool done = false;
+    bool first_frame = true;
+    int64_t origin_us = 0;
+    uint64_t leading_silence = 0;
+    uint64_t trim_samples = 0;
     ~Audio() { swr_free(&swr); }
     void open(std::span<const uint8_t> data, std::stop_token stop, std::chrono::milliseconds timeout) {
         track.open(data, stop, AVMEDIA_TYPE_AUDIO, timeout);
+        origin_us = media_origin_us(track.input.format);
         AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
         auto* c = track.codec;
         if (c->sample_rate <= 0) throw DecodeError("invalid native sample rate");
@@ -171,7 +205,20 @@ struct Audio {
             track.frame->format != track.codec->sample_fmt ||
             av_channel_layout_compare(&track.frame->ch_layout, &track.codec->ch_layout) != 0))
             throw DecodeError("native audio format changed during decode");
+        if (frame && first_frame) {
+            first_frame = false;
+            const auto* stream = track.input.format->streams[track.index];
+            const int64_t pts = track.frame->best_effort_timestamp != AV_NOPTS_VALUE
+                ? track.frame->best_effort_timestamp : stream->start_time;
+            if (pts != AV_NOPTS_VALUE) {
+                const int64_t start = av_rescale_q(relative_time_us(pts, stream->time_base, origin_us),
+                                                  AV_TIME_BASE_Q, AVRational{1, 16000});
+                if (start >= 0) leading_silence = static_cast<uint64_t>(start);
+                else trim_samples = static_cast<uint64_t>(-(start + 1)) + 1;
+            }
+        }
         const int samples = frame ? track.frame->nb_samples : 0;
+
         const int capacity = swr_get_out_samples(swr, samples);
         if (capacity < 0 || capacity > 16 * 1024 * 1024) throw DecodeError("native PCM frame exceeds bound");
         pending.resize(static_cast<size_t>(capacity)); offset = 0;
@@ -182,6 +229,9 @@ struct Audio {
         check(converted, "native audio resample failed");
         pending.resize(static_cast<size_t>(converted));
         scrub_pcm(pending);
+        // Trim preroll before the shared origin; retain resampler continuity.
+        offset = static_cast<size_t>(std::min<uint64_t>(trim_samples, pending.size()));
+        trim_samples -= offset;
         if (!frame && converted == 0) done = true;
         return !done;
     }
@@ -224,7 +274,15 @@ size_t VideoDemux::read_audio(float* out, size_t size) {
     if (!impl_->audio) throw ToolError("native audio is not open");
     auto& a = *impl_->audio;
     a.track.input.begin_operation();
-    while (a.offset == a.pending.size()) if (!a.fill()) return 0;
+    while (!a.leading_silence && a.offset == a.pending.size()) if (!a.fill()) return 0;
+    // Stream the initial A/V gap through the existing read boundary. Never
+    // allocate proportional to an untrusted timestamp; stop/deadline and the
+    // transcriber's duration cap also apply while consuming these zeros.
+    if (a.leading_silence) {
+        const size_t count = static_cast<size_t>(std::min<uint64_t>(size, a.leading_silence));
+        std::fill_n(out, count, 0.0f); a.leading_silence -= count; return count;
+    }
+
     const size_t count = std::min(size, a.pending.size() - a.offset);
     std::copy_n(a.pending.data() + a.offset, count, out); a.offset += count; return count;
 }
@@ -244,12 +302,14 @@ void VideoDemux::extract_keyframes(uint32_t interval,
     const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink, std::stop_token stop) {
     if (!interval) throw DecodeError("keyframe interval must be positive");
     Track track; track.open(impl_->bytes, stop, AVMEDIA_TYPE_VIDEO, impl_->timeout);
+    const int64_t origin_us = media_origin_us(track.input.format);
     uint64_t next_ms = 0;
     while (track.next()) {
         auto* frame = track.frame;
         if (frame->best_effort_timestamp == AV_NOPTS_VALUE) continue;
-        const int64_t ms = av_rescale_q(frame->best_effort_timestamp,
-            track.input.format->streams[track.index]->time_base, AVRational{1, 1000});
+        const int64_t relative_us = relative_time_us(frame->best_effort_timestamp,
+            track.input.format->streams[track.index]->time_base, origin_us);
+        const int64_t ms = av_rescale_q(relative_us, AV_TIME_BASE_Q, AVRational{1, 1000});
         if (ms < 0 || static_cast<uint64_t>(ms) < next_ms) continue;
         if (frame->width <= 0 || frame->height <= 0 || frame->width > 8192 || frame->height > 8192 ||
             static_cast<int64_t>(frame->width) * frame->height > kMaxFramePixels)
