@@ -37,16 +37,16 @@ class SpeechModel : public SpeechBackend {
   // Borrows a checked-out pool state; the caller owns its lifetime.
   SpeechModel(whisper_context*, whisper_state*, std::string model_id,
               std::string model_hash, int threads);
-  ~SpeechModel();
-  void validate_options(const mediapb::SpeechOptions& options) const;
+  ~SpeechModel() override;
+  void validate_options(const mediapb::SpeechOptions& options) const override;
   SpeechModel(const SpeechModel&) = delete;
   SpeechModel& operator=(const SpeechModel&) = delete;
   std::vector<mediapb::TranscriptSegment> infer(const SpeechWindow& window, uint32_t track,
                                          const mediapb::SpeechOptions& options,
-                                         const std::function<bool()>& cancelled);
-  const std::string& model_hash() const;
-  const std::string& model_id() const;
-  int threads() const;
+                                         const std::function<bool()>& cancelled) override;
+  const std::string& model_hash() const override;
+  const std::string& model_id() const override;
+  int threads() const override;
   bool multilingual() const;
   static std::string library_version();
   std::optional<bool> multilingual_capability() const override { return multilingual(); }
