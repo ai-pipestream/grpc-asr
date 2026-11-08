@@ -2,6 +2,7 @@
 #include "media/video_demux.h"
 #include "media/audio_decoder.h"
 #include "media/pcm_scrub.h"
+#include "media/native_memory_seek.h"
 #include "cancellation.h"
 #include <algorithm>
 #include <cstring>
@@ -47,15 +48,7 @@ struct Input {
     static int64_t seek(void* opaque, int64_t offset, int whence) {
         auto& s = *static_cast<Input*>(opaque);
         if (s.interrupted()) return AVERROR_EXIT;
-        if (whence == AVSEEK_SIZE) return static_cast<int64_t>(s.bytes.size());
-        whence &= ~AVSEEK_FORCE;
-        int64_t base = 0;
-        if (whence == SEEK_CUR) base = static_cast<int64_t>(s.position);
-        else if (whence == SEEK_END) base = static_cast<int64_t>(s.bytes.size());
-        else if (whence != SEEK_SET) return AVERROR(EINVAL);
-        if (offset < -base || offset > static_cast<int64_t>(s.bytes.size()) - base) return AVERROR(EINVAL);
-        s.position = static_cast<size_t>(base + offset);
-        return static_cast<int64_t>(s.position);
+        return native_memory_seek(s.bytes.size(), s.position, offset, whence);
     }
     bool interrupted() const { return stop.stop_requested() || std::chrono::steady_clock::now() >= deadline; }
     void begin_operation() { deadline = std::chrono::steady_clock::now() + timeout; cancelled(); }
