@@ -23,6 +23,9 @@ class ToolError : public std::runtime_error {
 struct ProbeInfo {
     // Declared container duration, 0 when unknown.
     uint64_t duration_ms = 0;
+    // Confirmed media endpoint even when total duration is unknown. Admission
+    // must enforce this lower bound independently of the declared duration.
+    uint64_t duration_lower_bound_ms = 0;
     // True when the container has at least one audio stream.
     bool has_audio = false;
     // Audio codec name ("aac", "opus", ...), empty without audio.

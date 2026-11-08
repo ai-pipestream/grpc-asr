@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
+#include <string_view>
 #include <memory>
 #include <mutex>
 #include <print>
@@ -16,6 +18,7 @@
 #include <grpcpp/health_check_service_interface.h>
 
 #include "config.h"
+#include "media/posix_compat.h"
 #include "engine/model_pool.h"
 #include "service/asr_service.h"
 #include "service/streaming_runtime.h"
@@ -34,7 +37,7 @@ void handle_shutdown(int /*signum*/) {
 }
 
 void install_shutdown_pipe() {
-    if (::pipe2(g_shutdown_pipe, O_CLOEXEC) != 0) {
+    if (asr::media::pipe_cloexec(g_shutdown_pipe) != 0) {
         throw std::runtime_error("shutdown pipe creation failed");
     }
     struct sigaction action = {};
@@ -47,7 +50,8 @@ void install_shutdown_pipe() {
 // whisper logs to stderr by default; keep model-load noise but drop the
 // per-inference chatter.
 void quiet_whisper_log(ggml_log_level level, const char* text, void* /*user_data*/) {
-    if (level >= GGML_LOG_LEVEL_WARN) {
+    if (level >= GGML_LOG_LEVEL_WARN ||
+        (std::getenv("GRPC_ASR_TRACE_PLACEMENT") && std::string_view(text).starts_with("grpc-asr placement "))) {
         std::print(stderr, "{}", text);
     }
 }
