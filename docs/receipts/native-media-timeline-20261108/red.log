@@ -1,0 +1,10 @@
+timeline FAIL: origin=10 delayed_track=0 keyframes preserve media-relative video offset
+timeline FAIL: origin=10 delayed_track=1 keyframes preserve media-relative video offset
+timeline FAIL: origin=10 delayed_track=2 keyframes preserve media-relative video offset
+timeline FAIL: origin=-1 delayed_track=0 keyframes preserve media-relative video offset
+timeline FAIL: origin=-1 delayed_track=1 keyframes preserve media-relative video offset
+timeline FAIL: origin=-1 delayed_track=2 keyframes preserve media-relative video offset
+timeline FAIL: origin=0 delayed_track=2 leading audio silence
+FAIL: timeline origin regression cases: 7 failed
+timeline PASS origin=0 delayed_track=0
+timeline PASS origin=0 delayed_track=1
