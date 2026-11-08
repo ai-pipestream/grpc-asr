@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The whisper tiny.en weights the model-backed tests (transcriber-test,
 # asr-service-test) load, fetched from the canonical Hugging Face repo at a
 # pinned revision and checked against the LFS sha256 before any build sees
