@@ -112,6 +112,8 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
         }
         if (!required_device) throw std::invalid_argument("requested " + backend_ + " GPU is unavailable");
         cparams.use_gpu = true;
+        std::println("grpc-asr selected {} device: {} ({})", backend_,
+                     ggml_backend_dev_description(required_device), ggml_backend_dev_name(required_device));
     } else {
         // cpu and openvino both run the ggml graph on CPU; openvino
         // additionally offloads the encoder and is verified per model
