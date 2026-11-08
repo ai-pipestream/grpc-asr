@@ -11,11 +11,13 @@ namespace asr {
 // from what the operator wrote.
 struct Config {
     std::string listen_address = "0.0.0.0:50055";
-    // cuda | openvino | metal | cpu. CUDA is the default and fails loud when this
+    // cuda | sycl | metal | openvino | cpu. CUDA is the default and fails loud when this
     // build or host cannot provide it; cpu is an explicit choice, never a
     // fallback.
     std::string backend = "cuda";
     int cuda_device = 0;
+    // GPU ordinal within the SYCL registry, not across all backend registries.
+    int sycl_device = 0;
     int metal_device = 0;
     // OpenVINO device the whisper encoder compiles for under the openvino
     // backend ("GPU", "GPU.1", ...; other devices need their OpenVINO

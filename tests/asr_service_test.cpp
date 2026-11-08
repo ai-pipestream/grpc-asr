@@ -871,8 +871,8 @@ int main() {
     config.backend = "cpu";
     if (const char* backend = env_or_null("GRPC_ASR_TEST_BACKEND")) {
         config.backend = backend;
-        require(config.backend == "cpu" || config.backend == "metal" || config.backend == "cuda",
-                "test backend must be cpu, metal or cuda");
+        require(config.backend == "cpu" || config.backend == "sycl" || config.backend == "cuda" || config.backend == "metal",
+                "test backend must be cpu, sycl, cuda or metal");
     }
     config.models_dir = std::filesystem::path(model).parent_path().string();
     config.models = {"tiny.en"};
