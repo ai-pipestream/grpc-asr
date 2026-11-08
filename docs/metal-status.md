@@ -68,6 +68,7 @@ with `cpu`, retaining each complete stdout/stderr log:
 GRPC_ASR_TEST_MODEL=/absolute/read-only/models/ggml-tiny.en.bin \
 GRPC_ASR_TEST_SAMPLE=/absolute/fixtures/jfk.wav \
 GRPC_ASR_SERVER_BINARY="$PWD/build-metal/grpc-asr-server" \
+GRPC_ASR_TEST_REQUIRE_MODELS=1 \
 GRPC_ASR_TEST_BACKEND=metal GRPC_ASR_TRACE_PLACEMENT=1 \
   nice -n 10 ./build-metal/asr-service-test
 ```
@@ -76,3 +77,10 @@ This test asserts transcript content and timestamps, five warm requests,
 streaming, cancellation and recovery. Scheduler stage traces must also be
 reviewed for CPU or other execution; selecting Metal alone is not proof of
 complete offload.
+
+If Homebrew FFmpeg has no `libvorbis` encoder, explicitly set
+`GRPC_ASR_TEST_FIXTURE_FFMPEG="python3 $PWD/tests/macos_fixture_ffmpeg.py"`
+for this test. This fixture-only wrapper uses FFmpeg's native Vorbis encoder
+with its required stereo input, and bounds fixture encoding/filter threads
+to two. The service still must decode real Vorbis and pass the same transcript
+and codec assertions; no fixture or inference test is skipped.
