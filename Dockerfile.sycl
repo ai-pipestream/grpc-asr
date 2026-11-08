@@ -8,15 +8,15 @@ ARG BUILD_JOBS=2
 RUN case "$BUILD_JOBS" in ''|*[!0-9]*|0*) echo "BUILD_JOBS must be a positive integer" >&2; exit 1;; esac
 COPY --from=oneapi /opt/intel/oneapi /opt/intel/oneapi
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates cmake g++ git ninja-build pkg-config libssl-dev libze-dev libcurl4-openssl-dev nasm xz-utils zlib1g-dev libopenh264-dev ffmpeg \
+    ca-certificates cmake curl g++ git ninja-build pkg-config libssl-dev libze-dev libcurl4-openssl-dev nasm xz-utils zlib1g-dev libopenh264-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-c"]
 WORKDIR /src
 COPY . .
 RUN BUILD_JOBS="$BUILD_JOBS" scripts/build-ffmpeg.sh /opt/ffmpeg
 ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
-RUN source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1; \
-    set -e; cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+RUN set -e; source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 \
+    && cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
       -DGRPC_ASR_SYCL=ON \
     && cmake --build /build --target grpc-asr-server config-test --parallel "$BUILD_JOBS" \
