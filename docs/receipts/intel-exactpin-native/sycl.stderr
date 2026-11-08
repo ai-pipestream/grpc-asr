@@ -1,0 +1,293 @@
+Build with Macros:
+  GGML_SYCL_DNNL: yes
+  GGML_SYCL_F16: no
+  GGML_SYCL_FORCE_MMQ: no
+  GGML_SYCL_GRAPH: yes
+  GGML_SYCL_SUPPORT_LEVEL_ZERO_API: yes
+  GGML_SYCL_SUPPORT_VMM: yes
+Running with Environment Variables:
+  GGML_SYCL_DEBUG: 0
+  GGML_SYCL_DEV_DEBUG: 0
+  GGML_SYCL_DEV2DEV_MEMCPY: 0 (SYCL API)
+  GGML_SYCL_GET_MEM_API: 0 (Level Zero API)
+  GGML_SYCL_ENABLE_DNN: 1
+  GGML_SYCL_FA_ONEDNN: 1
+  GGML_SYCL_FA_ONEDNN_MAX_KV: 0
+  GGML_SYCL_ENABLE_MKL_FA: 1
+  GGML_SYCL_MEMTRACE: 0
+  GGML_SYCL_MEMTRACE_STEP: 64
+  GGML_SYCL_ENABLE_FLASH_ATTN: 1
+  GGML_SYCL_ENABLE_GRAPH: 0
+  GGML_SYCL_ENABLE_OPT: 1
+  GGML_SYCL_ENABLE_VMM: 1
+  GGML_SYCL_ENABLE_FUSION: 1
+  GGML_SYCL_ENABLE_ESIMD: 1
+  GGML_SYCL_MMVQ_WIDE: 1
+  GGML_SYCL_PRIORITIZE_DMMV: 0
+  GGML_SYCL_USE_ASYNC_MEM_OP: 1
+  GGML_SYCL_USE_LEVEL_ZERO_API: 1
+  GGML_SYCL_USM_SYSTEM: 0
+  GGML_SYCL_ENABLE_HOST_PINNED_MEM: 1
+  GGML_SYCL_HOST_PINNED_MEM_2G: 0
+  GGML_SYCL_SPARSE_FA: 0
+  GGML_SYCL_SPARSE_FA_DEBUG: 0
+  GGML_SYCL_SPARSE_FA_MARGIN: 256
+Found 1 SYCL devices:
+|  |                   |                                       |       |Max    |        |Max  |Global |                     |
+|  |                   |                                       |       |compute|Max work|sub  |mem    |                     |
+|ID|        Device Type|                                   Name|Version|units  |group   |group|size   |       Driver version|
+|--|-------------------|---------------------------------------|-------|-------|--------|-----|-------|---------------------|
+| 0| [level_zero:gpu:0]|             Intel Arc Pro B70 Graphics|   20.2|    256|    1024|   32| 34242M|           1.15.39122|
+SYCL Optimization Feature:
+|ID|        Device Type|Reorder|
+|--|-------------------|-------|
+| 0| [level_zero:gpu:0]|      Y|
+whisper_init_from_file_with_params_no_state: loading model from '/home/krickert/parse-stack/protos/grpc-asr/models/ggml-tiny.en.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 2
+whisper_init_with_params_no_state: backends   = 2
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51864
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1607 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:        SYCL0 total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: device 0: SYCL0 (type: 1)
+whisper_backend_init_gpu: found GPU device 0: SYCL0 (type: 1, cnt: 0)
+whisper_backend_init_gpu: using SYCL0 backend
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   14.17 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   96.83 MB
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+whisper_full_with_state: failed to encode
+grpc-asr placement stage=conv cpu_ops=0 gpu_ops=8 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=0 gpu_ops=97 other_ops=0
+grpc-asr placement stage=cross cpu_ops=0 gpu_ops=24 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=0 gpu_ops=144 other_ops=0

@@ -1,0 +1,8 @@
+repeat=0 backend=cpu elapsed_us=483976 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=1 backend=cpu elapsed_us=472798 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=2 backend=cpu elapsed_us=462644 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=3 backend=cpu elapsed_us=437285 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=4 backend=cpu elapsed_us=413345 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=5 backend=cpu elapsed_us=394463 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=6 backend=cpu elapsed_us=397721 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+PASS real native transcript/timestamps/repeats/pre-cancel/recovery; RPC separate

@@ -1,0 +1,9 @@
+device=Intel(R) Arc(TM) Pro B70 Graphics
+repeat=0 backend=sycl elapsed_us=6713926 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=1 backend=sycl elapsed_us=176470 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=2 backend=sycl elapsed_us=166278 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=3 backend=sycl elapsed_us=224159 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=4 backend=sycl elapsed_us=116704 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=5 backend=sycl elapsed_us=470211 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+repeat=6 backend=sycl elapsed_us=125411 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.
+PASS real native transcript/timestamps/repeats/pre-cancel/recovery; RPC separate
