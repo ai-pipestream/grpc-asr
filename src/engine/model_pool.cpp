@@ -87,7 +87,27 @@ struct ModelPool::Entry {
 
 ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
     whisper_context_params cparams = whisper_context_default_params();
-    if (backend_ == "cuda") {
+    if (backend_ == "sycl") {
+        auto* registry = ggml_backend_reg_by_name("SYCL");
+        if (!registry) throw std::invalid_argument("SYCL backend missing; build with GRPC_ASR_SYCL=ON");
+        int global_gpu = 0, sycl_gpu = 0;
+        bool found = false;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            auto* device = ggml_backend_dev_get(i);
+            auto type = ggml_backend_dev_type(device);
+            if (type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+            if (ggml_backend_dev_backend_reg(device) == registry && sycl_gpu++ == config.sycl_device) {
+                cparams.gpu_device = global_gpu;
+                cparams.use_gpu = true;
+                found = true;
+                std::println("grpc-asr SYCL selected: {} ({})", ggml_backend_dev_name(device),
+                             ggml_backend_dev_description(device));
+                break;
+            }
+            ++global_gpu;
+        }
+        if (!found) throw std::invalid_argument("requested SYCL GPU is unavailable");
+    } else if (backend_ == "cuda") {
         if (ggml_backend_reg_by_name("CUDA") == nullptr) {
             throw std::invalid_argument(
                 "GRPC_ASR_BACKEND=cuda: this build has no CUDA backend (available: " +

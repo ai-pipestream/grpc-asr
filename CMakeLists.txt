@@ -18,6 +18,7 @@ set(BUILD_SHARED_LIBS OFF)
 
 option(GRPC_ASR_WERROR "Treat warnings as errors for first-party targets" OFF)
 option(GRPC_ASR_CUDA "Build whisper.cpp with the CUDA (GGML) backend" OFF)
+option(GRPC_ASR_SYCL "Build whisper.cpp with Intel SYCL encoder and decoder" OFF)
 option(GRPC_ASR_OPENVINO "Build whisper.cpp with the OpenVINO encoder" OFF)
 set(GRPC_ASR_SANITIZE "" CACHE STRING "Comma list for -fsanitize on first-party targets")
 
@@ -69,6 +70,7 @@ endif()
 # whisper.cpp is the ASR system of record. Examples/tests/server are the
 # upstream demo surface, not this service.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_SYCL ${GRPC_ASR_SYCL} CACHE BOOL "" FORCE)
 set(GGML_CUDA ${GRPC_ASR_CUDA} CACHE BOOL "" FORCE)
 set(WHISPER_OPENVINO ${GRPC_ASR_OPENVINO} CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -103,6 +105,8 @@ FetchContent_Declare(whisper
   URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037
   URL_HASH SHA256=645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4)
 FetchContent_MakeAvailable(whisper)
+include(cmake/PatchWhisperGpuRequired.cmake)
+include(cmake/PatchWhisperPlacementTrace.cmake)
 include(streaming/cmake/PatchWhisperVad.cmake)
 include(streaming/cmake/PatchGgmlDepthwise.cmake)
 include(streaming/cmake/PatchParakeetContext.cmake)

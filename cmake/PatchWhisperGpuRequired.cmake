@@ -1,0 +1,15 @@
+# Pinned whisper otherwise silently initializes CPU when GPU init fails.
+# Explicit cpu/openvino retain their existing behavior (use_gpu=false).
+set(_whisper_gpu_file "${whisper_SOURCE_DIR}/src/whisper.cpp")
+file(READ "${_whisper_gpu_file}" _whisper_gpu_source)
+set(_gpu_before "    ggml_backend_t backend_gpu = whisper_backend_init_gpu(params);\n")
+set(_gpu_after "${_gpu_before}\n    // grpc-asr: an explicitly requested GPU must initialize.\n    if (params.use_gpu && !backend_gpu) {\n        return {};\n    }\n")
+string(FIND "${_whisper_gpu_source}" "// grpc-asr: an explicitly requested GPU must initialize." _already)
+if(_already EQUAL -1)
+  string(FIND "${_whisper_gpu_source}" "${_gpu_before}" _position)
+  if(_position EQUAL -1)
+    message(FATAL_ERROR "whisper GPU requirement patch needs review")
+  endif()
+  string(REPLACE "${_gpu_before}" "${_gpu_after}" _whisper_gpu_source "${_whisper_gpu_source}")
+  file(WRITE "${_whisper_gpu_file}" "${_whisper_gpu_source}")
+endif()
