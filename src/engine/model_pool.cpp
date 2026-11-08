@@ -120,6 +120,8 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                                         "build with -DGRPC_ASR_METAL=ON on native Apple Silicon");
         }
         cparams.use_gpu = true;
+        std::println("grpc-asr selected Metal device: {} ({})",
+                     ggml_backend_dev_description(required_device), ggml_backend_dev_name(required_device));
     } else {
         // cpu and openvino both run the ggml graph on CPU; openvino
         // additionally offloads the encoder and is verified per model
