@@ -67,6 +67,7 @@ with `cpu`, retaining each complete stdout/stderr log:
 ```sh
 GRPC_ASR_TEST_MODEL=/absolute/read-only/models/ggml-tiny.en.bin \
 GRPC_ASR_TEST_SAMPLE=/absolute/fixtures/jfk.wav \
+GRPC_ASR_SERVER_BINARY="$PWD/build-metal/grpc-asr-server" \
 GRPC_ASR_TEST_BACKEND=metal GRPC_ASR_TRACE_PLACEMENT=1 \
   nice -n 10 ./build-metal/asr-service-test
 ```
