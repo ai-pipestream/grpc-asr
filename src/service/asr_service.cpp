@@ -257,7 +257,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 return {grpc::StatusCode::INVALID_ARGUMENT,
                         "the media has no audio track to transcribe"};
             }
-            if (probe.duration_ms > max_duration_ms) {
+            if (std::max(probe.duration_ms, probe.duration_lower_bound_ms) > max_duration_ms) {
                 return {grpc::StatusCode::RESOURCE_EXHAUSTED,
                         "media duration exceeds GRPC_ASR_MAX_DURATION_SECONDS=" +
                             std::to_string(config_.max_duration_seconds)};

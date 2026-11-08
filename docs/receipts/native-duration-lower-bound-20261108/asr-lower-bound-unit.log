@@ -1,0 +1,16 @@
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x7a8fd2630880] error reading header
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x7a8fd2630c00] moov atom not found
+timeline PASS origin=10 delayed_track=0
+timeline PASS origin=10 delayed_track=1
+timeline PASS origin=10 delayed_track=2
+timeline PASS origin=-1 delayed_track=0
+timeline PASS origin=-1 delayed_track=1
+timeline PASS origin=-1 delayed_track=2
+timeline PASS origin=0 delayed_track=0
+timeline PASS origin=0 delayed_track=1
+timeline PASS origin=0 delayed_track=2
+duration_lower_bound PASS origin=10 absolute_metadata=false known_ms=3500
+duration_lower_bound PASS origin=10 absolute_metadata=true known_ms=3500
+duration_lower_bound PASS origin=-1 absolute_metadata=false known_ms=3500
+duration_lower_bound PASS origin=-1 absolute_metadata=true known_ms=3500
+native-video-demux-test passed
