@@ -871,8 +871,8 @@ int main() {
     config.backend = "cpu";
     if (const char* backend = env_or_null("GRPC_ASR_TEST_BACKEND")) {
         config.backend = backend;
-        require(config.backend == "cpu" || config.backend == "sycl" || config.backend == "cuda",
-                "test backend must be cpu, sycl or cuda");
+        require(config.backend == "cpu" || config.backend == "sycl" || config.backend == "cuda" || config.backend == "metal",
+                "test backend must be cpu, sycl, cuda or metal");
     }
     config.models_dir = std::filesystem::path(model).parent_path().string();
     config.models = {"tiny.en"};
@@ -880,7 +880,7 @@ int main() {
     // A window smaller than the fixture makes the during-upload assertion
     // possible.
     config.window_seconds = 10;
-    config.threads = 4;
+    config.threads = 2;
 
     try {
         asr::engine::ModelPool pool(config);
