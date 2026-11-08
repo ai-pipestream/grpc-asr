@@ -26,6 +26,8 @@
 #     -v ./models:/models:ro -p 50055:50055 grpc-asr:openvino
 # (--group-add render because the image runs as the unprivileged user.)
 FROM ubuntu:26.04 AS build
+ARG BUILD_JOBS=2
+RUN case "$BUILD_JOBS" in ''|*[!0-9]*|0*) echo "BUILD_JOBS must be a positive integer" >&2; exit 1;; esac
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,7 +51,7 @@ RUN curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-P
 # libvorbis), never ship it, and run the code under test against
 # /opt/ffmpeg, which comes first on PATH for ctest.
 COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
-RUN /tmp/build-ffmpeg.sh /opt/ffmpeg
+RUN BUILD_JOBS="$BUILD_JOBS" /tmp/build-ffmpeg.sh /opt/ffmpeg
 ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 
 # CI downloads models/ggml-tiny.en.bin into the build context (COPY . .
@@ -67,7 +69,7 @@ COPY . .
 RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-cxx23-grpc1.83.0-whisper1.9.5-${TARGETARCH},target=/build \
     cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_QUALIFY_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
-    && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
+    && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel "$BUILD_JOBS" \
     && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
         GRPC_ASR_TEST_REQUIRE_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} \
         ctest --test-dir /build -L asr --output-on-failure \
