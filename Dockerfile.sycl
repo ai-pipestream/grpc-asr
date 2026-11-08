@@ -19,7 +19,7 @@ RUN set -e; source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 \
     && cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
       -DgRPC_SSL_PROVIDER=package \
-      -DGRPC_ASR_SYCL=ON
+      -DGRPC_ASR_SYCL=ON -DGRPC_ASR_NATIVE_DEMUX=ON
 RUN set -e; source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 \
     && cmake --build /build --target grpc-asr-server config-test --parallel "$BUILD_JOBS" \
     && /build/config-test
