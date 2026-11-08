@@ -294,3 +294,7 @@ if(BUILD_TESTING)
     set_tests_properties(stream-backend-test PROPERTIES DISABLED TRUE)
   endif()
 endif()
+
+# Explicit native-device probe; it supplements, never replaces, the RPC suite.
+add_executable(sycl-whisper-probe EXCLUDE_FROM_ALL tools/sycl_whisper_probe.cpp)
+target_link_libraries(sycl-whisper-probe PRIVATE whisper)

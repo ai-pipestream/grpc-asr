@@ -28,3 +28,28 @@ the same binary/model/fixture with `GRPC_ASR_TEST_BACKEND=cpu` for a comparable
 baseline. Missing prerequisites and any skipped tier must remain visible.
 
 Qualification receipts are added only after actual device tests finish.
+
+## Native model receipt, 2026-11-08
+
+`tools/sycl_whisper_probe.cpp` passed seven real tiny.en/JFK transcriptions,
+text and timestamp assertions, an explicitly aborted inference, and recovery
+on krick-1 Arc Pro B70 (Level Zero 1.15.39122, oneAPI 2025.3.3). The same
+binary/model/fixture passed on explicit CPU. Each uses two CPU threads.
+The model SHA256 is
+`921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`.
+Whisper source pin is `d1be6fde11ac6e0407606b4e42fe72d34add8037`, with this
+repository's VAD and fail-closed/placement patches. Artifact hashes and raw
+per-run timings are under `docs/receipts/intel-native-*`.
+
+Both logs passed `scripts/check-placement.sh`. GPU execution counts were
+conv 8, encoder 97, cross 24, decoder 144; CPU/other counts zero. Explicit
+CPU had the same stage counts on CPU and zero GPU/other. These are scheduler
+execution assignments, not model-loading claims.
+
+Warm runs 1..5 had median 442.902 ms SYCL and 1178.702 ms CPU (2.66x).
+SYCL warm range 284.185..654.477 ms; CPU 833.873..2575.725 ms. Cold run 0
+was 10.948 s SYCL versus 1.030 s CPU and is excluded from warm latency.
+Concurrent CI/build activity caused substantial host contention, so these
+are fixture-specific observations, not clean-host throughput guarantees.
+Run 6 follows cancellation and also passed. Full RPC acceptance remains
+pending and is not established by this native receipt.
