@@ -20,6 +20,12 @@
 # image carries what LGPL-2.1 section 4 asks for.
 set -euo pipefail
 
+build_jobs=${BUILD_JOBS-$(nproc)}
+if [[ ! "$build_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BUILD_JOBS must be a positive integer" >&2
+  exit 1
+fi
+
 FFMPEG_VERSION=9.0.2
 FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
@@ -63,7 +69,7 @@ if [[ "$license" != *'"LGPL version 2.1 or later"'* ]]; then
   exit 1
 fi
 
-make -j"${BUILD_JOBS:-$(nproc)}"
+make -j"$build_jobs"
 make install
 
 doc="$prefix/share/doc/ffmpeg"
