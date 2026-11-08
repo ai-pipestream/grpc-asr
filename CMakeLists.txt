@@ -189,11 +189,20 @@ target_link_libraries(asr_proto PUBLIC grpc++)
 # ---------------------------------------------------------------------------
 # First-party code
 # ---------------------------------------------------------------------------
+option(GRPC_ASR_NATIVE_DEMUX "Use seekable in-memory native FFmpeg demux" ${APPLE})
+if(GRPC_ASR_NATIVE_DEMUX)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(ASR_NATIVE_FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat>=59 libavcodec>=59 libavutil>=57 libswresample>=4 libswscale>=6)
+  set(ASR_VIDEO_DEMUX src/media/video_demux_native.cpp)
+else()
+  set(ASR_VIDEO_DEMUX src/media/video_demux.cpp)
+endif()
 add_library(asr_core STATIC
   src/config.cpp
   src/media/sniff.cpp
   src/media/audio_decoder.cpp
-  src/media/video_demux.cpp
+  ${ASR_VIDEO_DEMUX}
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
@@ -201,6 +210,9 @@ add_library(asr_core STATIC
   src/document/document_fold.cpp
   src/service/asr_service.cpp)
 target_include_directories(asr_core PUBLIC src)
+if(GRPC_ASR_NATIVE_DEMUX)
+  target_link_libraries(asr_core PRIVATE PkgConfig::ASR_NATIVE_FFMPEG)
+endif()
 target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
 target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}")
 target_link_libraries(asr_core
@@ -236,6 +248,9 @@ if(BUILD_TESTING)
     asr-service-test)
   foreach(test_name IN LISTS GRPC_ASR_TESTS)
     string(REPLACE "-" "_" test_source "${test_name}")
+    if(GRPC_ASR_NATIVE_DEMUX AND test_name STREQUAL "video-demux-test")
+      set(test_source video_demux_native_test)
+    endif()
     add_executable(${test_name} "tests/${test_source}.cpp")
     target_link_libraries(${test_name} PRIVATE asr_core asr_flags)
     add_test(NAME ${test_name} COMMAND ${test_name})

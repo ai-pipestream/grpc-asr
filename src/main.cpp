@@ -16,6 +16,7 @@
 #include <grpcpp/health_check_service_interface.h>
 
 #include "config.h"
+#include "media/posix_compat.h"
 #include "engine/model_pool.h"
 #include "service/asr_service.h"
 #include "service/streaming_runtime.h"
@@ -34,7 +35,7 @@ void handle_shutdown(int /*signum*/) {
 }
 
 void install_shutdown_pipe() {
-    if (::pipe2(g_shutdown_pipe, O_CLOEXEC) != 0) {
+    if (asr::media::pipe_cloexec(g_shutdown_pipe) != 0) {
         throw std::runtime_error("shutdown pipe creation failed");
     }
     struct sigaction action = {};
