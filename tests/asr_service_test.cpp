@@ -1008,9 +1008,6 @@ int main() {
     config.threads = 2;
 
     try {
-        if (env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY"))
-            require(config.backend == "cpu" || config.backend == "metal",
-                    "focused timeline qualification supports explicit CPU or Metal");
         asr::engine::ModelPool pool(config);
         asr::AsrServiceImpl service(config, pool);
 
@@ -1028,6 +1025,7 @@ int main() {
             require(have_ffmpeg(), "timeline fixtures require ffmpeg");
             verify_native_duration_cap(config, pool);
             verify_native_media_timeline(channel, sample);
+            verify_service_info(channel, config.backend);
             server->Shutdown();
             std::println("asr-service-test native timeline passed (loopback TCP RPC)");
             return 0;
