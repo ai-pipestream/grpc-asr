@@ -1,0 +1,18 @@
+{
+  "source_commit": "42474286f21c78dc8420a866c703a502ce3932cb",
+  "exit_code": 0,
+  "elapsed_seconds": 2.074119542,
+  "stage_observations": {
+    "conv": 5,
+    "encoder": 5,
+    "cross": 5,
+    "decoder": 118
+  },
+  "all_observed_graph_ops_gpu": true,
+  "timeline_assertions": [
+    "native_timeline_rpc PASS origin_ms=10000 audio_delay_ms=0 duration_ms=13000 first_segment_ms=0 keyframes=7 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.",
+    "native_timeline_rpc PASS origin_ms=10000 audio_delay_ms=500 duration_ms=13500 first_segment_ms=0 keyframes=7 text= And so my fellow Americans ask not what your country can do for you ask what you can do for your country.",
+    "native_timeline_rpc PASS extended_video media_duration_ms=3500 pcm_duration_ms=2000 keyframes=500,1500,2500 complete_last=true"
+  ],
+  "cpu_comparison": "not repeated; previous source17b85d25071c6d395ae9cceb8fb062d6c5d42270"
+}

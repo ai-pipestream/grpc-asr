@@ -1,0 +1,15 @@
+{
+  "source_commit": "db91b87d4812c3ae94ee75652f14ccaec9fb8601",
+  "exit_code": 0,
+  "stage_observation_counts": {
+    "conv": 151,
+    "encoder": 151,
+    "cross": 151,
+    "decoder": 1265
+  },
+  "all_observed_ops_gpu": true,
+  "suite_seconds": 14.81,
+  "timeline_oracle": "Not part of normal full suite; separate focused-metal run required and passed.",
+  "receipt_gate": "Initial external gate rejected missing timeline marker, despite successful full suite; retained full-runner.py shows that gate.",
+  "performance": "No CPU comparison; previous comparison source17b85d25071c6d395ae9cceb8fb062d6c5d42270"
+}
