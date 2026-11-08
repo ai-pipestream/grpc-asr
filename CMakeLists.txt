@@ -233,6 +233,11 @@ install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
 # suite stays green on a bare checkout and asserts for real when provisioned.
 # ---------------------------------------------------------------------------
 if(BUILD_TESTING)
+  # Ownership failure injection needs neither model weights nor a device.
+  add_executable(state-ownership-test tests/state_ownership_test.cpp)
+  target_include_directories(state-ownership-test PRIVATE src)
+  target_compile_features(state-ownership-test PRIVATE cxx_std_23)
+  add_test(NAME state-ownership-test COMMAND state-ownership-test)
   set(GRPC_ASR_TESTS
     sniff-test
     pcm-scrub-test
@@ -268,6 +273,7 @@ if(BUILD_TESTING)
     list(APPEND GRPC_ASR_TESTS grpc-openssl-test)
   endif()
   add_custom_target(grpc-asr-tests DEPENDS ${GRPC_ASR_TESTS})
+  add_dependencies(grpc-asr-tests state-ownership-test)
   # 300 is generous on native hardware (asr-service-test finishes in ~3s);
   # QEMU-emulated arm64 image builds override it, whisper inference there
   # runs two orders of magnitude slower.
