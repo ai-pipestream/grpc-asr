@@ -1,0 +1,4 @@
+718d4c49ebbfda71c3568071d8d73e29907cd8f2496a6c122afc37c836f8b080  build-whisper-intel/bin/sycl_whisper_probe
+44aa961bb27705881aafde563eb3e0f9f4ce4e2b074bba98a173fe809b007d27  build-whisper-intel/bin/libwhisper.so.1.9.3
+59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e  build-deps/whisper-src/samples/jfk.wav
+Intel(R) oneAPI DPC++/C++ Compiler 2025.3.3 (2025.3.3.20260319)

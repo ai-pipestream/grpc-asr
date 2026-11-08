@@ -18,6 +18,11 @@ set(BUILD_SHARED_LIBS OFF)
 
 option(GRPC_ASR_WERROR "Treat warnings as errors for first-party targets" OFF)
 option(GRPC_ASR_CUDA "Build whisper.cpp with the CUDA (GGML) backend" OFF)
+option(GRPC_ASR_SYCL "Build whisper.cpp with Intel SYCL encoder and decoder" OFF)
+option(GRPC_ASR_METAL "Build whisper.cpp with Apple Metal (native arm64 only)" OFF)
+if(GRPC_ASR_METAL AND (NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"))
+  message(FATAL_ERROR "GRPC_ASR_METAL requires a native Apple Silicon build")
+endif()
 option(GRPC_ASR_OPENVINO "Build whisper.cpp with the OpenVINO encoder" OFF)
 set(GRPC_ASR_SANITIZE "" CACHE STRING "Comma list for -fsanitize on first-party targets")
 
@@ -40,14 +45,15 @@ include(FetchContent)
 
 option(GRPC_ASR_SYSTEM_GRPC "Use installed protobuf and gRPC" OFF)
 if(GRPC_ASR_SYSTEM_GRPC)
-  find_package(Protobuf REQUIRED)
+  find_package(Protobuf CONFIG REQUIRED)
   find_package(gRPC CONFIG REQUIRED)
   add_executable(protoc ALIAS protobuf::protoc)
   add_executable(grpc_cpp_plugin ALIAS gRPC::grpc_cpp_plugin)
   add_library(grpc++ ALIAS gRPC::grpc++)
   add_library(grpc++_reflection ALIAS gRPC::grpc++_reflection)
-  set(protobuf_SOURCE_DIR "${Protobuf_INCLUDE_DIRS}/..")
-  set(ASR_PROTOBUF_INCLUDE "${Protobuf_INCLUDE_DIRS}")
+  get_target_property(ASR_PROTOBUF_INCLUDE protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
+  list(GET ASR_PROTOBUF_INCLUDE 0 ASR_PROTOBUF_INCLUDE)
+  set(protobuf_SOURCE_DIR "${ASR_PROTOBUF_INCLUDE}/..")
 else()
 set(gRPC_SSL_PROVIDER package CACHE STRING "" FORCE)
 set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
@@ -69,7 +75,10 @@ endif()
 # whisper.cpp is the ASR system of record. Examples/tests/server are the
 # upstream demo surface, not this service.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_SYCL ${GRPC_ASR_SYCL} CACHE BOOL "" FORCE)
 set(GGML_CUDA ${GRPC_ASR_CUDA} CACHE BOOL "" FORCE)
+set(GGML_METAL ${GRPC_ASR_METAL} CACHE BOOL "" FORCE)
+set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "" FORCE)
 set(WHISPER_OPENVINO ${GRPC_ASR_OPENVINO} CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -103,7 +112,7 @@ FetchContent_Declare(whisper
   URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037
   URL_HASH SHA256=645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4)
 FetchContent_MakeAvailable(whisper)
-include(streaming/cmake/PatchWhisperVad.cmake)
+include(cmake/ObserveWhisperPlacement.cmake)
 include(streaming/cmake/PatchGgmlDepthwise.cmake)
 include(streaming/cmake/PatchParakeetContext.cmake)
 option(GRPC_ASR_QUALIFY_MODELS "Require the full speech qualification model set" OFF)
@@ -181,11 +190,20 @@ target_link_libraries(asr_proto PUBLIC grpc++)
 # ---------------------------------------------------------------------------
 # First-party code
 # ---------------------------------------------------------------------------
+option(GRPC_ASR_NATIVE_DEMUX "Use seekable in-memory native FFmpeg demux" ${APPLE})
+if(GRPC_ASR_NATIVE_DEMUX)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(ASR_NATIVE_FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat>=59 libavcodec>=59 libavutil>=57 libswresample>=4 libswscale>=6)
+  set(ASR_VIDEO_DEMUX src/media/video_demux_native.cpp)
+else()
+  set(ASR_VIDEO_DEMUX src/media/video_demux.cpp)
+endif()
 add_library(asr_core STATIC
   src/config.cpp
   src/media/sniff.cpp
   src/media/audio_decoder.cpp
-  src/media/video_demux.cpp
+  ${ASR_VIDEO_DEMUX}
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
@@ -193,6 +211,9 @@ add_library(asr_core STATIC
   src/document/document_fold.cpp
   src/service/asr_service.cpp)
 target_include_directories(asr_core PUBLIC src)
+if(GRPC_ASR_NATIVE_DEMUX)
+  target_link_libraries(asr_core PRIVATE PkgConfig::ASR_NATIVE_FFMPEG)
+endif()
 target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
 target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}")
 target_link_libraries(asr_core
@@ -212,6 +233,11 @@ install(TARGETS grpc-asr-server RUNTIME DESTINATION bin)
 # suite stays green on a bare checkout and asserts for real when provisioned.
 # ---------------------------------------------------------------------------
 if(BUILD_TESTING)
+  # Ownership failure injection needs neither model weights nor a device.
+  add_executable(state-ownership-test tests/state_ownership_test.cpp)
+  target_include_directories(state-ownership-test PRIVATE src)
+  target_compile_features(state-ownership-test PRIVATE cxx_std_23)
+  add_test(NAME state-ownership-test COMMAND state-ownership-test)
   set(GRPC_ASR_TESTS
     sniff-test
     pcm-scrub-test
@@ -228,8 +254,18 @@ if(BUILD_TESTING)
     asr-service-test)
   foreach(test_name IN LISTS GRPC_ASR_TESTS)
     string(REPLACE "-" "_" test_source "${test_name}")
+    if(GRPC_ASR_NATIVE_DEMUX AND test_name STREQUAL "video-demux-test")
+      set(test_source video_demux_native_test)
+    endif()
     add_executable(${test_name} "tests/${test_source}.cpp")
     target_link_libraries(${test_name} PRIVATE asr_core asr_flags)
+    if(GRPC_ASR_NATIVE_DEMUX AND test_name STREQUAL "video-demux-test")
+      target_link_libraries(${test_name} PRIVATE PkgConfig::ASR_NATIVE_FFMPEG)
+    endif()
+    if(GRPC_ASR_NATIVE_DEMUX AND test_name STREQUAL "asr-service-test")
+      target_compile_definitions(${test_name} PRIVATE GRPC_ASR_TEST_NATIVE_DEMUX=1)
+      target_link_libraries(${test_name} PRIVATE PkgConfig::ASR_NATIVE_FFMPEG)
+    endif()
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
   if(NOT GRPC_ASR_SYSTEM_GRPC)
@@ -241,6 +277,7 @@ if(BUILD_TESTING)
     list(APPEND GRPC_ASR_TESTS grpc-openssl-test)
   endif()
   add_custom_target(grpc-asr-tests DEPENDS ${GRPC_ASR_TESTS})
+  add_dependencies(grpc-asr-tests state-ownership-test)
   # 300 is generous on native hardware (asr-service-test finishes in ~3s);
   # QEMU-emulated arm64 image builds override it, whisper inference there
   # runs two orders of magnitude slower.
@@ -251,6 +288,16 @@ if(BUILD_TESTING)
   set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
+  if(GRPC_ASR_NATIVE_DEMUX)
+    add_test(NAME native-media-timeline-rpc-test COMMAND asr-service-test)
+    set_tests_properties(native-media-timeline-rpc-test PROPERTIES
+      TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr SKIP_RETURN_CODE 77
+      ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_TEST_BACKEND=cpu;GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY=1")
+    if((GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER) OR
+       (GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME))
+      set_tests_properties(native-media-timeline-rpc-test PROPERTIES DISABLED TRUE)
+    endif()
+  endif()
   # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
   # they carry a load-time dependency on the driver library. video-demux-test
   # never references whisper symbols and links clean without it.
@@ -290,3 +337,7 @@ if(BUILD_TESTING)
     set_tests_properties(stream-backend-test PROPERTIES DISABLED TRUE)
   endif()
 endif()
+
+# Explicit native-device probe; it supplements, never replaces, the RPC suite.
+add_executable(sycl-whisper-probe EXCLUDE_FROM_ALL tools/sycl_whisper_probe.cpp)
+target_link_libraries(sycl-whisper-probe PRIVATE whisper)

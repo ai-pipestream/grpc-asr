@@ -257,7 +257,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 return {grpc::StatusCode::INVALID_ARGUMENT,
                         "the media has no audio track to transcribe"};
             }
-            if (probe.duration_ms > max_duration_ms) {
+            if (std::max(probe.duration_ms, probe.duration_lower_bound_ms) > max_duration_ms) {
                 return {grpc::StatusCode::RESOURCE_EXHAUSTED,
                         "media duration exceeds GRPC_ASR_MAX_DURATION_SECONDS=" +
                             std::to_string(config_.max_duration_seconds)};
@@ -526,8 +526,9 @@ grpc::Status AsrServiceImpl::Transcribe(
     // With the upload in, a gone client surfaces only as a failed write,
     // and the worker can go minutes without one: a silent stretch, a
     // queue, the video probes. Watch the call instead, so a cancel or a
-    // passed deadline (gRPC cancels the call at its deadline) stops the
-    // work within one interval.
+    // passed deadline (gRPC cancels the call at its deadline) requests stop
+    // within one watcher interval. Completion is cooperative: worker.join()
+    // below still waits for the current engine/decoder work to finish.
     {
         std::unique_lock<std::mutex> lock(worker_mutex);
         while (!worker_finished.wait_for(lock, kCallWatchInterval, [&] { return worker_done; })) {

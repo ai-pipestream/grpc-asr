@@ -23,6 +23,9 @@ class ToolError : public std::runtime_error {
 struct ProbeInfo {
     // Declared container duration, 0 when unknown.
     uint64_t duration_ms = 0;
+    // Confirmed media endpoint even when total duration is unknown. Admission
+    // must enforce this lower bound independently of the declared duration.
+    uint64_t duration_lower_bound_ms = 0;
     // True when the container has at least one audio stream.
     bool has_audio = false;
     // Audio codec name ("aac", "opus", ...), empty without audio.
@@ -38,7 +41,10 @@ struct ProbeInfo {
 };
 
 // Demuxes a video container held in memory through ffmpeg without ever
-// touching a filesystem: the encoded bytes live in a sealed memfd
+// touching a filesystem. On macOS, native FFmpeg reads a seekable memory
+// buffer, emits PCM/PNG directly, and never starts child tools. Its keyframe
+// timestamps are the sampled source frame times. On Linux by default,
+// the encoded bytes live in a sealed memfd
 // (anonymous RAM file, seekable, so mp4 trailing-moov layouts work), and
 // every child reads it via /dev/fd. The memfd and the children's pipes are
 // close-on-exec, so concurrent streams never inherit each other's. PCM and

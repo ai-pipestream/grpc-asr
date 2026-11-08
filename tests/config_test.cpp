@@ -19,7 +19,7 @@ namespace {
 void clear_env() {
     for (const char* name :
          {"GRPC_ASR_LISTEN_ADDRESS", "GRPC_ASR_BACKEND", "GRPC_ASR_CUDA_DEVICE",
-          "GRPC_ASR_OPENVINO_DEVICE",
+          "GRPC_ASR_OPENVINO_DEVICE", "GRPC_ASR_SYCL_DEVICE", "GRPC_ASR_METAL_DEVICE",
           "GRPC_ASR_MODELS_DIR", "GRPC_ASR_MODELS", "GRPC_ASR_CONCURRENCY",
           "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
@@ -91,6 +91,17 @@ void verify_overrides() {
     require(config.openvino_device == "NPU", "OpenVINO device override");
 }
 
+void verify_sycl() {
+    clear_env();
+    ::setenv("GRPC_ASR_BACKEND", "sycl", 1);
+    ::setenv("GRPC_ASR_SYCL_DEVICE", "2", 1);
+    const auto config = load_config_from_env();
+    require(config.backend == "sycl" && config.sycl_device == 2, "SYCL backend and device selection");
+    require(rejects("GRPC_ASR_SYCL_DEVICE", "-1"), "negative SYCL device rejected");
+    require(rejects("GRPC_ASR_SYCL_DEVICE", "64"), "out of range SYCL device rejected");
+    require(rejects("GRPC_ASR_SYCL_DEVICE", "0x"), "invalid SYCL device rejected");
+}
+
 void verify_models_list() {
     clear_env();
     ::setenv("GRPC_ASR_MODELS", " tiny.en , large-v3 ,", 1);
@@ -101,7 +112,14 @@ void verify_models_list() {
 }
 
 void verify_rejects() {
-    require(rejects("GRPC_ASR_BACKEND", "metal"), "unknown backend fails loud");
+    require(rejects("GRPC_ASR_BACKEND", "unknown"), "unknown backend fails loud");
+    clear_env();
+    ::setenv("GRPC_ASR_BACKEND", "metal", 1);
+    ::setenv("GRPC_ASR_METAL_DEVICE", "1", 1);
+    require(load_config_from_env().backend == "metal", "explicit Metal backend accepted");
+    require(load_config_from_env().metal_device == 1, "Metal device override");
+    require(rejects("GRPC_ASR_METAL_DEVICE", "-1"), "negative Metal device rejected");
+    require(rejects("GRPC_ASR_METAL_DEVICE", "64"), "out-of-range Metal device rejected");
     require(rejects("GRPC_ASR_MODELS", " , "), "a models list naming no models fails loud");
     require(rejects("GRPC_ASR_CONCURRENCY", "0"), "below-minimum concurrency fails loud");
     require(rejects("GRPC_ASR_CONCURRENCY", "65"), "above-maximum concurrency fails loud");
@@ -136,6 +154,7 @@ void verify_metrics_can_be_disabled() {
 int main() {
     try {
         verify_defaults();
+        verify_sycl();
         verify_overrides();
         verify_models_list();
         verify_rejects();

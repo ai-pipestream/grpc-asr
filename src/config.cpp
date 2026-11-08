@@ -80,11 +80,14 @@ Config load_config_from_env() {
     Config config;
     config.listen_address = configured_string("GRPC_ASR_LISTEN_ADDRESS", config.listen_address);
     config.backend = configured_string("GRPC_ASR_BACKEND", config.backend);
-    if (config.backend != "cuda" && config.backend != "openvino" && config.backend != "cpu") {
-        throw std::invalid_argument("GRPC_ASR_BACKEND must be cuda, openvino, or cpu");
+    if (config.backend != "cuda" && config.backend != "openvino" && config.backend != "cpu" && config.backend != "sycl" && config.backend != "metal") {
+        throw std::invalid_argument("GRPC_ASR_BACKEND must be cuda, sycl, metal, openvino, or cpu");
     }
+    config.sycl_device = static_cast<int>(configured_size("GRPC_ASR_SYCL_DEVICE", 0, 0, 63));
     config.cuda_device =
         static_cast<int>(configured_size("GRPC_ASR_CUDA_DEVICE", 0, 0, 63));
+    config.metal_device =
+        static_cast<int>(configured_size("GRPC_ASR_METAL_DEVICE", 0, 0, 63));
     config.openvino_device = configured_string("GRPC_ASR_OPENVINO_DEVICE", config.openvino_device);
     config.models_dir = configured_string("GRPC_ASR_MODELS_DIR", config.models_dir);
     config.models = configured_list("GRPC_ASR_MODELS");

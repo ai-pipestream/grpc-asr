@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.28
+# Intel SYCL, amd64 only. Device qualification is a separate runtime gate.
+ARG ONEAPI_IMAGE=intel/oneapi-basekit:2025.3.2-0-devel-ubuntu24.04@sha256:79a5e333ff6f773793d124b78047001c51cbcd53035e5100313abf2f771af95a
+ARG UBUNTU_IMAGE=ubuntu:26.10@sha256:262df65c0ec6bf8d9dcc87454f4330a05fae4b97825f45854af3b136666584c2
+FROM ${ONEAPI_IMAGE} AS oneapi
+FROM ${UBUNTU_IMAGE} AS build
+ARG BUILD_JOBS=2
+RUN case "$BUILD_JOBS" in ''|*[!0-9]*|0*) echo "BUILD_JOBS must be a positive integer" >&2; exit 1;; esac
+COPY --from=oneapi /opt/intel/oneapi /opt/intel/oneapi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates cmake curl g++ git ninja-build pkg-config libssl-dev libze-dev libcurl4-openssl-dev nasm xz-utils zlib1g-dev libopenh264-dev ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-c"]
+WORKDIR /src
+COPY . .
+RUN BUILD_JOBS="$BUILD_JOBS" scripts/build-ffmpeg.sh /opt/ffmpeg
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
+RUN set -e; source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 \
+    && cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
+      -DGRPC_ASR_SYCL=ON \
+    && cmake --build /build --target grpc-asr-server config-test --parallel "$BUILD_JOBS" \
+    && /build/config-test
+FROM ${UBUNTU_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 libssl4 libgomp1 libcurl4t64 libopenh264-8 libze1=1.32.0-1 \
+    libze-intel-gpu1=26.27.39122.14-1 intel-opencl-icd=26.27.39122.14-1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=oneapi /opt/intel/oneapi/compiler/2025.3/lib /opt/intel/oneapi/compiler/2025.3/lib
+COPY --from=oneapi /opt/intel/oneapi/mkl/2025.3/lib /opt/intel/oneapi/mkl/2025.3/lib
+COPY --from=oneapi /opt/intel/oneapi/tbb/2022.3/lib /opt/intel/oneapi/tbb/2022.3/lib
+COPY --from=oneapi /opt/intel/oneapi/tcm/1.4/lib /opt/intel/oneapi/tcm/1.4/lib
+COPY --from=oneapi /opt/intel/oneapi/umf/1.0/lib /opt/intel/oneapi/umf/1.0/lib
+COPY --from=build /build/grpc-asr-server /usr/local/bin/grpc-asr-server
+COPY --from=build /opt/ffmpeg /opt/ffmpeg
+COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
+ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib:/opt/intel/oneapi/compiler/2025.3/lib:/opt/intel/oneapi/mkl/2025.3/lib:/opt/intel/oneapi/tbb/2022.3/lib/intel64/gcc4.8:/opt/intel/oneapi/tcm/1.4/lib:/opt/intel/oneapi/umf/1.0/lib \
+    ONEAPI_DEVICE_SELECTOR=level_zero:gpu \
+    GRPC_ASR_BACKEND=sycl GRPC_ASR_SYCL_DEVICE=0 \
+    GRPC_ASR_LISTEN_ADDRESS=0.0.0.0:50055 GRPC_ASR_MODELS_DIR=/models \
+    PATH=/opt/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    GRPC_ASR_FFMPEG=/opt/ffmpeg/bin/ffmpeg GRPC_ASR_FFPROBE=/opt/ffmpeg/bin/ffprobe \
+    HOME=/tmp SYCL_CACHE_PERSISTENT=1 SYCL_CACHE_DIR=/tmp/sycl-cache
+USER 65532:65532
+EXPOSE 50055
+ENTRYPOINT ["/usr/local/bin/grpc-asr-server"]

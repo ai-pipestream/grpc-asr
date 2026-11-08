@@ -7,6 +7,8 @@
 // (whisper.cpp's samples/jfk.wav); skips with 77 otherwise.
 
 #include "engine/transcriber.h"
+#include "engine/model_pool.h"
+#include <filesystem>
 
 #include <algorithm>
 #include <cctype>
@@ -73,8 +75,8 @@ Collected run_over(const std::string& media, const EngineOptions& options) {
 
 void verify_jfk(const std::string& jfk) {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
-    options.threads = 4;
     // jfk.wav is ~11s; a 10s window forces at least two windows, which is
     // what makes the anti-batch assertion meaningful.
     options.window_seconds = 10;
@@ -123,6 +125,7 @@ void verify_jfk(const std::string& jfk) {
 
 void verify_word_timestamps(const std::string& jfk) {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.word_timestamps = true;
     options.window_seconds = 30;
@@ -142,6 +145,7 @@ void verify_word_timestamps(const std::string& jfk) {
 
 void verify_speaker_labels(const std::string& jfk) {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 30;
     Collected quiet = run_over(jfk, options);
@@ -167,6 +171,7 @@ void verify_speaker_labels(const std::string& jfk) {
 
 void verify_silence() {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 30;
     Collected collected = run_over(make_wav(12.0, 0.0), options);
@@ -196,6 +201,69 @@ std::vector<float> decode_pcm(const std::string& media) {
     return pcm;
 }
 
+void verify_valid_pcm_bounds(const std::string& jfk) {
+    const auto speech = decode_pcm(jfk);
+    struct Published { EngineSegment segment; bool final; uint64_t available_ms; };
+    for (size_t window : {size_t{10}, size_t{30}}) {
+        for (size_t delay_ms : {size_t{0}, size_t{500}}) {
+            // Leading silence is an authored delay, not extra trailing audio
+            // added to conceal Whisper's padded-window timestamp overshoot.
+            std::vector<float> pcm(delay_ms * asr::media::kModelSampleRate / 1000, 0.0f);
+            pcm.insert(pcm.end(), speech.begin(), speech.end());
+            const uint64_t duration_ms = pcm.size() * 1000ULL / asr::media::kModelSampleRate;
+            for (bool words : {false, true}) {
+                EngineOptions options;
+                options.language = "en"; options.threads = 2;
+                options.window_seconds = window; options.word_timestamps = words;
+                size_t position = 0;
+                std::vector<Published> events;
+                auto result = Transcriber::run(g_ctx, g_state, options,
+                    [&](float* out, size_t maximum) {
+                        const auto count = std::min(maximum, pcm.size() - position);
+                        std::copy_n(pcm.data() + position, count, out); position += count;
+                        return count;
+                    }, [&](const EngineSegment& segment, bool final) {
+                        events.push_back({segment, final, position * 1000ULL / asr::media::kModelSampleRate});
+                        return true;
+                    });
+                require(result.duration_ms == duration_ms, "trailer retains actual unpadded PCM duration");
+                std::string text;
+                uint64_t previous_start = 0;
+                for (const auto& event : events) {
+                    const auto& segment = event.segment;
+                    require(segment.start_ms <= segment.end_ms && segment.end_ms <= event.available_ms,
+                        "published PCM bounds: start=" + std::to_string(segment.start_ms) +
+                        " end=" + std::to_string(segment.end_ms) + " available=" + std::to_string(event.available_ms));
+                    uint64_t word_start = segment.start_ms;
+                    for (const auto& word : segment.words) {
+                        require(word.start_ms >= word_start && word.start_ms <= word.end_ms &&
+                                word.end_ms <= segment.end_ms, "words stay ordered inside the bounded segment");
+                        word_start = word.start_ms;
+                    }
+                    if (event.final) {
+                        require(segment.start_ms >= previous_start, "bounded final times remain ordered");
+                        previous_start = segment.start_ms; text += segment.text;
+                    }
+                }
+                const auto normalized = lower(text);
+                // The unchanged tiny.en baseline repeats "you You" when the
+                // 500 ms delayed fixture crosses a 10 s window. Retain that
+                // decoder output; clipping timestamps must not rewrite text.
+                const bool closing_phrase =
+                    normalized.find("what you can do for your country") != std::string::npos ||
+                    (window == 10 && delay_ms == 500 &&
+                     normalized.find("what you you can do for your country") != std::string::npos);
+                require(normalized.find("my fellow americans") != std::string::npos &&
+                        normalized.find("what your country can do for you") != std::string::npos &&
+                        closing_phrase,
+                        "bounded timestamps retain the known JFK transcript: " + text);
+                std::println("valid PCM bounds PASS window={} delay_ms={} words={} duration_ms={} text={}",
+                             window, delay_ms, words, result.duration_ms, text);
+            }
+        }
+    }
+}
+
 void verify_empty_windows_before_speech(const std::string& jfk) {
     // 25 s of low hiss, then the spoken fixture, through 10 s windows.
     // whisper's no-speech gate decodes a speech-free window like the
@@ -209,6 +277,7 @@ void verify_empty_windows_before_speech(const std::string& jfk) {
     const size_t total = lead_in + speech.size();
     const uint64_t total_ms = total * 1000ULL / asr::media::kModelSampleRate;
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 10;
     std::vector<EngineSegment> finals;
@@ -259,6 +328,7 @@ void verify_empty_windows_before_speech(const std::string& jfk) {
 
 void verify_duration_cap() {
     EngineOptions options;
+    options.threads = 2;
     options.language = "en";
     options.window_seconds = 10;
     options.max_duration_seconds = 5;
@@ -284,14 +354,25 @@ int main() {
         return missing_model_input("no fixture wav at $GRPC_ASR_TEST_SAMPLE");
     }
 
-    whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = false;
-    g_ctx = whisper_init_from_file_with_params_no_state(model, cparams);
-    require(g_ctx != nullptr, "model loads");
-    g_state = whisper_init_state(g_ctx);
-    require(g_state != nullptr, "state allocates");
-
     try {
+        asr::Config config;
+        config.backend = "cpu";
+        if (const char* backend = env_or_null("GRPC_ASR_TEST_BACKEND")) config.backend = backend;
+        require(config.backend == "cpu" || config.backend == "cuda" ||
+                config.backend == "sycl" || config.backend == "metal",
+                "test backend must be cpu, cuda, sycl or metal");
+        const std::filesystem::path model_path(model);
+        const auto filename = model_path.filename().string();
+        require(filename.starts_with("ggml-") && filename.ends_with(".bin"),
+                "test model must use the ggml-NAME.bin pool naming convention");
+        const auto name = filename.substr(5, filename.size() - 9);
+        config.models_dir = model_path.parent_path().string();
+        config.models = {name}; config.concurrency = 1; config.threads = 2;
+        asr::engine::ModelPool pool(config);
+        auto lease = pool.acquire(name);
+        g_ctx = lease.context(); g_state = lease.state();
+        std::println("transcriber-test requested backend={}", config.backend);
+        verify_valid_pcm_bounds(jfk);
         verify_jfk(jfk);
         verify_word_timestamps(jfk);
         verify_speaker_labels(jfk);
@@ -302,8 +383,6 @@ int main() {
         std::println(stderr, "{}", error.what());
         return 1;
     }
-    whisper_free_state(g_state);
-    whisper_free(g_ctx);
     std::println("transcriber-test passed");
     return 0;
 }
