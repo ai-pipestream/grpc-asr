@@ -15,6 +15,10 @@
 #include "ggml-backend.h"
 #include "whisper.h"
 
+// Small pinned-source extension: inspect the actual state's backend, not
+// merely the list of registered devices. See PatchWhisperPlacement.cmake.
+extern "C" bool asr_whisper_state_has_device(whisper_state*, ggml_backend_dev_t);
+
 namespace asr::engine {
 
 namespace {
@@ -87,6 +91,7 @@ struct ModelPool::Entry {
 
 ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
     whisper_context_params cparams = whisper_context_default_params();
+    ggml_backend_dev_t required_device = nullptr;
     if (backend_ == "cuda") {
         if (ggml_backend_reg_by_name("CUDA") == nullptr) {
             throw std::invalid_argument(
@@ -95,6 +100,26 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
         }
         cparams.use_gpu = true;
         cparams.gpu_device = config.cuda_device;
+    } else if (backend_ == "metal") {
+        int metal_index = 0;
+        int gpu_index = 0;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            auto dev = ggml_backend_dev_get(i);
+            const auto type = ggml_backend_dev_type(dev);
+            if (type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+            const std::string_view registration = ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev));
+            if (registration == "Metal" && metal_index++ == config.metal_device) {
+                required_device = dev;
+                cparams.gpu_device = gpu_index;
+                break;
+            }
+            ++gpu_index;
+        }
+        if (!required_device) {
+            throw std::invalid_argument("GRPC_ASR_BACKEND=metal: requested Metal device is unavailable; "
+                                        "build with -DGRPC_ASR_METAL=ON on native Apple Silicon");
+        }
+        cparams.use_gpu = true;
     } else {
         // cpu and openvino both run the ggml graph on CPU; openvino
         // additionally offloads the encoder and is verified per model
@@ -137,6 +162,10 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
             if (state == nullptr) {
                 throw std::runtime_error("allocating state " + std::to_string(i) +
                                          " for model '" + name + "' failed");
+            }
+            if (required_device && !asr_whisper_state_has_device(state, required_device)) {
+                whisper_free_state(state);
+                throw std::runtime_error("GRPC_ASR_BACKEND=metal: Whisper state did not initialize the selected device");
             }
             if (backend_ == "openvino") {
                 // Buffer-loaded weights do not retain a filesystem path. Pass

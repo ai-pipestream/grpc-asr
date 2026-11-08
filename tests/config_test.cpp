@@ -19,7 +19,7 @@ namespace {
 void clear_env() {
     for (const char* name :
          {"GRPC_ASR_LISTEN_ADDRESS", "GRPC_ASR_BACKEND", "GRPC_ASR_CUDA_DEVICE",
-          "GRPC_ASR_OPENVINO_DEVICE",
+          "GRPC_ASR_OPENVINO_DEVICE", "GRPC_ASR_METAL_DEVICE",
           "GRPC_ASR_MODELS_DIR", "GRPC_ASR_MODELS", "GRPC_ASR_CONCURRENCY",
           "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
@@ -101,7 +101,14 @@ void verify_models_list() {
 }
 
 void verify_rejects() {
-    require(rejects("GRPC_ASR_BACKEND", "metal"), "unknown backend fails loud");
+    require(rejects("GRPC_ASR_BACKEND", "unknown"), "unknown backend fails loud");
+    clear_env();
+    ::setenv("GRPC_ASR_BACKEND", "metal", 1);
+    ::setenv("GRPC_ASR_METAL_DEVICE", "1", 1);
+    require(load_config_from_env().backend == "metal", "explicit Metal backend accepted");
+    require(load_config_from_env().metal_device == 1, "Metal device override");
+    require(rejects("GRPC_ASR_METAL_DEVICE", "-1"), "negative Metal device rejected");
+    require(rejects("GRPC_ASR_METAL_DEVICE", "64"), "out-of-range Metal device rejected");
     require(rejects("GRPC_ASR_MODELS", " , "), "a models list naming no models fails loud");
     require(rejects("GRPC_ASR_CONCURRENCY", "0"), "below-minimum concurrency fails loud");
     require(rejects("GRPC_ASR_CONCURRENCY", "65"), "above-maximum concurrency fails loud");
