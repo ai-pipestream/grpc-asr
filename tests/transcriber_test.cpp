@@ -196,6 +196,69 @@ std::vector<float> decode_pcm(const std::string& media) {
     return pcm;
 }
 
+void verify_valid_pcm_bounds(const std::string& jfk) {
+    const auto speech = decode_pcm(jfk);
+    struct Published { EngineSegment segment; bool final; uint64_t available_ms; };
+    for (size_t window : {size_t{10}, size_t{30}}) {
+        for (size_t delay_ms : {size_t{0}, size_t{500}}) {
+            // Leading silence is an authored delay, not extra trailing audio
+            // added to conceal Whisper's padded-window timestamp overshoot.
+            std::vector<float> pcm(delay_ms * asr::media::kModelSampleRate / 1000, 0.0f);
+            pcm.insert(pcm.end(), speech.begin(), speech.end());
+            const uint64_t duration_ms = pcm.size() * 1000ULL / asr::media::kModelSampleRate;
+            for (bool words : {false, true}) {
+                EngineOptions options;
+                options.language = "en"; options.threads = 2;
+                options.window_seconds = window; options.word_timestamps = words;
+                size_t position = 0;
+                std::vector<Published> events;
+                auto result = Transcriber::run(g_ctx, g_state, options,
+                    [&](float* out, size_t maximum) {
+                        const auto count = std::min(maximum, pcm.size() - position);
+                        std::copy_n(pcm.data() + position, count, out); position += count;
+                        return count;
+                    }, [&](const EngineSegment& segment, bool final) {
+                        events.push_back({segment, final, position * 1000ULL / asr::media::kModelSampleRate});
+                        return true;
+                    });
+                require(result.duration_ms == duration_ms, "trailer retains actual unpadded PCM duration");
+                std::string text;
+                uint64_t previous_start = 0;
+                for (const auto& event : events) {
+                    const auto& segment = event.segment;
+                    require(segment.start_ms <= segment.end_ms && segment.end_ms <= event.available_ms,
+                        "published PCM bounds: start=" + std::to_string(segment.start_ms) +
+                        " end=" + std::to_string(segment.end_ms) + " available=" + std::to_string(event.available_ms));
+                    uint64_t word_start = segment.start_ms;
+                    for (const auto& word : segment.words) {
+                        require(word.start_ms >= word_start && word.start_ms <= word.end_ms &&
+                                word.end_ms <= segment.end_ms, "words stay ordered inside the bounded segment");
+                        word_start = word.start_ms;
+                    }
+                    if (event.final) {
+                        require(segment.start_ms >= previous_start, "bounded final times remain ordered");
+                        previous_start = segment.start_ms; text += segment.text;
+                    }
+                }
+                const auto normalized = lower(text);
+                // The unchanged tiny.en baseline repeats "you You" when the
+                // 500 ms delayed fixture crosses a 10 s window. Retain that
+                // decoder output; clipping timestamps must not rewrite text.
+                const bool closing_phrase =
+                    normalized.find("what you can do for your country") != std::string::npos ||
+                    (window == 10 && delay_ms == 500 &&
+                     normalized.find("what you you can do for your country") != std::string::npos);
+                require(normalized.find("my fellow americans") != std::string::npos &&
+                        normalized.find("what your country can do for you") != std::string::npos &&
+                        closing_phrase,
+                        "bounded timestamps retain the known JFK transcript: " + text);
+                std::println("valid PCM bounds PASS window={} delay_ms={} words={} duration_ms={} text={}",
+                             window, delay_ms, words, result.duration_ms, text);
+            }
+        }
+    }
+}
+
 void verify_empty_windows_before_speech(const std::string& jfk) {
     // 25 s of low hiss, then the spoken fixture, through 10 s windows.
     // whisper's no-speech gate decodes a speech-free window like the
@@ -292,6 +355,7 @@ int main() {
     require(g_state != nullptr, "state allocates");
 
     try {
+        verify_valid_pcm_bounds(jfk);
         verify_jfk(jfk);
         verify_word_timestamps(jfk);
         verify_speaker_labels(jfk);
