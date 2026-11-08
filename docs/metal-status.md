@@ -11,7 +11,7 @@ Local Linux checks: config-test passed; model_pool.cpp passed a C++23
 syntax check against the pinned Whisper headers; configuring Metal on Linux
 failed as required. These do not qualify Metal.
 
-Native Mac RPC tests are pending. The complete server and tests built at
+Native Mac RPC qualification passed for tiny.en and the JFK fixture. The complete server and tests built at
 `17b85d25071c6d395ae9cceb8fb062d6c5d42270` with Apple Clang 21, system
 gRPC 1.85.1 and Protobuf 36.2. `file` identifies the server as Mach-O arm64.
 Eight selected non-model tests passed in 3.05 seconds: sniff, PCM scrub,
@@ -48,10 +48,21 @@ decoders and set before codec open, with a 16-million-pixel frame check too.
 The default Linux subprocess path and the separate media HTTP allowlist are
 unchanged. macOS uses no request files, child tools, or nested protocol opens.
 
-Remaining work includes per-stage executed
-graph inspection; real transcript and timestamp assertions; cancellation/recovery;
-and repeated warm requests against the same Mac's CPU baseline. No Metal
-performance, full-stage offload or actual-device correctness is claimed.
+The full loopback RPC suite passed separately with Metal and explicit CPU,
+including five warm requests, streaming during upload, transcript/timestamp
+checks, silence, cancelled/deadline/queued requests, recovery, video keyframes,
+Opus/Vorbis, limits and startup failures. Metal stage traces were checked:
+161 convolution, 161 encoder, 161 cross-attention and 1338 decoder records,
+all with positive GPU operations and zero CPU/other operations. CPU records
+had zero GPU operations; the trace labels some CPU BLAS operations as `other`.
+
+Median warm JFK RPC latency was 158.021 ms on Metal versus 438.256 ms on
+explicit CPU (2.7734x), same binary/model, two threads, sequential suites.
+This is a narrow tiny.en fixture comparison, not a general ASR performance
+claim. A separate production-server TCP RPC returned both expected JFK
+phrases, final segment intervals 0–8000 and 8000–11000 ms, and 22 word timings.
+Raw outputs, compressed complete logs and measured samples are retained in
+[`receipts/metal-m2-20261108`](receipts/metal-m2-20261108/summary.json).
 
 Run `scripts/build-macos-metal.sh` on the native macOS host, then
 `scripts/run-macos-metal.sh /absolute/read-only/models tiny.en`. The latter
