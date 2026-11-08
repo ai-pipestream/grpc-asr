@@ -3,6 +3,7 @@
 #include "cancellation.h"
 #include "fixture.h"
 #include "native_media_fixture.h"
+#include "media/native_memory_seek.h"
 #include <array>
 #include <stop_token>
 
@@ -15,6 +16,13 @@ VideoDemux open_native(const std::string& bytes) {
 }
 int main() {
     try {
+        size_t position = 7;
+        require(asr::media::native_memory_seek(100, position, 0, AVSEEK_SIZE | AVSEEK_FORCE) == 100 && position == 7,
+                "forced size query returns length without moving cursor");
+        require(asr::media::native_memory_seek(100, position, -2, SEEK_END | AVSEEK_FORCE) == 98,
+                "forced end-relative seek");
+        require(asr::media::native_memory_seek(100, position, 3, SEEK_CUR) < 0 && position == 98,
+                "out-of-bounds seek preserves cursor");
         const auto wav = make_wav(1.0, 440, 48000);
         for (int repeat = 0; repeat < 3; ++repeat) {
             auto media = open_native(wav);
