@@ -1,0 +1,69 @@
+whisper_init_from_buffer_with_params_no_state: loading model from buffer
+whisper_init_with_params_no_state: use gpu    = 0
+whisper_init_with_params_no_state: flash attn = 1
+whisper_init_with_params_no_state: gpu_device = 0
+whisper_init_with_params_no_state: dtw        = 0
+whisper_init_with_params_no_state: devices    = 1
+whisper_init_with_params_no_state: backends   = 1
+whisper_model_load: loading model
+whisper_model_load: n_vocab       = 51864
+whisper_model_load: n_audio_ctx   = 1500
+whisper_model_load: n_audio_state = 384
+whisper_model_load: n_audio_head  = 6
+whisper_model_load: n_audio_layer = 4
+whisper_model_load: n_text_ctx    = 448
+whisper_model_load: n_text_state  = 384
+whisper_model_load: n_text_head   = 6
+whisper_model_load: n_text_layer  = 4
+whisper_model_load: n_mels        = 80
+whisper_model_load: ftype         = 1
+whisper_model_load: qntvr         = 0
+whisper_model_load: type          = 1 (tiny)
+whisper_model_load: adding 1607 extra tokens
+whisper_model_load: n_langs       = 99
+whisper_model_load:          CPU total size =    77.11 MB
+whisper_model_load: model size    =   77.11 MB
+whisper_backend_init_gpu: no GPU found
+whisper_init_state: kv self size  =    3.15 MB
+whisper_init_state: kv cross size =    9.44 MB
+whisper_init_state: kv pad  size  =    2.36 MB
+whisper_init_state: compute buffer (conv)   =   13.21 MB
+whisper_init_state: compute buffer (encode) =   17.72 MB
+whisper_init_state: compute buffer (cross)  =    3.89 MB
+whisper_init_state: compute buffer (decode) =   95.91 MB
+grpc-asr placement stage=conv cpu_ops=8 gpu_ops=0 other_ops=0
+grpc-asr placement stage=encoder cpu_ops=97 gpu_ops=0 other_ops=0
+grpc-asr placement stage=cross cpu_ops=24 gpu_ops=0 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=144 gpu_ops=0 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=144 gpu_ops=0 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=144 gpu_ops=0 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=144 gpu_ops=0 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=144 gpu_ops=0 other_ops=0
+grpc-asr placement stage=decoder cpu_ops=144 gpu_ops=0 other_ops=0
+FAIL: known 3500ms endpoint exceeds 3000ms cap despite unknown total; status=0 
+grpc-asr model loaded: tiny.en (1 state(s), backend cpu)
+grpc-asr backend: cpu (GRPC_ASR_BACKEND=cpu)
+Command exited with non-zero status 1
+	Command being timed: "timeout 240s nice -n10 build-rpc-cpu/asr-service-test"
+	User time (seconds): 0.85
+	System time (seconds): 0.18
+	Percent of CPU this job got: 153%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.67
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 203096
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 129840
+	Voluntary context switches: 738
+	Involuntary context switches: 193
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 1

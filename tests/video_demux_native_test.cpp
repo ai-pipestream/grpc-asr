@@ -125,9 +125,32 @@ void verify_timeline_origins() {
     }
     require(failures == 0, "timeline origin regression cases: " + std::to_string(failures) + " failed");
 }
+void verify_unknown_duration_lower_bound() {
+    for (int origin : {10, -1}) for (bool absolute : {false, true}) {
+        const auto bytes = unknown_duration_fixture(origin, absolute);
+        verify_unknown_duration_fixture(bytes, origin, absolute);
+        auto media = open_native(bytes);
+        const auto info = media.probe();
+        require(info.duration_ms == 0 && info.duration_lower_bound_ms == 3500,
+                "unknown duration preserves confirmed 3.5s endpoint for admission");
+        media.open_audio();
+        std::array<float, 513> samples;
+        size_t count = 0;
+        while (auto n = media.read_audio(samples.data(), samples.size())) count += n;
+        require(count == 32000, "short 2s audio cannot detect the 3.5s video endpoint");
+        std::vector<uint64_t> times;
+        media.extract_keyframes(1, [&](uint64_t ms, uint32_t, uint32_t, std::string) {
+            times.push_back(ms); return true;
+        });
+        require(times == std::vector<uint64_t>{500,1500,2500}, "late video retains shared timeline");
+        std::println("duration_lower_bound PASS origin={} absolute_metadata={} known_ms={}",
+                     origin, absolute, info.duration_lower_bound_ms);
+    }
+}
 int main(int argc, char**) {
     try {
         verify_timeline_origins();
+        verify_unknown_duration_lower_bound();
         if (argc > 1) return 0;
         size_t position = 7;
         require(asr::media::native_memory_seek(100, position, 0, AVSEEK_SIZE | AVSEEK_FORCE) == 100 && position == 7,
