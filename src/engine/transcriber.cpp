@@ -257,6 +257,9 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
         run.window_base_ms += cut.resume_ms;
     }
 
+    // This is consumed PCM duration, including initial media-relative padding.
+    // Container/video duration belongs to MediaInfo; keyframes may extend past
+    // the audio endpoint and are joined before the service emits Complete.
     result.duration_ms = consumed_samples * 1000ULL / kModelSampleRate;
     return result;
 }
