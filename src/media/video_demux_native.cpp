@@ -181,7 +181,7 @@ int64_t relative_time_us(int64_t timestamp, AVRational time_base, int64_t origin
 // authored Matroska may store the absolute endpoint). For a nonzero origin,
 // measure the packet endpoint on the common timeline rather than blindly
 // subtracting start_time from a duration that may already be relative.
-uint64_t relative_duration_ms(Input& input, int64_t origin) {
+void measure_relative_duration(Input& input, int64_t origin, ProbeInfo& info) {
     auto free_packet = [](AVPacket* packet) { av_packet_free(&packet); };
     std::unique_ptr<AVPacket, decltype(free_packet)> packet(av_packet_alloc(), free_packet);
     if (!packet) throw std::bad_alloc();
@@ -193,11 +193,16 @@ uint64_t relative_duration_ms(Input& input, int64_t origin) {
         input.cancelled();
         const auto* stream = input.format->streams[packet->stream_index];
         if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO || stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            if (packet->pts == AV_NOPTS_VALUE || packet->duration <= 0) {
+            if (packet->pts == AV_NOPTS_VALUE) {
                 unknown = true;
             } else {
                 const int64_t start = relative_time_us(packet->pts, stream->time_base, origin);
-                const int64_t duration = timestamp_us(packet->duration, stream->time_base);
+                // A known PTS still establishes a lower bound when this
+                // packet's duration is unavailable. Unknown packets cannot
+                // erase endpoints established by other packets or streams.
+                const int64_t duration = packet->duration > 0
+                    ? timestamp_us(packet->duration, stream->time_base) : 0;
+                unknown |= packet->duration <= 0;
                 if (start > INT64_MAX - duration) throw DecodeError("native media duration exceeds range");
                 end_us = std::max(end_us, start + duration);
                 timed = true;
@@ -208,7 +213,8 @@ uint64_t relative_duration_ms(Input& input, int64_t origin) {
     input.cancelled();
     if (result != AVERROR_EOF) check(result, "native duration scan failed");
     // No fabricated endpoint when a packet's timing cannot be established.
-    return timed && !unknown ? static_cast<uint64_t>(end_us / 1000) : 0;
+    info.duration_lower_bound_ms = timed ? static_cast<uint64_t>(end_us / 1000) : 0;
+    info.duration_ms = timed && !unknown ? info.duration_lower_bound_ms : 0;
 }
 struct Audio {
     Track track;
@@ -299,8 +305,8 @@ ProbeInfo VideoDemux::probe(std::stop_token stop) {
         }
     }
     const int64_t origin = media_origin_us(input.format);
-    if (origin != 0 && (info.has_audio || info.has_video))
-        info.duration_ms = relative_duration_ms(input, origin);
+    if ((origin != 0 || info.duration_ms == 0) && (info.has_audio || info.has_video))
+        measure_relative_duration(input, origin, info);
     return info;
 }
 void VideoDemux::open_audio(std::stop_token stop) {

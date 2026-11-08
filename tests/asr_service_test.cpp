@@ -28,6 +28,9 @@
 #include "engine/model_pool.h"
 #include "fixture.h"
 #include "ggml-backend.h"
+#ifdef GRPC_ASR_TEST_NATIVE_DEMUX
+#include "native_media_fixture.h"
+#endif
 
 namespace asrv1 = ai::pipestream::asr::v1;
 
@@ -761,6 +764,31 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
 }
 
 #ifdef GRPC_ASR_TEST_NATIVE_DEMUX
+void verify_native_duration_cap(asr::Config config, asr::engine::ModelPool& pool) {
+    config.max_duration_seconds = 3;
+    asr::AsrServiceImpl service(config, pool);
+    int port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    require(server != nullptr, "duration cap server started");
+    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                       grpc::InsecureChannelCredentials());
+    for (int origin : {10, -1}) for (bool absolute : {false, true}) {
+        const auto bytes = unknown_duration_fixture(origin, absolute);
+        verify_unknown_duration_fixture(bytes, origin, absolute);
+        const auto result = transcribe(channel, options_for("tiny.en"), bytes);
+        require(result.status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED,
+                "known 3500ms endpoint exceeds 3000ms cap despite unknown total; status=" +
+                std::to_string(result.status.error_code()) + " " + result.status.error_message());
+        require(!result.got_media_info && !result.got_complete && result.finals.empty(),
+                "duration lower bound rejected before transcription events");
+        std::println("duration_cap_rpc PASS origin={} absolute_metadata={} endpoint_ms=3500 cap_ms=3000 RESOURCE_EXHAUSTED", origin, absolute);
+    }
+    server->Shutdown();
+}
+
 void verify_native_media_timeline(const std::shared_ptr<grpc::Channel>& channel,
                                   const std::string& jfk_path) {
     // Quote the authored sample path; fixture generation is test-only.
@@ -995,6 +1023,7 @@ int main() {
         if (env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY")) {
 #ifdef GRPC_ASR_TEST_NATIVE_DEMUX
             require(have_ffmpeg(), "timeline fixtures require ffmpeg");
+            verify_native_duration_cap(config, pool);
             verify_native_media_timeline(channel, sample);
             verify_service_info(channel, config.backend);
             server->Shutdown();

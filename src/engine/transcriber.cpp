@@ -16,10 +16,6 @@ namespace {
 
 using media::kModelSampleRate;
 
-uint64_t centisec_to_ms(int64_t t) {
-    return static_cast<uint64_t>(t) * 10ULL;
-}
-
 // State shared between the whisper callbacks and the window loop.
 struct RunState {
     whisper_context* ctx = nullptr;
@@ -27,6 +23,8 @@ struct RunState {
     const Transcriber::SegmentSink* sink = nullptr;
     // Absolute media time of the current window's first sample.
     uint64_t window_base_ms = 0;
+    // Valid PCM endpoint, excluding Whisper's internal/minimum-input padding.
+    uint64_t window_end_ms = 0;
     // Global index of the current window's segment 0.
     uint32_t window_base_index = 0;
     // Zero-based speaker of the current window's segment 0; advances by
@@ -40,15 +38,23 @@ struct RunState {
     bool stopped() const { return abort.load() || stop.stop_requested(); }
 };
 
+uint64_t bounded_time_ms(const RunState& run, int64_t centiseconds) {
+    if (centiseconds <= 0) return run.window_base_ms;
+    const uint64_t available = run.window_end_ms - run.window_base_ms;
+    const auto ticks = static_cast<uint64_t>(centiseconds);
+    // Bound before multiplying: negative/oversized native timestamps cannot
+    // wrap unsigned media time or claim samples the source never supplied.
+    return run.window_base_ms + (ticks > available / 10 ? available : ticks * 10);
+}
+
 // Builds an EngineSegment from whisper's committed segment i (window
 // relative), shifting times to absolute media time.
 EngineSegment read_segment(RunState& run, whisper_state* state, int i) {
     EngineSegment segment;
     segment.index = run.window_base_index + static_cast<uint32_t>(i);
-    segment.start_ms =
-        run.window_base_ms + centisec_to_ms(whisper_full_get_segment_t0_from_state(state, i));
-    segment.end_ms =
-        run.window_base_ms + centisec_to_ms(whisper_full_get_segment_t1_from_state(state, i));
+    segment.start_ms = bounded_time_ms(run, whisper_full_get_segment_t0_from_state(state, i));
+    segment.end_ms = std::max(segment.start_ms,
+        bounded_time_ms(run, whisper_full_get_segment_t1_from_state(state, i)));
     segment.text = whisper_full_get_segment_text_from_state(state, i);
 
     if (run.options->diarize) {
@@ -89,16 +95,22 @@ EngineSegment read_segment(RunState& run, whisper_state* state, int i) {
             word = EngineWord{};
         }
         if (word.text.empty()) {
-            word.start_ms = run.window_base_ms + centisec_to_ms(data.t0);
+            word.start_ms = bounded_time_ms(run, data.t0);
             word.probability = data.p;
         } else {
             word.probability = std::min(word.probability, data.p);
         }
-        word.end_ms = run.window_base_ms + centisec_to_ms(data.t1);
+        word.end_ms = bounded_time_ms(run, data.t1);
         word.text += text;
     }
     if (!word.text.empty()) {
         segment.words.push_back(word);
+    }
+    uint64_t previous_word_start = segment.start_ms;
+    for (auto& timed_word : segment.words) {
+        timed_word.start_ms = std::clamp(timed_word.start_ms, previous_word_start, segment.end_ms);
+        timed_word.end_ms = std::clamp(timed_word.end_ms, timed_word.start_ms, segment.end_ms);
+        previous_word_start = timed_word.start_ms;
     }
     segment.token_count = counted;
     segment.avg_logprob =
@@ -188,6 +200,9 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
             break;
         }
         const bool last_window = source_done;
+        // Decoder timestamps can extend into its padded analysis window.
+        // Both live partials and finals must stay inside actual consumed PCM.
+        run.window_end_ms = consumed_samples * 1000ULL / kModelSampleRate;
 
         // whisper refuses sub-second inputs; pad the final sliver with
         // silence rather than dropping committed speech.
@@ -223,10 +238,10 @@ EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
         // segment on the last window, all but the last otherwise, and
         // nothing from a window that decoded no segment at all.
         const int segments = whisper_full_n_segments_from_state(state);
-        const uint64_t window_ms = buffer.size() * 1000ULL / kModelSampleRate;
+        const uint64_t window_ms = run.window_end_ms - run.window_base_ms;
         const uint64_t last_start_ms =
             segments >= 2
-                ? centisec_to_ms(whisper_full_get_segment_t0_from_state(state, segments - 1))
+                ? bounded_time_ms(run, whisper_full_get_segment_t0_from_state(state, segments - 1)) - run.window_base_ms
                 : 0;
         const WindowCut cut = cut_window(segments, last_window, window_ms, last_start_ms);
 
