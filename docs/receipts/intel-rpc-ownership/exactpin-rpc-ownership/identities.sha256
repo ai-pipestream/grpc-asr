@@ -1,0 +1,5 @@
+2425cb82fff2533acf7498b129ba2839c3e63778ddeaeabbbc3b3aad9a17889e  build-intel/grpc-asr-server
+0872d1872b594c373251a1de8e056f23d426953dfb913b203d443fd313589f1f  build-intel/asr-service-test
+5bb518beb0defd5098badee6c7c6e576f15e98a1ce7a8e233408f52ac51fccc6  build-intel/observed-whisper.cpp
+921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f  /home/krickert/parse-stack/protos/grpc-asr/models/ggml-tiny.en.bin
+59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e  /work/main/grpc-services/worktrees/grpc-asr-intel-sycl/build-intel/_deps/whisper-src/samples/jfk.wav

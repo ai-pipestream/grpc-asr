@@ -27,7 +27,16 @@ streaming, cancellation and recovery and prints five warm RPC timings. Run
 the same binary/model/fixture with `GRPC_ASR_TEST_BACKEND=cpu` for a comparable
 baseline. Missing prerequisites and any skipped tier must remain visible.
 
-Qualification receipts are added only after actual device tests finish.
+## Actual B70 RPC qualification
+
+The ownership-fixed exact-pin native server passed the common full RPC
+suite on Intel Arc Pro B70/SYCL0 and explicit CPU, including five warm
+repetitions, video/OGG, cancellation and recovery. Actual scheduler checks
+verified GPU execution without CPU graph operations in all four Whisper
+stages. A separate saved live JFK RPC passed text and timestamp assertions.
+Warm medians were 399.103 ms SYCL and 877.195 ms CPU (2.198x), with shared
+host contention. See [the receipt and limitations](receipts/intel-rpc-ownership/README.md)
+for exact source/model/binary hashes, raw proof and cold versus warm timing.
 
 ## Historical cached-source receipt, not current-pin qualification
 
