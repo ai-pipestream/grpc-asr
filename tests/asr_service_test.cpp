@@ -1009,7 +1009,8 @@ int main() {
 
     try {
         if (env_or_null("GRPC_ASR_TEST_MEDIA_TIMELINE_ONLY"))
-            require(config.backend == "cpu", "focused timeline qualification uses CPU only");
+            require(config.backend == "cpu" || config.backend == "metal",
+                    "focused timeline qualification supports explicit CPU or Metal");
         asr::engine::ModelPool pool(config);
         asr::AsrServiceImpl service(config, pool);
 
