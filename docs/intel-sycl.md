@@ -29,7 +29,7 @@ baseline. Missing prerequisites and any skipped tier must remain visible.
 
 Qualification receipts are added only after actual device tests finish.
 
-## Native model receipt, 2026-11-08
+## Historical cached-source receipt, not current-pin qualification
 
 `tools/sycl_whisper_probe.cpp` passed seven real tiny.en/JFK transcriptions,
 text and timestamp assertions, an explicitly aborted inference, and recovery
@@ -37,9 +37,12 @@ on krick-1 Arc Pro B70 (Level Zero 1.15.39122, oneAPI 2025.3.3). The same
 binary/model/fixture passed on explicit CPU. Each uses two CPU threads.
 The model SHA256 is
 `921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`.
-Whisper source pin is `d1be6fde11ac6e0407606b4e42fe72d34add8037`, with this
-repository's VAD and fail-closed/placement patches. Artifact hashes and raw
-per-run timings are under `docs/receipts/intel-native-*`.
+The initial run used an older dependency cache, not the configured
+`d1be6fde11ac6e0407606b4e42fe72d34add8037` pin. Its VAD-patched source SHA256
+was `a9ccd99e46d7fad713c442c94567eb4480bdaa6ac239643035a8ce76b4e7204a`.
+These results are historical only and cannot qualify the current service.
+Artifact hashes and raw timings are retained under
+`docs/receipts/historical-intel-native-*`. Current-pin rerun is required.
 
 Both logs passed `scripts/check-placement.sh`. GPU execution counts were
 conv 8, encoder 97, cross 24, decoder 144; CPU/other counts zero. Explicit
