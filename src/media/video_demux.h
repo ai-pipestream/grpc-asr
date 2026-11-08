@@ -38,7 +38,10 @@ struct ProbeInfo {
 };
 
 // Demuxes a video container held in memory through ffmpeg without ever
-// touching a filesystem: the encoded bytes live in a sealed memfd
+// touching a filesystem. On macOS, native FFmpeg reads a seekable memory
+// buffer, emits PCM/PNG directly, and never starts child tools. Its keyframe
+// timestamps are the sampled source frame times. On Linux by default,
+// the encoded bytes live in a sealed memfd
 // (anonymous RAM file, seekable, so mp4 trailing-moov layouts work), and
 // every child reads it via /dev/fd. The memfd and the children's pipes are
 // close-on-exec, so concurrent streams never inherit each other's. PCM and
