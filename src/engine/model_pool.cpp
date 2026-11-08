@@ -16,7 +16,7 @@
 #include "whisper.h"
 
 // Small pinned-source extension: inspect the actual state's backend, not
-// merely the list of registered devices. See PatchWhisperPlacement.cmake.
+// merely the list of registered devices. See ObserveWhisperPlacement.cmake.
 extern "C" bool asr_whisper_state_has_device(whisper_state*, ggml_backend_dev_t);
 
 namespace asr::engine {

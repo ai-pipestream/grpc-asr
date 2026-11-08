@@ -110,10 +110,9 @@ FetchContent_Declare(whisper
   URL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037
   URL_HASH SHA256=645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4)
 FetchContent_MakeAvailable(whisper)
-include(streaming/cmake/PatchWhisperVad.cmake)
+include(cmake/ObserveWhisperPlacement.cmake)
 include(streaming/cmake/PatchGgmlDepthwise.cmake)
 include(streaming/cmake/PatchParakeetContext.cmake)
-include(cmake/PatchWhisperPlacement.cmake)
 option(GRPC_ASR_QUALIFY_MODELS "Require the full speech qualification model set" OFF)
 if(GRPC_ASR_QUALIFY_MODELS)
   set(MEDIA_TEST_MODEL "${PROJECT_SOURCE_DIR}/models/ggml-tiny.en.bin" CACHE FILEPATH "" FORCE)
