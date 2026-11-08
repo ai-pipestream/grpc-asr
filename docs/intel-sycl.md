@@ -32,7 +32,7 @@ Qualification receipts are added only after actual device tests finish.
 ## Historical cached-source receipt, not current-pin qualification
 
 `tools/sycl_whisper_probe.cpp` passed seven real tiny.en/JFK transcriptions,
-text and timestamp assertions, an explicitly aborted inference, and recovery
+text and timestamp assertions, a pre-cancelled inference, and recovery
 on krick-1 Arc Pro B70 (Level Zero 1.15.39122, oneAPI 2025.3.3). The same
 binary/model/fixture passed on explicit CPU. Each uses two CPU threads.
 The model SHA256 is

@@ -83,13 +83,14 @@ int main(int argc, char** argv) {
       if (text.find("country can do for you") == std::string::npos || text.find("you can do for your country") == std::string::npos)
         throw std::runtime_error("JFK transcript assertion failed: " + text);
       std::cout << "repeat=" << repeat << " backend=" << backend << " elapsed_us=" << elapsed << " text=" << text << '\n' << std::flush;
+      // Pre-cancel smoke only; in-flight cancellation belongs to the RPC suite.
       if (repeat == 5) {
         cancelled = true;
         if (!whisper_full_with_state(ctx.get(), state.get(), params, audio.data(), static_cast<int>(audio.size())))
-          throw std::runtime_error("cancellation was ignored");
+          throw std::runtime_error("pre-cancellation was ignored");
         cancelled = false;
       }
     }
-    std::cout << "PASS real native transcript/timestamps/repeats/cancel/recovery; RPC separate\n";
+    std::cout << "PASS real native transcript/timestamps/repeats/pre-cancel/recovery; RPC separate\n";
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
