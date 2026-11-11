@@ -8,18 +8,27 @@
 
 #include "service/asr_service.h"
 
+#include <arpa/inet.h>
 #include <grpcpp/grpcpp.h>
+#include <netinet/in.h>
+#include <csignal>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <print>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -28,6 +37,8 @@
 #include "engine/model_pool.h"
 #include "fixture.h"
 #include "ggml-backend.h"
+#include "media/sniff.h"
+#include "metrics.h"
 
 namespace asrv1 = ai::pipestream::asr::v1;
 
@@ -324,6 +335,152 @@ std::string generate_media(const std::string& args, const std::string& suffix) {
     return bytes;
 }
 
+std::string http_get_metrics(uint16_t port) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    require(fd >= 0, "metrics client socket");
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    require(::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1, "inet_pton 127.0.0.1");
+    require(::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0,
+            "connect to metrics HTTP server");
+    const std::string req = "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    size_t sent = 0;
+    while (sent < req.size()) {
+        const ssize_t n = ::send(fd, req.data() + sent, req.size() - sent, MSG_NOSIGNAL);
+        require(n > 0, "send GET /metrics");
+        sent += static_cast<size_t>(n);
+    }
+    std::string raw;
+    char buf[4096];
+    while (true) {
+        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            break;
+        }
+        raw.append(buf, static_cast<size_t>(n));
+    }
+    ::close(fd);
+    require(raw.starts_with("HTTP/1.1 200 OK\r\n"), "GET /metrics returned 200 OK");
+    const size_t sep = raw.find("\r\n\r\n");
+    require(sep != std::string::npos, "HTTP header delimiter present");
+    return raw.substr(sep + 4);
+}
+
+std::optional<double> scrape_metric_value(const std::string& body, std::string_view series_name) {
+    const std::string needle = std::string(series_name) + " ";
+    size_t pos = 0;
+    while (pos < body.size()) {
+        const size_t line_end = body.find('\n', pos);
+        const std::string_view line =
+            line_end == std::string::npos
+                ? std::string_view(body).substr(pos)
+                : std::string_view(body).substr(pos, line_end - pos);
+        if (line.starts_with(needle)) {
+            const std::string_view tail = line.substr(needle.size());
+            double value = 0.0;
+            const auto [ptr, ec] =
+                std::from_chars(tail.data(), tail.data() + tail.size(), value);
+            if (ec == std::errc{}) {
+                return value;
+            }
+        }
+        if (line_end == std::string::npos) {
+            break;
+        }
+        pos = line_end + 1;
+    }
+    return std::nullopt;
+}
+
+// Extracts raw 16-bit mono PCM bytes from a RIFF WAVE container.
+std::string extract_wav_pcm16_data(const std::string& wav) {
+    require(wav.size() >= 44 && wav.compare(0, 4, "RIFF") == 0 && wav.compare(8, 4, "WAVE") == 0,
+            "fixture is RIFF WAVE");
+    auto read_u32 = [&](size_t off) -> uint32_t {
+        return static_cast<uint32_t>(static_cast<uint8_t>(wav[off])) |
+               (static_cast<uint32_t>(static_cast<uint8_t>(wav[off + 1])) << 8) |
+               (static_cast<uint32_t>(static_cast<uint8_t>(wav[off + 2])) << 16) |
+               (static_cast<uint32_t>(static_cast<uint8_t>(wav[off + 3])) << 24);
+    };
+    size_t off = 12;
+    while (off + 8 <= wav.size()) {
+        const std::string_view tag(wav.data() + off, 4);
+        const uint32_t sz = read_u32(off + 4);
+        off += 8;
+        if (tag == "data") {
+            const size_t avail = std::min<size_t>(sz, wav.size() - off);
+            return wav.substr(off, avail & ~size_t{1});
+        }
+        off += sz + (sz & 1U);
+    }
+    throw std::runtime_error("FAIL: no data chunk in WAV");
+}
+
+std::string wrap_wav_pcm16(const std::string& pcm, uint16_t channels, uint32_t sample_rate = 16000) {
+    const auto data_bytes = static_cast<uint32_t>(pcm.size());
+    std::string out;
+    out.reserve(44 + pcm.size());
+    auto push_u32 = [&](uint32_t v) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            out.push_back(static_cast<char>((v >> shift) & 0xFF));
+        }
+    };
+    auto push_u16 = [&](uint16_t v) {
+        out.push_back(static_cast<char>(v & 0xFF));
+        out.push_back(static_cast<char>((v >> 8) & 0xFF));
+    };
+    out += "RIFF";
+    push_u32(36 + data_bytes);
+    out += "WAVEfmt ";
+    push_u32(16);
+    push_u16(1);
+    push_u16(channels);
+    push_u32(sample_rate);
+    push_u32(sample_rate * channels * 2U);
+    push_u16(static_cast<uint16_t>(channels * 2U));
+    push_u16(16);
+    out += "data";
+    push_u32(data_bytes);
+    out += pcm;
+    return out;
+}
+
+// Builds a stereo 16 kHz WAV with mono `jfk` speech on channel 0 and digital
+// silence on channel 1.
+std::string make_stereo_jfk_ch0_wav(const std::string& jfk) {
+    const std::string mono = extract_wav_pcm16_data(jfk);
+    std::string stereo;
+    stereo.reserve(mono.size() * 2);
+    for (size_t i = 0; i + 1 < mono.size(); i += 2) {
+        stereo.push_back(mono[i]);
+        stereo.push_back(mono[i + 1]);
+        stereo.push_back('\0');
+        stereo.push_back('\0');
+    }
+    return wrap_wav_pcm16(stereo, /*channels=*/2, 16000);
+}
+
+std::string concat_jfk_twice_wav(const std::string& jfk) {
+    const std::string mono = extract_wav_pcm16_data(jfk);
+    return wrap_wav_pcm16(mono + mono, /*channels=*/1, 16000);
+}
+
+uint16_t pick_free_port() {
+    const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    require(fd >= 0, "ephemeral port socket");
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    require(::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0, "bind :0");
+    socklen_t len = sizeof(addr);
+    require(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0, "getsockname :0");
+    const uint16_t port = ntohs(addr.sin_port);
+    ::close(fd);
+    return port;
+}
+
 // ---- cases -------------------------------------------------------------
 
 void verify_wav(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk) {
@@ -594,10 +751,12 @@ void verify_cancel_while_queued(const std::shared_ptr<grpc::Channel>& channel,
 
 void verify_queue_timeout(asr::Config config, asr::engine::ModelPool& pool,
                           const std::shared_ptr<grpc::Channel>& channel,
-                          const std::string& hiss, const std::string& jfk) {
-    // A second service over the same pool whose streams wait at most a
-    // second for a state.
-    config.queue_timeout_seconds = 1;
+                          const std::string& hiss, const std::string& jfk,
+                          uint16_t metrics_port) {
+    // A second service over the same pool whose streams wait at most two
+    // seconds for a state, long enough to observe grpc_asr_queue_depth == 1
+    // on /metrics while queued.
+    config.queue_timeout_seconds = 2;
     asr::AsrServiceImpl impatient(config, pool);
     int port = 0;
     grpc::ServerBuilder builder;
@@ -610,7 +769,17 @@ void verify_queue_timeout(asr::Config config, asr::engine::ModelPool& pool,
 
     StateHolder holder(channel, hiss);
     const auto started = std::chrono::steady_clock::now();
-    StreamResult result = transcribe(impatient_channel, options_for("tiny.en"), jfk);
+    StreamResult result;
+    std::thread waiter([&] { result = transcribe(impatient_channel, options_for("tiny.en"), jfk); });
+    require(eventually(
+                [&] {
+                    const auto v = scrape_metric_value(http_get_metrics(metrics_port),
+                                                       "grpc_asr_queue_depth{model=\"tiny.en\"}");
+                    return v.has_value() && *v >= 1.0;
+                },
+                std::chrono::milliseconds(1800)),
+            "grpc_asr_queue_depth reached 1 while stream waited");
+    waiter.join();
     const auto waited = std::chrono::steady_clock::now() - started;
     require(result.status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED,
             "a stream that waited out the queue timeout is RESOURCE_EXHAUSTED, got " +
@@ -618,13 +787,14 @@ void verify_queue_timeout(asr::Config config, asr::engine::ModelPool& pool,
     require(result.status.error_message().find("GRPC_ASR_QUEUE_TIMEOUT_SECONDS") !=
                 std::string::npos,
             "the error names the knob");
-    require(waited >= std::chrono::seconds(1) && waited < std::chrono::seconds(10),
+    require(waited >= std::chrono::seconds(2) && waited < std::chrono::seconds(10),
             "the wait lasted about the queue timeout");
     holder.cancel();
     server->Shutdown();
 }
 
-void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
+void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel, asr::Config base_config,
+                         asr::engine::ModelPool& pool) {
     StreamResult result =
         transcribe(channel, options_for("tiny.en"), make_truncated_mp3());
     require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
@@ -633,6 +803,15 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
     result = transcribe(channel, options_for("tiny.en"), "plain text, definitely not media");
     require(result.status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
             "unknown container is UNIMPLEMENTED");
+
+    if (have_ffmpeg()) {
+        asrv1::TranscribeOptions ext_fallback = options_for("tiny.en");
+        ext_fallback.set_filename("broken.wma");
+        result = transcribe(channel, ext_fallback, "plain text, definitely not media");
+        require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                "routed extension fallback routes corrupt .wma to ffmpeg INVALID_ARGUMENT, got " +
+                    result.status.error_message());
+    }
 
     result = transcribe(channel, options_for("no-such-model"), make_wav(1.0, 440.0));
     require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
@@ -649,9 +828,39 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
     require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
             "empty media is INVALID_ARGUMENT");
 
-    // Remote options are checked before the model and the media: a bad set
-    // is INVALID_ARGUMENT, a valid set is refused by name (no HTTP engine),
-    // never run on the local pool.
+    // Local DecodingOptions validation (#14): beam_size > 8 and prompt > 1024 B
+    // are rejected before any media is decoded.
+    asrv1::TranscribeOptions bad_beam = options_for("tiny.en");
+    bad_beam.mutable_decoding()->set_beam_size(64);
+    result = transcribe(channel, bad_beam, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.finals.empty() && !result.got_media_info,
+            "beam_size=64 is INVALID_ARGUMENT before decoding, got " +
+                result.status.error_message());
+
+    asrv1::TranscribeOptions long_prompt = options_for("tiny.en");
+    long_prompt.mutable_decoding()->set_initial_prompt(std::string(1025, 'p'));
+    result = transcribe(channel, long_prompt, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.finals.empty() && !result.got_media_info,
+            "over-long initial_prompt is INVALID_ARGUMENT before decoding, got " +
+                result.status.error_message());
+
+    // Multi-channel cap (#15): 3 channels under default GRPC_ASR_MAX_CHANNELS=2
+    // fails INVALID_ARGUMENT before MediaInfo or PCM decoding.
+    asrv1::TranscribeOptions three_ch = options_for("tiny.en");
+    three_ch.set_channel_mode(asrv1::CHANNEL_MODE_PER_CHANNEL);
+    result = transcribe(channel, three_ch, make_multichannel_wav(1.0, {440.0, 550.0, 660.0}));
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.status.error_message().find("GRPC_ASR_MAX_CHANNELS=2") !=
+                    std::string::npos &&
+                result.finals.empty() && !result.got_media_info,
+            "3-channel WAV under PER_CHANNEL is INVALID_ARGUMENT before decoding, got " +
+                result.status.error_message());
+
+    // Remote options (#19): malformed URL is INVALID_ARGUMENT; valid URL with no
+    // allowlist is FAILED_PRECONDITION; unlisted host or loopback without an
+    // explicit loopback pattern is PERMISSION_DENIED.
     asrv1::TranscribeOptions remote = options_for("");
     remote.mutable_remote()->set_url("file:///etc/passwd");
     result = transcribe(channel, remote, make_wav(1.0, 440.0));
@@ -661,10 +870,64 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
             "a file:// remote url is INVALID_ARGUMENT, got " + result.status.error_message());
     remote.mutable_remote()->set_url("http://localhost:8000/v1/audio/transcriptions");
     result = transcribe(channel, remote, make_wav(1.0, 440.0));
-    require(result.status.error_code() == grpc::StatusCode::UNIMPLEMENTED &&
-                result.status.error_message().find("TranscribeOptions.remote") != std::string::npos,
-            "valid remote options are UNIMPLEMENTED, got " + result.status.error_message());
-    require(result.finals.empty() && !result.got_media_info, "remote options never run the local pool");
+    require(result.status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+                result.status.error_message().find("GRPC_ASR_REMOTE_ALLOWED_HOSTS") !=
+                    std::string::npos,
+            "remote with no allowlist is FAILED_PRECONDITION, got " +
+                result.status.error_message());
+    require(result.finals.empty() && !result.got_media_info,
+            "disabled remote options never run the local pool");
+
+    {
+        asr::Config strict_cfg = base_config;
+        strict_cfg.remote_allowed_hosts = {"allowed.example:8443"};
+        asr::AsrServiceImpl strict_svc(strict_cfg, pool);
+        int strict_port = 0;
+        grpc::ServerBuilder sb;
+        sb.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &strict_port);
+        sb.RegisterService(&strict_svc);
+        auto strict_srv = sb.BuildAndStart();
+        require(strict_srv != nullptr, "strict remote allowlist server started");
+        auto strict_ch = grpc::CreateChannel("127.0.0.1:" + std::to_string(strict_port),
+                                             grpc::InsecureChannelCredentials());
+
+        remote.mutable_remote()->set_url("https://other.example:8443/v1/audio/transcriptions");
+        result = transcribe(strict_ch, remote, make_wav(1.0, 440.0));
+        require(result.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                "unlisted remote host is PERMISSION_DENIED, got " +
+                    result.status.error_message());
+        strict_srv->Shutdown();
+    }
+
+    {
+        asr::Config wildcard_cfg = base_config;
+        wildcard_cfg.remote_allowed_hosts = {"*"};
+        asr::AsrServiceImpl wildcard_svc(wildcard_cfg, pool);
+        int wildcard_port = 0;
+        grpc::ServerBuilder wb;
+        wb.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &wildcard_port);
+        wb.RegisterService(&wildcard_svc);
+        auto wildcard_srv = wb.BuildAndStart();
+        require(wildcard_srv != nullptr, "wildcard remote allowlist server started");
+        auto wildcard_ch = grpc::CreateChannel("127.0.0.1:" + std::to_string(wildcard_port),
+                                               grpc::InsecureChannelCredentials());
+
+        auto stub = asrv1::AsrService::NewStub(wildcard_ch);
+        grpc::ClientContext info_ctx;
+        asrv1::GetServiceInfoRequest info_req;
+        asrv1::GetServiceInfoResponse info_resp;
+        require(stub->GetServiceInfo(&info_ctx, info_req, &info_resp).ok() &&
+                    info_resp.remote_enabled(),
+                "GetServiceInfo reports remote_enabled=true when allowlist is set");
+
+        remote.mutable_remote()->set_url("http://127.0.0.1:8000/v1/audio/transcriptions");
+        result = transcribe(wildcard_ch, remote, make_wav(1.0, 440.0));
+        require(result.status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                "loopback remote URL under wildcard without explicit loopback pattern is "
+                "PERMISSION_DENIED, got " +
+                    result.status.error_message());
+        wildcard_srv->Shutdown();
+    }
 
     // Docling-slim engine / model_type: unsupported arms are UNIMPLEMENTED
     // before any media is decoded; a whisper.cpp-servable preset fills model.
@@ -700,6 +963,166 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel) {
             "whisper_tiny preset resolves to model tiny, got " + result.status.error_message());
 }
 
+void verify_window_stall_and_clamping(asr::Config config, asr::engine::ModelPool& pool,
+                                      const std::string& jfk) {
+    config.window_seconds = 60;
+    config.min_window_seconds = 10;
+    config.window_stall_ms = 250;
+    asr::AsrServiceImpl service(config, pool);
+    int port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    require(server != nullptr, "window clamping server started");
+    auto ch =
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
+
+    // Client value above server max (60) is clamped, not rejected, and reported
+    // on TranscriptComplete.window_seconds.
+    asrv1::TranscribeOptions over = options_for("tiny.en");
+    over.set_window_seconds(9999);
+    StreamResult over_res = transcribe(ch, over, jfk);
+    require(over_res.status.ok(), "over-max window_seconds clamped OK");
+    require(over_res.complete.window_seconds() == 60,
+            "TranscriptComplete reports clamped max window_seconds=60, got " +
+                std::to_string(over_res.complete.window_seconds()));
+
+    asrv1::TranscribeOptions under = options_for("tiny.en");
+    under.set_window_seconds(2);
+    StreamResult under_res = transcribe(ch, under, jfk);
+    require(under_res.status.ok(), "under-min window_seconds clamped OK");
+    require(under_res.complete.window_seconds() == 10,
+            "TranscriptComplete reports clamped min window_seconds=10, got " +
+                std::to_string(under_res.complete.window_seconds()));
+
+    // Real-time paced upload (#13): stream ~22 s of 16 kHz mono WAV in 1 s
+    // chunks with client window_seconds=10 and assert the first FinalSegment
+    // arrives before 20 s of media has been uploaded.
+    const std::string wav22 = concat_jfk_twice_wav(jfk);
+    auto stub = asrv1::AsrService::NewStub(ch);
+    grpc::ClientContext ctx;
+    auto stream = stub->Transcribe(&ctx);
+
+    asrv1::TranscribeOptions paced_opts = options_for("tiny.en");
+    paced_opts.set_window_seconds(10);
+    asrv1::TranscribeRequest req;
+    *req.mutable_options() = paced_opts;
+    require(stream->Write(req), "write paced options");
+
+    std::atomic<bool> saw_first_final{false};
+    StreamResult paced_res;
+    std::thread reader([&] {
+        asrv1::TranscribeResponse resp;
+        size_t seen = 0;
+        while (stream->Read(&resp)) {
+            if (resp.has_final_segment()) {
+                saw_first_final.store(true, std::memory_order_release);
+            }
+            consume_event(paced_res, resp, /*upload_done=*/true, seen++);
+        }
+    });
+
+    // Send 44-byte WAV header, then 1 s chunks (32000 B at 16 kHz s16le) at
+    // real-time 1 s/chunk pace until the first final segment arrives, then
+    // flush the remaining bytes cleanly.
+    constexpr size_t kOneSecondPcmBytes = 32000;
+    req.Clear();
+    req.mutable_chunk()->set_data(wav22.substr(0, 44));
+    require(stream->Write(req), "write wav header");
+
+    double uploaded_seconds_at_first_final = 999.0;
+    size_t offset = 44;
+    size_t seconds_sent = 0;
+    while (offset < wav22.size()) {
+        const size_t n = std::min(kOneSecondPcmBytes, wav22.size() - offset);
+        req.Clear();
+        req.mutable_chunk()->set_data(wav22.substr(offset, n));
+        if (!stream->Write(req)) {
+            break;
+        }
+        offset += n;
+        seconds_sent++;
+
+        if (saw_first_final.load(std::memory_order_acquire)) {
+            if (uploaded_seconds_at_first_final > 900.0) {
+                uploaded_seconds_at_first_final = static_cast<double>(seconds_sent);
+            }
+            continue;
+        }
+        // Real-time 1 s pacing in 25 ms slices so we notice the first final
+        // immediately without unnecessary wall-clock delay.
+        for (int slice = 0; slice < 40; ++slice) {
+            if (saw_first_final.load(std::memory_order_acquire)) {
+                uploaded_seconds_at_first_final = static_cast<double>(seconds_sent);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+    }
+    stream->WritesDone();
+    reader.join();
+    paced_res.status = stream->Finish();
+
+    require(paced_res.status.ok(), "paced 22s upload OK: " + paced_res.status.error_message());
+    require(saw_first_final.load() && uploaded_seconds_at_first_final < 20.0,
+            "first FinalSegment arrived before 20 s uploaded, got at " +
+                std::to_string(uploaded_seconds_at_first_final) + " s");
+    require(paced_res.complete.window_seconds() == 10, "trailer reports window_seconds=10");
+    require(lower(final_text(paced_res)).find("country") != std::string::npos,
+            "paced transcript contains 'country'");
+    server->Shutdown();
+}
+
+void verify_per_channel_stereo(const std::shared_ptr<grpc::Channel>& channel,
+                               const std::string& jfk) {
+    const std::string stereo = make_stereo_jfk_ch0_wav(jfk);
+    asrv1::TranscribeOptions options = options_for("tiny.en");
+    options.set_channel_mode(asrv1::CHANNEL_MODE_PER_CHANNEL);
+    options.set_emit_document(true);
+
+    StreamResult result = transcribe(channel, options, stereo);
+    require(result.status.ok(),
+            "stereo PER_CHANNEL transcribes OK: " + result.status.error_message());
+    require(result.media_info.channels() == 2, "MediaInfo reports 2 channels");
+    require(result.complete.segment_count_by_channel_size() == 2,
+            "TranscriptComplete reports segment_count_by_channel for both channels");
+
+    size_t spoken_ch0 = 0;
+    size_t spoken_ch1 = 0;
+    for (const asrv1::Segment& seg : result.finals) {
+        require(seg.channel() < 2, "every final segment under PER_CHANNEL has valid channel");
+        bool has_word_char = false;
+        for (unsigned char c : seg.text()) {
+            if (std::isalnum(c)) {
+                has_word_char = true;
+                break;
+            }
+        }
+        const bool is_spoken = has_word_char && seg.text().find('[') == std::string::npos;
+        if (is_spoken) {
+            if (seg.channel() == 0) {
+                spoken_ch0++;
+                require(seg.speaker_id() == "C1",
+                        "channel 0 speech is attributed to speaker C1, got " + seg.speaker_id());
+            } else {
+                spoken_ch1++;
+            }
+        }
+    }
+    require(spoken_ch0 > 0, "channel 0 produced spoken segments");
+    require(spoken_ch1 == 0, "silent channel 1 produced zero spoken segments");
+    require(lower(final_text(result)).find("country") != std::string::npos,
+            "stereo ch0 transcript contains 'country'");
+
+    const std::vector<std::string> errors = asr::doc::document_integrity_errors(result.document);
+    require(errors.empty(), "stereo Document integrity clean");
+    require(result.document.media().speakers_size() == 1 &&
+                result.document.media().speakers(0) == "C1",
+            "Document registers only C1 when channel 1 did not speak, got " +
+                std::to_string(result.document.media().speakers_size()) + " speaker(s)");
+}
+
 void verify_byte_cap(asr::Config config, asr::engine::ModelPool& pool) {
     // A dedicated server whose cap is smaller than the upload.
     config.max_media_bytes = 4096;
@@ -728,6 +1151,7 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
     asrv1::TranscribeOptions options = options_for("tiny.en");
     options.set_emit_keyframes(true);
     options.set_keyframe_interval_seconds(2);
+    options.set_emit_document(true);
     StreamResult result = transcribe(channel, options, media);
     require(result.status.ok(), "video transcribes OK: " + result.status.error_message());
     require(result.got_media_info && result.media_info.has_video(), "MediaInfo reports video");
@@ -743,6 +1167,38 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
         require(frame.png().starts_with("\x89PNG"), "keyframe is a PNG");
     }
 
+    // #20: Document.body.children must be ordered by media time (prov[0].time.start_ms)
+    // across interleaved keyframes and text segments, with integrity preserved.
+    require(result.documents == 1, "video emitted folded Document");
+    const std::vector<std::string> doc_errors =
+        asr::doc::document_integrity_errors(result.document);
+    require(doc_errors.empty(),
+            "video Document integrity: " + (doc_errors.empty() ? "" : doc_errors.front()));
+    double prev_start_ms = -1.0;
+    size_t seen_texts = 0;
+    size_t seen_pictures = 0;
+    for (const auto& child : result.document.body().children()) {
+        const std::string& ref = child.ref();
+        double child_start_ms = 0.0;
+        if (ref.starts_with("#/texts/")) {
+            const int idx = std::stoi(ref.substr(8));
+            child_start_ms = result.document.texts(idx).text().base().prov(0).time().start_ms();
+            seen_texts++;
+        } else if (ref.starts_with("#/pictures/")) {
+            const int idx = std::stoi(ref.substr(11));
+            child_start_ms = result.document.pictures(idx).prov(0).time().start_ms();
+            seen_pictures++;
+        } else {
+            require(false, "unexpected body child ref: " + ref);
+        }
+        require(child_start_ms >= prev_start_ms,
+                "video Document body children non-decreasing in start_ms: " +
+                    std::to_string(child_start_ms) + " < " + std::to_string(prev_start_ms));
+        prev_start_ms = child_start_ms;
+    }
+    require(seen_texts > 0 && seen_pictures == result.keyframes,
+            "video Document body contains all text and picture items");
+
     // Same media without opting in: zero keyframes.
     StreamResult quiet = transcribe(channel, options_for("tiny.en"), media);
     require(quiet.status.ok(), "video without keyframes OK");
@@ -754,6 +1210,105 @@ void verify_video(const std::shared_ptr<grpc::Channel>& channel, const std::stri
     StreamResult no_audio = transcribe(channel, options_for("tiny.en"), video_only);
     require(no_audio.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
             "video without an audio track is INVALID_ARGUMENT");
+}
+
+void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>& channel,
+                                           const std::string& jfk_path) {
+    // #11: Loop the 11 s spoken fixture twice (~22 s > 10 s window) into ogg,
+    // webm, and fast-start mp4; hold back the final 4 KiB until a FinalSegment
+    // arrives, proving ffmpeg demuxes from pipe:0 while the upload is in flight.
+    struct PipeCase {
+        const char* label;
+        std::string args;
+        const char* suffix;
+        asr::media::MediaFamily family;
+    };
+    const std::vector<PipeCase> pipe_cases = {
+        {"ogg", "-stream_loop 1 -i " + jfk_path + " -c:a libopus", ".ogg",
+         asr::media::MediaFamily::kOgg},
+        {"webm", "-stream_loop 1 -i " + jfk_path + " -c:a libopus", ".webm",
+         asr::media::MediaFamily::kMkv},
+        {"faststart-mp4", "-stream_loop 1 -i " + jfk_path + " -c:a aac -movflags +faststart",
+         ".mp4", asr::media::MediaFamily::kMp4},
+    };
+    for (const PipeCase& c : pipe_cases) {
+        const std::string bytes = generate_media(c.args, c.suffix);
+        const asr::media::StreamLayout layout = asr::media::sniff_stream_layout(
+            c.family, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
+            /*stream_complete=*/true);
+        require(layout == asr::media::StreamLayout::kPipeable,
+                std::string(c.label) + " classified as kPipeable");
+
+        StreamResult res = transcribe(channel, options_for("tiny.en"), bytes, /*hold_back=*/4096);
+        require(res.final_before_upload_done,
+                std::string(c.label) + " emitted a FinalSegment before upload finished");
+        require(res.status.ok(),
+                std::string(c.label) + " live pipe stream completed OK: " +
+                    res.status.error_message());
+        require(lower(final_text(res)).find("country") != std::string::npos,
+                std::string(c.label) + " transcript contains 'country'");
+    }
+
+    // Trailing-moov mp4 (default muxer order: mdat before moov) still
+    // transcribes cleanly through the seekable memfd path.
+    const std::string trailing_mp4 = generate_media("-i " + jfk_path + " -c:a aac", ".mp4");
+    const asr::media::StreamLayout trailing_layout = asr::media::sniff_stream_layout(
+        asr::media::MediaFamily::kMp4, reinterpret_cast<const uint8_t*>(trailing_mp4.data()),
+        trailing_mp4.size(), /*stream_complete=*/true);
+    require(trailing_layout == asr::media::StreamLayout::kSeekableMemfd,
+            "default mp4 fixture has trailing moov (kSeekableMemfd)");
+    StreamResult trailing_res = transcribe(channel, options_for("tiny.en"), trailing_mp4);
+    require(trailing_res.status.ok(),
+            "trailing-moov mp4 transcribes OK: " + trailing_res.status.error_message());
+    require(lower(final_text(trailing_res)).find("country") != std::string::npos,
+            "trailing-moov mp4 transcript contains 'country'");
+}
+
+void verify_new_container_families(const std::shared_ptr<grpc::Channel>& channel,
+                                   const std::string& jfk_path) {
+    // #12: Author jfk in each newly supported container family and transcribe
+    // end-to-end against the configured ffmpeg.
+    struct ContainerCase {
+        const char* label;
+        std::string bytes;
+        asrv1::ContainerFamily expected_container;
+        const char* filename;
+    };
+    std::vector<ContainerCase> cases;
+    cases.push_back({"avi-mp3", generate_media("-i " + jfk_path + " -c:a libmp3lame", ".avi"),
+                     asrv1::CONTAINER_FAMILY_AVI, "clip.avi"});
+    const std::string asf_wma = generate_media("-i " + jfk_path + " -c:a wmav2", ".asf");
+    cases.push_back({"asf-wmav2", asf_wma, asrv1::CONTAINER_FAMILY_ASF, "clip.wma"});
+    cases.push_back({"mpegps-mp2", generate_media("-i " + jfk_path + " -c:a mp2", ".mpg"),
+                     asrv1::CONTAINER_FAMILY_MPEG_PS, "clip.mpg"});
+    cases.push_back({"mpegts-aac", generate_media("-i " + jfk_path + " -c:a aac", ".ts"),
+                     asrv1::CONTAINER_FAMILY_MPEG_TS, "clip.ts"});
+    cases.push_back(
+        {"adts-aac", generate_media("-i " + jfk_path + " -c:a aac -f adts", ".aac"),
+         asrv1::CONTAINER_FAMILY_ADTS_AAC, "clip.aac"});
+
+    // Resample jfk to 8 kHz mono s16le and encode AMR-NB in memory.
+    const std::string raw_8k =
+        generate_media("-i " + jfk_path + " -ac 1 -ar 8000 -f s16le", ".pcm");
+    std::vector<int16_t> pcm_8k(raw_8k.size() / sizeof(int16_t));
+    std::memcpy(pcm_8k.data(), raw_8k.data(), pcm_8k.size() * sizeof(int16_t));
+    cases.push_back({"amr-nb", encode_amr_nb_8k(pcm_8k), asrv1::CONTAINER_FAMILY_AMR, "clip.amr"});
+
+    for (const ContainerCase& c : cases) {
+        asrv1::TranscribeOptions opts = options_for("tiny.en");
+        opts.set_filename(c.filename);
+        opts.set_emit_document(true);
+        StreamResult res = transcribe(channel, opts, c.bytes);
+        require(res.status.ok(),
+                std::string(c.label) + " transcribes OK: " + res.status.error_message());
+        require(res.media_info.container() == c.expected_container,
+                std::string(c.label) + " reports expected MediaInfo.container");
+        require(lower(final_text(res)).find("country") != std::string::npos,
+                std::string(c.label) + " transcript contains 'country', got: " +
+                    final_text(res));
+        require(asr::doc::document_integrity_errors(res.document).empty(),
+                std::string(c.label) + " folded Document passes integrity check");
+    }
 }
 
 void verify_ogg(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk_path) {
@@ -824,6 +1379,90 @@ void verify_service_info(const std::shared_ptr<grpc::Channel>& channel) {
     require(info.ui().title() == "ASR" && info.ui().path() == "/ui/asr" &&
                 !info.ui().description().empty(),
             "ui advertisement reported for the demo shell");
+    require(info.min_window_seconds() == 10 && info.max_window_seconds() == 10,
+            "window bounds reported on GetServiceInfo");
+    require(info.warmed_up(), "warmed_up=true reported on GetServiceInfo");
+    require(!info.remote_enabled(), "remote_enabled=false reported when allowlist is unset");
+}
+
+void verify_prometheus_metrics(uint16_t metrics_port) {
+    const std::string body = http_get_metrics(metrics_port);
+    auto expect_ge = [&](std::string_view series, double min_val) {
+        const auto got = scrape_metric_value(body, series);
+        require(got.has_value() && *got >= min_val,
+                "metric " + std::string(series) + " >= " + std::to_string(min_val) +
+                    ", got " + (got.has_value() ? std::to_string(*got) : "missing"));
+    };
+    auto expect_eq = [&](std::string_view series, double expected) {
+        const auto got = scrape_metric_value(body, series);
+        require(got.has_value() && *got == expected,
+                "metric " + std::string(series) + " == " + std::to_string(expected) +
+                    ", got " + (got.has_value() ? std::to_string(*got) : "missing"));
+    };
+
+    expect_ge("grpc_asr_stream_end_total{result=\"ok\"}", 1.0);
+    expect_ge("grpc_asr_stream_end_total{result=\"unknown_container\"}", 1.0);
+    expect_eq("grpc_asr_states_total{model=\"tiny.en\"}", 1.0);
+    expect_eq("grpc_asr_states_busy{model=\"tiny.en\"}", 0.0);
+    expect_eq("grpc_asr_streams_active", 0.0);
+    expect_eq("grpc_asr_upload_bytes_resident", 0.0);
+    expect_eq("grpc_asr_memfd_bytes_resident", 0.0);
+    expect_ge("grpc_asr_first_segment_seconds_count{model=\"tiny.en\",path=\"live\"}", 1.0);
+    expect_ge("grpc_asr_realtime_factor_count{model=\"tiny.en\",backend=\"cpu\"}", 1.0);
+    expect_ge("grpc_asr_windows_total", 1.0);
+    expect_ge("grpc_asr_audio_seconds_total{model=\"tiny.en\"}", 1.0);
+    expect_ge("grpc_asr_warmup_seconds", 0.0);
+}
+
+std::string run_server_until_listening(const std::string& binary, const std::string& models_dir,
+                                       bool warmup) {
+    std::string log_path = "/tmp/grpc-asr-boot-XXXXXX.log";
+    const int log_fd = mkstemps(log_path.data(), 4);
+    require(log_fd >= 0, "temp boot log");
+    const uint16_t listen_port = pick_free_port();
+
+    const pid_t pid = ::fork();
+    require(pid >= 0, "fork server subprocess");
+    if (pid == 0) {
+        ::dup2(log_fd, STDOUT_FILENO);
+        ::dup2(log_fd, STDERR_FILENO);
+        ::close(log_fd);
+        ::setenv("GRPC_ASR_BACKEND", "cpu", 1);
+        ::setenv("GRPC_ASR_MODELS_DIR", models_dir.c_str(), 1);
+        ::setenv("GRPC_ASR_MODELS", "tiny.en", 1);
+        ::setenv("GRPC_ASR_CONCURRENCY", "1", 1);
+        ::setenv("GRPC_ASR_THREADS", "2", 1);
+        const std::string addr = "127.0.0.1:" + std::to_string(listen_port);
+        ::setenv("GRPC_ASR_LISTEN_ADDRESS", addr.c_str(), 1);
+        ::setenv("GRPC_ASR_WARMUP", warmup ? "1" : "0", 1);
+        ::execl(binary.c_str(), binary.c_str(), static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    ::close(log_fd);
+
+    const bool ready = eventually(
+        [&] { return slurp(log_path).find("grpc-asr listening on") != std::string::npos; },
+        std::chrono::seconds(30));
+
+    if (ready) {
+        auto ch = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port),
+                                      grpc::InsecureChannelCredentials());
+        auto stub = asrv1::AsrService::NewStub(ch);
+        grpc::ClientContext ctx;
+        asrv1::GetServiceInfoRequest req;
+        asrv1::GetServiceInfoResponse info;
+        require(stub->GetServiceInfo(&ctx, req, &info).ok(), "subprocess GetServiceInfo OK");
+        require(info.warmed_up() == warmup, "subprocess GetServiceInfo.warmed_up matches env");
+    }
+
+    ::kill(pid, SIGTERM);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    const std::string output = slurp(log_path);
+    std::remove(log_path.c_str());
+    require(ready, "server reached listening state; log:\n" + output);
+    require(WIFEXITED(status) && WEXITSTATUS(status) == 0, "server exited cleanly on SIGTERM");
+    return output;
 }
 
 void verify_startup_fails_loud(const std::string& models_dir) {
@@ -839,6 +1478,41 @@ void verify_startup_fails_loud(const std::string& models_dir) {
     int code = std::system((env + command).c_str());
     require(WIFEXITED(code) && WEXITSTATUS(code) == 1,
             "missing model exits 1 at startup, got " + std::to_string(WEXITSTATUS(code)));
+
+    // #18: Corrupt/stub model weights fail fast with exit 1 before listening.
+    std::string bad_dir_tpl = "/tmp/grpc-asr-bad-model-XXXXXX";
+    char* bad_dir_raw = ::mkdtemp(bad_dir_tpl.data());
+    require(bad_dir_raw != nullptr, "mkdtemp for corrupt model dir");
+    const std::filesystem::path bad_dir(bad_dir_raw);
+    const std::filesystem::path bad_file = bad_dir / "ggml-bad.bin";
+    {
+        std::ofstream out(bad_file, std::ios::binary);
+        out << "not a valid ggml whisper weight file";
+    }
+    std::string bad_log = (bad_dir / "boot.log").string();
+    env = "GRPC_ASR_BACKEND=cpu GRPC_ASR_MODELS_DIR=" + bad_dir.string() +
+          " GRPC_ASR_MODELS=bad ";
+    code = std::system((env + "timeout 30 " + binary + " >" + bad_log + " 2>&1").c_str());
+    const std::string bad_output = slurp(bad_log);
+    std::filesystem::remove_all(bad_dir);
+    require(WIFEXITED(code) && WEXITSTATUS(code) == 1,
+            "corrupt model exits 1 at startup, got " + std::to_string(WEXITSTATUS(code)));
+    require(bad_output.find("grpc-asr listening on") == std::string::npos,
+            "corrupt model fails before listening");
+
+    // #18: Startup warmup enabled logs one warmup line per state before
+    // listening; GRPC_ASR_WARMUP=0 logs none.
+    const std::string warm_log = run_server_until_listening(binary, models_dir, /*warmup=*/true);
+    const size_t warm_pos = warm_log.find("grpc-asr warmup: tiny.en state 0 ");
+    const size_t listen_pos = warm_log.find("grpc-asr listening on");
+    require(warm_pos != std::string::npos && warm_pos < listen_pos,
+            "warmup=1 logs warmup line before listening; log:\n" + warm_log);
+    require(warm_log.find("grpc-asr warmup:", warm_pos + 1) == std::string::npos,
+            "warmup=1 logs exactly one warmup line for concurrency=1");
+
+    const std::string cold_log = run_server_until_listening(binary, models_dir, /*warmup=*/false);
+    require(cold_log.find("grpc-asr warmup:") == std::string::npos,
+            "GRPC_ASR_WARMUP=0 suppresses warmup log lines; log:\n" + cold_log);
 
     // When this build has no CUDA backend, asking for it must also die at
     // startup, before any RPC.
@@ -878,6 +1552,7 @@ int main() {
     config.threads = 4;
 
     try {
+        asr::MetricsHttpServer metrics("127.0.0.1:0");
         asr::engine::ModelPool pool(config);
         asr::AsrServiceImpl service(config, pool);
 
@@ -894,6 +1569,8 @@ int main() {
         verify_streaming_during_upload(channel, jfk);
         verify_document(channel, jfk);
         verify_silence(channel);
+        verify_per_channel_stereo(channel, jfk);
+        verify_window_stall_and_clamping(config, pool, jfk);
         verify_trailer_to_gone_client("127.0.0.1:" + std::to_string(port), service);
         {
             // Forty minutes of low hiss: whisper decodes it into no segment
@@ -904,18 +1581,21 @@ int main() {
             verify_cancel_without_speech(channel, service, hiss, jfk);
             verify_deadline_without_speech(channel, service, hiss);
             verify_cancel_while_queued(channel, service, hiss, jfk);
-            verify_queue_timeout(config, pool, channel, hiss, jfk);
+            verify_queue_timeout(config, pool, channel, hiss, jfk, metrics.port());
         }
-        verify_error_matrix(channel);
+        verify_error_matrix(channel, config, pool);
         verify_byte_cap(config, pool);
         verify_service_info(channel);
         if (have_ffmpeg()) {
             verify_video(channel, sample);
             verify_ogg(channel, sample);
+            verify_pipe_streaming_and_mp4_layouts(channel, sample);
+            verify_new_container_families(channel, sample);
             verify_cancel_video(channel, service, sample, jfk);
         } else {
             std::println("note: ffmpeg not on PATH; video cases not run");
         }
+        verify_prometheus_metrics(metrics.port());
         verify_startup_fails_loud(config.models_dir);
 
         require(service.transcribed.load() > 0, "transcribed counter moved");

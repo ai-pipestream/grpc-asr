@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <print>
 #include <thread>
 
@@ -17,6 +18,7 @@
 
 #include "config.h"
 #include "engine/model_pool.h"
+#include "metrics.h"
 #include "service/asr_service.h"
 #include "service/streaming_runtime.h"
 #include "whisper.h"
@@ -85,6 +87,13 @@ int main() {
 
         streaming.connect(server->InProcessChannel(grpc::ChannelArguments{}));
 
+        std::optional<asr::MetricsHttpServer> metrics_http;
+        if (!config.metrics_address.empty()) {
+            metrics_http.emplace(config.metrics_address);
+            std::println("grpc-asr metrics listening on {}:{}", metrics_http->host(),
+                         metrics_http->port());
+        }
+
         std::thread shutdown_thread([&server] {
             char byte = 0;
             [[maybe_unused]] ssize_t n = ::read(g_shutdown_pipe[0], &byte, 1);
@@ -103,10 +112,18 @@ int main() {
                 while (!metrics_stop.wait_for(
                     lock, std::chrono::seconds(config.metrics_interval_seconds),
                     [&] { return stopping; })) {
-                    std::println("grpc-asr metrics: media{{transcribed={},rejected={},failed={}}}"
-                                 " audio_seconds={}",
-                                 service.transcribed.load(), service.rejected.load(),
-                                 service.failed.load(), service.audio_ms.load() / 1000);
+                    const asr::MetricsSummary snap = asr::metrics_summary();
+                    std::println(
+                        "grpc-asr metrics: media{{transcribed={},rejected={},failed={}}}"
+                        " active={} resident_bytes={{upload={},memfd={}}}"
+                        " windows={{total={},redecodes={},last_seconds={}}}"
+                        " audio_seconds={} keyframes={}",
+                        service.transcribed.load(), service.rejected.load(),
+                        service.failed.load(), snap.streams_active,
+                        snap.upload_bytes_resident, snap.memfd_bytes_resident,
+                        snap.windows_total, snap.window_redecodes_total,
+                        snap.last_window_seconds, service.audio_ms.load() / 1000,
+                        snap.keyframes_total);
                 }
             });
         }

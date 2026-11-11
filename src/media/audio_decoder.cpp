@@ -82,6 +82,7 @@ ma_result stream_seek(ma_decoder* decoder, ma_int64 offset, ma_seek_origin origi
 struct AudioDecoder::Impl {
     ma_decoder decoder{};
     bool initialized = false;
+    uint32_t output_channels = 1;
     StreamCursor cursor;
 
     ~Impl() {
@@ -91,7 +92,8 @@ struct AudioDecoder::Impl {
     }
 };
 
-AudioDecoder::AudioDecoder(ByteStream& stream, bool header_declares_duration)
+AudioDecoder::AudioDecoder(ByteStream& stream, bool header_declares_duration,
+                           bool preserve_channels)
     : impl_(std::make_unique<Impl>()) {
     // First open with no conversion to learn the source format, then
     // reopen converting to the model contract. Two inits are cheaper than
@@ -112,8 +114,12 @@ AudioDecoder::AudioDecoder(ByteStream& stream, bool header_declares_duration)
                                    0);
     ma_decoder_uninit(&probe);
 
+    const ma_uint32 out_channels =
+        preserve_channels && native_channels > 0 ? native_channels : 1U;
+    impl_->output_channels = out_channels;
     impl_->cursor = StreamCursor{&stream, 0};
-    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 1, kModelSampleRate);
+    ma_decoder_config config =
+        ma_decoder_config_init(ma_format_f32, out_channels, kModelSampleRate);
     result = ma_decoder_init(stream_read, stream_seek, &impl_->cursor, &config, &impl_->decoder);
     if (result != MA_SUCCESS) {
         throw DecodeError(std::string("cannot decode media: ") + ma_result_description(result));
@@ -137,15 +143,33 @@ AudioDecoder::AudioDecoder(ByteStream& stream, bool header_declares_duration)
 AudioDecoder::~AudioDecoder() = default;
 
 size_t AudioDecoder::read(float* out, size_t max_samples) {
+    if (impl_->output_channels != 1) {
+        throw DecodeError("AudioDecoder::read requires mono output; use read_frames");
+    }
+    return read_frames(out, max_samples);
+}
+
+size_t AudioDecoder::read_frames(float* interleaved_out, size_t max_frames) {
     ma_uint64 frames_read = 0;
-    ma_result result = ma_decoder_read_pcm_frames(&impl_->decoder, out, max_samples, &frames_read);
+    ma_result result =
+        ma_decoder_read_pcm_frames(&impl_->decoder, interleaved_out, max_frames, &frames_read);
     if (result != MA_SUCCESS && result != MA_AT_END) {
         throw DecodeError(std::string("decode failed mid-stream: ") +
                           ma_result_description(result));
     }
-    const size_t samples = static_cast<size_t>(frames_read);
-    scrub_pcm(std::span<float>(out, samples));
-    return samples;
+    const size_t frames = static_cast<size_t>(frames_read);
+    scrub_pcm(std::span<float>(interleaved_out, frames * impl_->output_channels));
+    return frames;
+}
+
+bool AudioDecoder::has_buffered_input(size_t min_bytes) const {
+    const ByteStream* stream = impl_->cursor.stream;
+    return stream->is_complete() || stream->is_aborted() ||
+           stream->available_from(impl_->cursor.position) >= min_bytes;
+}
+
+bool AudioDecoder::wait_for_input(std::chrono::milliseconds timeout, size_t min_bytes) {
+    return impl_->cursor.stream->wait_for_available(impl_->cursor.position, min_bytes, timeout);
 }
 
 }  // namespace asr::media

@@ -29,7 +29,7 @@ FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl g++ git gpg make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libssl-dev libcurl4-openssl-dev libopenh264-dev \
+        ca-certificates cmake curl g++ git gpg make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libopencore-amrnb0 libssl-dev libcurl4-openssl-dev libopenh264-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Intel's OpenVINO APT repo, 2025 stream, ubuntu24 (noble) distribution.

@@ -8,7 +8,7 @@ grpc-asr-server, the one program this repository builds, links the following nat
 
 - libcurl (curl license), OpenSSL (Apache License 2.0), and FFmpeg shared
   libraries (LGPL-2.1-or-later, described below).
-- whisper.cpp, Parakeet and ggml (https://github.com/ggml-org/whisper.cpp, v1.9.3,
+- whisper.cpp, Parakeet and ggml (https://github.com/ggml-org/whisper.cpp, v1.9.5,
   fetched at build time): MIT License.
 - miniaudio (third_party/miniaudio/miniaudio.h, vendored): public domain
   (Unlicense) or MIT No Attribution, at your choice.

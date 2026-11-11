@@ -102,7 +102,20 @@ class AsrDocumentFold {
         google::protobuf::RepeatedPtrField<ai::pipestream::document::v1::SourceType>* source,
         double start_seconds, double end_seconds, std::optional<float> avg_logprob);
 
+    // Inserts a child ref into Document.body.children ordered by media
+    // start_ms, with pictures placed before texts at equal timestamps and
+    // arrival order preserved on ties. Arenas stay in arrival order so
+    // self_refs never shift.
+    void insert_body_child(const std::string& ref, uint64_t start_ms, bool is_text);
+
+    struct ChildKey {
+        uint64_t start_ms = 0;
+        bool is_text = false;
+        auto operator<=>(const ChildKey&) const = default;
+    };
+
     ai::pipestream::document::v1::Document document_;
+    std::vector<ChildKey> body_child_keys_;
     std::string model_;
     std::string version_;
     FoldOptions options_;

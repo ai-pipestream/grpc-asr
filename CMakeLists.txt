@@ -35,6 +35,7 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(CURL 7.86 REQUIRED)
 
 include(FetchContent)
 
@@ -183,12 +184,14 @@ target_link_libraries(asr_proto PUBLIC grpc++)
 # ---------------------------------------------------------------------------
 add_library(asr_core STATIC
   src/config.cpp
+  src/metrics.cpp
   src/media/sniff.cpp
   src/media/audio_decoder.cpp
   src/media/video_demux.cpp
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
+  src/engine/remote_engine.cpp
   src/engine/docling_asr_options.cpp
   src/document/document_fold.cpp
   src/service/asr_service.cpp)
@@ -196,7 +199,7 @@ target_include_directories(asr_core PUBLIC src)
 target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
 target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}")
 target_link_libraries(asr_core
-  PUBLIC asr_proto whisper Threads::Threads OpenSSL::Crypto
+  PUBLIC asr_proto whisper Threads::Threads OpenSSL::Crypto CURL::libcurl
   PRIVATE asr_flags)
 
 add_library(asr_streaming STATIC src/engine/stream_backend.cpp src/service/streaming_runtime.cpp)
@@ -218,6 +221,7 @@ if(BUILD_TESTING)
     byte-stream-test
     config-test
     remote-options-test
+    remote-engine-test
     docling-asr-options-test
     audio-decoder-test
     document-fold-test
@@ -250,7 +254,7 @@ if(BUILD_TESTING)
     TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr)
   set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
     SKIP_RETURN_CODE 77
-    ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
+    ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_MULTILINGUAL_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-base.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_TEST_ES_SAMPLE=${CMAKE_CURRENT_SOURCE_DIR}/streaming/tests/fixtures/minds14-es-0.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
   # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
   # they carry a load-time dependency on the driver library. video-demux-test
   # never references whisper symbols and links clean without it.

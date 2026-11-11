@@ -118,11 +118,12 @@ void verify_fold() {
     require(document.texts_size() == 2, "finals fold, partials do not");
     require(document.pictures_size() == 1, "keyframe folds to a picture");
     require(document.body().children_size() == 3, "body children: text, picture, text");
-    // Arrival order is wire order: final 0, keyframe, final 1.
+    // Ordered by media time, with pictures before texts at equal start_ms
+    // (5000 ms): text0 (0..5000), picture0 (5000), text1 (5000..11000).
     require(document.body().children(0).ref() == "#/texts/0" &&
                 document.body().children(1).ref() == "#/pictures/0" &&
                 document.body().children(2).ref() == "#/texts/1",
-            "body children in arrival order");
+            "body children in media time order");
 
     // The source identity the event stream does not carry.
     require(document.name() == "address.wav", "document is named after the media");
@@ -361,6 +362,100 @@ void verify_integrity_checker_catches_breakage() {
             "parent not listing its child detected");
 }
 
+void verify_time_ordered_body_with_early_keyframes() {
+    // Keyframe child finishes ahead of transcription on long media: arenas
+    // keep arrival order so refs never shift, while body.children orders
+    // by prov[0].time.start_ms (pictures before texts at equal start_ms).
+    asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+    fold.consume(keyframe_event(5000));
+    fold.consume(keyframe_event(15000));
+    fold.consume(segment_event(/*final=*/true, 0, 0, 4000, " intro", -0.2F));
+    fold.consume(segment_event(/*final=*/true, 1, 10000, 14000, " middle", -0.2F));
+    fold.consume(complete_event());
+
+    docv1::Document document = fold.take();
+    std::vector<std::string> errors = asr::doc::document_integrity_errors(document);
+    require(errors.empty(), "integrity after time reorder: " + (errors.empty() ? "" : errors.front()));
+    require(document.pictures(0).image().uri() == "keyframe:5000" &&
+                document.pictures(1).image().uri() == "keyframe:15000",
+            "pictures arena stays in arrival order");
+    require(document.texts(0).text().base().text() == "intro" &&
+                document.texts(1).text().base().text() == "middle",
+            "texts arena stays in arrival order");
+    require(document.body().children_size() == 4, "four children in body");
+    require(document.body().children(0).ref() == "#/texts/0" &&
+                document.body().children(1).ref() == "#/pictures/0" &&
+                document.body().children(2).ref() == "#/texts/1" &&
+                document.body().children(3).ref() == "#/pictures/1",
+            "body.children ordered by media time: text0, picture0, text1, picture1");
+
+    // Equal timestamp tie-breaker: segment arriving BEFORE keyframe at the
+    // same start_ms still places the picture before the text.
+    asr::doc::AsrDocumentFold tie("tiny.en", "1.2.3");
+    tie.consume(segment_event(/*final=*/true, 0, 5000, 8000, " spoken over slide", -0.2F));
+    tie.consume(keyframe_event(5000));
+    tie.consume(complete_event());
+    docv1::Document tie_doc = tie.take();
+    require(asr::doc::document_integrity_errors(tie_doc).empty(), "tie integrity");
+    require(tie_doc.body().children(0).ref() == "#/pictures/0" &&
+                tie_doc.body().children(1).ref() == "#/texts/0",
+            "picture precedes text at equal start_ms");
+}
+
+void verify_suppressed_segment_skipped() {
+    asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+    asrv1::TranscribeResponse suppressed =
+        segment_event(/*final=*/true, 0, 0, 3000, " thank you for watching", -1.8F);
+    suppressed.mutable_final_segment()->set_no_speech_prob(0.92F);
+    suppressed.mutable_final_segment()->set_suppressed(true);
+    suppressed.mutable_final_segment()->set_speaker_id("C2");
+    fold.consume(suppressed);
+
+    asrv1::TranscribeResponse real =
+        segment_event(/*final=*/true, 1, 3000, 6000, " actual speech", -0.2F);
+    real.mutable_final_segment()->set_speaker_id("C1");
+    fold.consume(real);
+    fold.consume(complete_event());
+
+    docv1::Document document = fold.take();
+    require(asr::doc::document_integrity_errors(document).empty(), "integrity with suppressed");
+    require(document.texts_size() == 1, "suppressed segment produces no text item");
+    require(document.texts(0).text().base().text() == "actual speech",
+            "non-suppressed segment survives");
+    require(document.media().speakers_size() == 1 && document.media().speakers(0) == "C1",
+            "suppressed segment does not register a phantom speaker");
+}
+
+void verify_multilingual_fold() {
+    asr::doc::AsrDocumentFold fold("base", "1.2.3");
+    asrv1::TranscribeResponse seg0 = segment_event(/*final=*/true, 0, 0, 4000, " hello", -0.2F);
+    seg0.mutable_final_segment()->set_language("en");
+    asrv1::TranscribeResponse seg1 = segment_event(/*final=*/true, 1, 4000, 8000, " hola", -0.2F);
+    seg1.mutable_final_segment()->set_language("es");
+    fold.consume(seg0);
+    fold.consume(seg1);
+
+    asrv1::TranscribeResponse trailer = complete_event("en");
+    trailer.mutable_complete()->add_languages("en");
+    trailer.mutable_complete()->add_languages("es");
+    fold.consume(trailer);
+
+    docv1::Document document = fold.take();
+    require(asr::doc::document_integrity_errors(document).empty(), "multilingual integrity");
+    const auto& lang0 = document.texts(0).text().base().meta().language();
+    const auto& lang1 = document.texts(1).text().base().meta().language();
+    require(lang0.code() == docv1::HUMAN_LANGUAGE_LABEL_EN && lang0.code_raw() == "en" &&
+                lang0.created_by() == "asr",
+            "first item carries en language");
+    require(lang1.code() == docv1::HUMAN_LANGUAGE_LABEL_ES && lang1.code_raw() == "es" &&
+                lang1.created_by() == "asr",
+            "second item carries es language");
+    require(!document.body().meta().has_language(),
+            "body.meta.language absent when multiple languages are present");
+    require(document.source_meta().language().empty(),
+            "source_meta.language empty when multiple languages are present");
+}
+
 }  // namespace
 
 int main() {
@@ -372,6 +467,9 @@ int main() {
         verify_language_slots();
         verify_score_presence();
         verify_integrity_checker_catches_breakage();
+        verify_time_ordered_body_with_early_keyframes();
+        verify_suppressed_segment_skipped();
+        verify_multilingual_fold();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

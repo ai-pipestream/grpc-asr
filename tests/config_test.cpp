@@ -19,12 +19,15 @@ namespace {
 void clear_env() {
     for (const char* name :
          {"GRPC_ASR_LISTEN_ADDRESS", "GRPC_ASR_BACKEND", "GRPC_ASR_CUDA_DEVICE",
-          "GRPC_ASR_OPENVINO_DEVICE",
+          "GRPC_ASR_OPENVINO_DEVICE", "GRPC_ASR_OPENVINO_CACHE_DIR",
           "GRPC_ASR_MODELS_DIR", "GRPC_ASR_MODELS", "GRPC_ASR_CONCURRENCY",
-          "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
+          "GRPC_ASR_WARMUP", "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
-          "GRPC_ASR_WINDOW_SECONDS", "GRPC_ASR_THREADS", "GRPC_ASR_KEYFRAME_INTERVAL_SECONDS",
-          "GRPC_ASR_METRICS_INTERVAL_SECONDS", "GRPC_ASR_TOOL_INACTIVITY_SECONDS",
+          "GRPC_ASR_WINDOW_SECONDS", "GRPC_ASR_MIN_WINDOW_SECONDS",
+          "GRPC_ASR_WINDOW_STALL_MS", "GRPC_ASR_MAX_CHANNELS",
+          "GRPC_ASR_THREADS", "GRPC_ASR_KEYFRAME_INTERVAL_SECONDS",
+          "GRPC_ASR_METRICS_INTERVAL_SECONDS", "GRPC_ASR_METRICS_ADDRESS",
+          "GRPC_ASR_REMOTE_ALLOWED_HOSTS", "GRPC_ASR_TOOL_INACTIVITY_SECONDS",
           "GRPC_ASR_DOCUMENT_WORD_PROVENANCE", "GRPC_ASR_FFMPEG", "GRPC_ASR_FFPROBE"}) {
         ::unsetenv(name);
     }
@@ -49,12 +52,20 @@ void verify_defaults() {
     require(config.listen_address == "0.0.0.0:50055", "default listen address");
     require(config.backend == "cuda", "cuda is the default backend");
     require(config.openvino_device == "GPU", "the OpenVINO encoder targets the GPU by default");
+    require(config.openvino_cache_dir == "/tmp/grpc-asr-openvino-cache",
+            "default OpenVINO compile cache dir");
     require(config.models_dir == "/models", "default models dir");
     require(config.models.empty(), "no models named means discovery");
     require(config.concurrency == 2, "default concurrency");
+    require(config.warmup, "startup warmup is enabled by default");
     require(config.queue_timeout_seconds == 1800, "default queue timeout");
     require(config.max_media_bytes == 256ULL * 1024 * 1024, "default media cap");
     require(config.window_seconds == 480, "default window");
+    require(config.min_window_seconds == 30, "default min window");
+    require(config.window_stall_ms == 500, "default window stall threshold");
+    require(config.max_channels == 2, "default per-channel cap");
+    require(config.metrics_address.empty(), "Prometheus listener is off by default");
+    require(config.remote_allowed_hosts.empty(), "remote transcription is off by default");
     require(config.ffmpeg == "ffmpeg" && config.ffprobe == "ffprobe", "default tool names");
     require(config.document_word_provenance, "word provenance is on unless turned off");
 }
@@ -131,6 +142,76 @@ void verify_metrics_can_be_disabled() {
             "metrics interval 0 is a valid off switch");
 }
 
+void verify_warmup_and_openvino_cache() {
+    clear_env();
+    ::setenv("GRPC_ASR_WARMUP", "0", 1);
+    ::setenv("GRPC_ASR_OPENVINO_CACHE_DIR", "/var/cache/openvino", 1);
+    const Config config = load_config_from_env();
+    require(!config.warmup, "warmup disabled via 0");
+    require(config.openvino_cache_dir == "/var/cache/openvino",
+            "OpenVINO cache dir overridden");
+    require(rejects("GRPC_ASR_WARMUP", "later"), "non-boolean warmup fails loud");
+}
+
+void verify_window_and_channel_knobs() {
+    clear_env();
+    ::setenv("GRPC_ASR_WINDOW_SECONDS", "15", 1);
+    const Config auto_clamped = load_config_from_env();
+    require(auto_clamped.window_seconds == 15 && auto_clamped.min_window_seconds == 15,
+            "default min_window_seconds clamps down to window_seconds when unset");
+
+    clear_env();
+    ::setenv("GRPC_ASR_WINDOW_SECONDS", "120", 1);
+    ::setenv("GRPC_ASR_MIN_WINDOW_SECONDS", "20", 1);
+    ::setenv("GRPC_ASR_WINDOW_STALL_MS", "250", 1);
+    ::setenv("GRPC_ASR_MAX_CHANNELS", "4", 1);
+    const Config tuned = load_config_from_env();
+    require(tuned.min_window_seconds == 20, "explicit min_window_seconds");
+    require(tuned.window_stall_ms == 250, "explicit window_stall_ms");
+    require(tuned.max_channels == 4, "explicit max_channels");
+
+    clear_env();
+    ::setenv("GRPC_ASR_WINDOW_SECONDS", "20", 1);
+    ::setenv("GRPC_ASR_MIN_WINDOW_SECONDS", "30", 1);
+    bool inverted_rejected = false;
+    try {
+        (void)load_config_from_env();
+    } catch (const std::invalid_argument& error) {
+        inverted_rejected = std::string(error.what()).contains("GRPC_ASR_MIN_WINDOW_SECONDS");
+    }
+    require(inverted_rejected, "min_window_seconds above window_seconds fails loud");
+    require(rejects("GRPC_ASR_MAX_CHANNELS", "0"), "zero max_channels fails loud");
+    require(rejects("GRPC_ASR_MAX_CHANNELS", "17"), "above-cap max_channels fails loud");
+}
+
+void verify_metrics_and_remote_allowlist() {
+    clear_env();
+    ::setenv("GRPC_ASR_METRICS_ADDRESS", "127.0.0.1:0", 1);
+    ::setenv("GRPC_ASR_REMOTE_ALLOWED_HOSTS", " whisper:8000 , api.example.com , [::1]:9000 ", 1);
+    const Config config = load_config_from_env();
+    require(config.metrics_address == "127.0.0.1:0", "metrics address parsed");
+    require(config.remote_allowed_hosts.size() == 3 &&
+                config.remote_allowed_hosts[0] == "whisper:8000" &&
+                config.remote_allowed_hosts[1] == "api.example.com" &&
+                config.remote_allowed_hosts[2] == "[::1]:9000",
+            "remote allowlist trimmed and split");
+
+    clear_env();
+    ::setenv("GRPC_ASR_REMOTE_ALLOWED_HOSTS", "", 1);
+    require(load_config_from_env().remote_allowed_hosts.empty(),
+            "empty GRPC_ASR_REMOTE_ALLOWED_HOSTS disables remote cleanly");
+
+    require(rejects("GRPC_ASR_METRICS_ADDRESS", "9090"), "port-only metrics address fails loud");
+    require(rejects("GRPC_ASR_METRICS_ADDRESS", "0.0.0.0:99999"),
+            "out-of-range metrics port fails loud");
+    require(rejects("GRPC_ASR_REMOTE_ALLOWED_HOSTS", " , "),
+            "blank non-empty remote allowlist fails loud");
+    require(rejects("GRPC_ASR_REMOTE_ALLOWED_HOSTS", "https://api.example.com"),
+            "scheme in remote allowlist fails loud");
+    require(rejects("GRPC_ASR_REMOTE_ALLOWED_HOSTS", "api.example.com:70000"),
+            "bad port in remote allowlist fails loud");
+}
+
 }  // namespace
 
 int main() {
@@ -142,6 +223,9 @@ int main() {
         verify_word_provenance_switch();
         verify_queue_timeout();
         verify_metrics_can_be_disabled();
+        verify_warmup_and_openvino_cache();
+        verify_window_and_channel_knobs();
+        verify_metrics_and_remote_allowlist();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

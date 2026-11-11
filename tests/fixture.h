@@ -4,11 +4,13 @@
 // and in-memory media fixtures authored by the tests (no committed
 // binaries).
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <fstream>
 #include <print>
 #include <stdexcept>
@@ -58,6 +60,100 @@ inline std::string make_wav(double seconds, double frequency, uint32_t sample_ra
         push_u16(static_cast<uint16_t>(static_cast<int16_t>(sample * 32767.0)));
     }
     return wav;
+}
+
+// Builds a multi-channel 16-bit PCM WAV in memory where channel `c` carries a
+// sine wave at `frequencies[c]` Hz (0 = silence).
+inline std::string make_multichannel_wav(double seconds, const std::vector<double>& frequencies,
+                                         uint32_t sample_rate = 16000) {
+    const auto channels = static_cast<uint16_t>(frequencies.size());
+    const uint32_t frames = static_cast<uint32_t>(seconds * sample_rate);
+    const uint32_t data_bytes = frames * channels * 2U;
+    std::string wav;
+    wav.reserve(44 + data_bytes);
+    auto push_u32 = [&](uint32_t v) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            wav.push_back(static_cast<char>((v >> shift) & 0xFF));
+        }
+    };
+    auto push_u16 = [&](uint16_t v) {
+        wav.push_back(static_cast<char>(v & 0xFF));
+        wav.push_back(static_cast<char>((v >> 8) & 0xFF));
+    };
+    wav += "RIFF";
+    push_u32(36 + data_bytes);
+    wav += "WAVEfmt ";
+    push_u32(16);
+    push_u16(1);  // PCM
+    push_u16(channels);
+    push_u32(sample_rate);
+    push_u32(sample_rate * channels * 2U);
+    push_u16(static_cast<uint16_t>(channels * 2U));
+    push_u16(16);
+    wav += "data";
+    push_u32(data_bytes);
+    for (uint32_t i = 0; i < frames; i++) {
+        for (uint16_t c = 0; c < channels; c++) {
+            const double f = frequencies[c];
+            const double sample =
+                f == 0.0 ? 0.0
+                         : 0.25 * std::sin(2.0 * 3.14159265358979 * f * i / sample_rate);
+            push_u16(static_cast<uint16_t>(static_cast<int16_t>(sample * 32767.0)));
+        }
+    }
+    return wav;
+}
+
+// Normalized DFT magnitude-squared at `target_hz` over mono `samples` at
+// `sample_rate`, for verifying channel tone isolation without leak.
+inline double tone_power(const std::vector<float>& samples, double target_hz,
+                         uint32_t sample_rate = 16000) {
+    if (samples.empty()) {
+        return 0.0;
+    }
+    double re = 0.0;
+    double im = 0.0;
+    const double omega = 2.0 * 3.14159265358979 * target_hz / sample_rate;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        re += static_cast<double>(samples[i]) * std::cos(omega * static_cast<double>(i));
+        im -= static_cast<double>(samples[i]) * std::sin(omega * static_cast<double>(i));
+    }
+    const double n = static_cast<double>(samples.size());
+    return (re * re + im * im) / (n * n);
+}
+
+// Encodes 8 kHz mono int16 PCM into an RFC 4867 AMR-NB byte stream ("#!AMR\n" +
+// 12.2 kbps MR122 20 ms frames) using libopencore-amrnb.so.0 at test time so no
+// binary fixture files are committed and the runtime image stays untouched.
+inline std::string encode_amr_nb_8k(const std::vector<int16_t>& pcm_8k) {
+    void* lib = ::dlopen("libopencore-amrnb.so.0", RTLD_LAZY);
+    require(lib != nullptr, "libopencore-amrnb.so.0 available for AMR-NB fixture encoding");
+    using InitFn = void* (*)(int);
+    using ExitFn = void (*)(void*);
+    using EncodeFn = int (*)(void*, int, const short*, unsigned char*, int);
+    auto init_fn = reinterpret_cast<InitFn>(::dlsym(lib, "Encoder_Interface_init"));
+    auto exit_fn = reinterpret_cast<ExitFn>(::dlsym(lib, "Encoder_Interface_exit"));
+    auto encode_fn = reinterpret_cast<EncodeFn>(::dlsym(lib, "Encoder_Interface_Encode"));
+    require(init_fn != nullptr && exit_fn != nullptr && encode_fn != nullptr,
+            "OpenCORE AMR-NB encoder symbols resolved");
+
+    void* state = init_fn(0);
+    require(state != nullptr, "Encoder_Interface_init succeeded");
+    std::string amr("#!AMR\n", 6);
+    short frame[160] = {};
+    unsigned char encoded[64] = {};
+    for (size_t offset = 0; offset < pcm_8k.size(); offset += 160) {
+        std::memset(frame, 0, sizeof(frame));
+        const size_t copy = std::min<size_t>(160, pcm_8k.size() - offset);
+        std::memcpy(frame, pcm_8k.data() + offset, copy * sizeof(int16_t));
+        // Mode 7 = MR122 (12.2 kbps).
+        const int bytes = encode_fn(state, 7, frame, encoded, 0);
+        require(bytes > 0, "Encoder_Interface_Encode produced frame");
+        amr.append(reinterpret_cast<const char*>(encoded), static_cast<size_t>(bytes));
+    }
+    exit_fn(state);
+    ::dlclose(lib);
+    return amr;
 }
 
 // Builds a 16 kHz mono 32-bit IEEE float WAV (format tag 3) from the given

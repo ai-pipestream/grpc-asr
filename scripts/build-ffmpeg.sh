@@ -8,12 +8,13 @@
 #
 # Only what the service runs is compiled in (see src/media/video_demux.cpp):
 #   - ffprobe over the media: format duration, first audio and video stream
-#   - ffmpeg -map a:0 -f f32le -ac 1 -ar 16000 pipe:1   (audio for whisper)
+#   - ffmpeg -map a:0 [-af pan=...] -f f32le -ar 16000 pipe:1   (audio for whisper)
 #   - ffmpeg -map v:0 -vf fps=1/N -f image2pipe -c:v png pipe:1   (stills)
-# over the containers that take the ffmpeg path (Ogg, MP4/M4A/MOV,
-# Matroska/WebM) plus the audio containers the in-process decoder also
-# handles (WAV, MP3, FLAC, raw ADTS AAC), read from /dev/fd/3 (file
-# protocol) and written to pipe:1. Anything else fails as undecodable.
+# over the containers that take the ffmpeg path (Ogg, MP4/M4A/M4V/MOV,
+# Matroska/WebM, AVI, ASF/WMA/WMV, AMR-NB/WB, MPEG-PS/TS, raw ADTS AAC) plus
+# the audio containers the in-process decoder also handles (WAV, MP3, FLAC),
+# read from pipe:0 or /dev/fd/3 (pipe and file protocols) and written to
+# pipe:1. Anything else fails as undecodable.
 #
 # Corresponding source: the verified tarball is copied next to the license
 # texts and the exact configure line under PREFIX/share/doc/ffmpeg, so the
@@ -46,13 +47,13 @@ configure_args=(
   --disable-everything --disable-doc --disable-ffplay --disable-avdevice
   --disable-network --disable-debug
   --enable-protocol=file,pipe
-  --enable-demuxer=ogg,mov,matroska,wav,mp3,flac,aac,mpegts,nut
-  --enable-decoder=aac,aac_fixed,aac_latm,mp3,mp3float,mp2,mp2float,flac,alac,vorbis,opus,ac3,eac3,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,pcm_alaw,pcm_mulaw
-  --enable-decoder=h264,hevc,vp8,vp9,mpeg4,mpeg1video,mpeg2video,mjpeg,h263,theora,prores
-  --enable-parser=aac,aac_latm,mpegaudio,flac,vorbis,opus,ac3,h264,hevc,vp8,vp9,mpeg4video,mpegvideo,mjpeg,h263
+  --enable-demuxer=ogg,mov,matroska,wav,mp3,flac,aac,avi,asf,amr,amrnb,amrwb,mpegps,mpegts,nut
+  --enable-decoder=aac,aac_fixed,aac_latm,mp3,mp3float,mp2,mp2float,flac,alac,vorbis,opus,ac3,eac3,wmav1,wmav2,wmapro,wmalossless,amrnb,amrwb,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,pcm_alaw,pcm_mulaw
+  --enable-decoder=h264,hevc,vp8,vp9,mpeg4,mpeg1video,mpeg2video,mjpeg,h263,theora,prores,msmpeg4v1,msmpeg4v2,msmpeg4v3,wmv1,wmv2,wmv3,vc1
+  --enable-parser=aac,aac_latm,mpegaudio,flac,vorbis,opus,ac3,h264,hevc,vp8,vp9,mpeg4video,mpegvideo,mjpeg,h263,vc1
   --enable-encoder=pcm_f32le,png,mjpeg,aac,libopenh264
   --enable-muxer=pcm_f32le,image2pipe,nut,matroska,mp4
-  --enable-filter=aresample,aformat,format,scale,fps,null,anull
+  --enable-filter=aresample,aformat,pan,channelsplit,format,scale,fps,null,anull
 )
 ./configure "${configure_args[@]}"
 

@@ -9,8 +9,13 @@
 #include "engine/transcriber.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <print>
+#include <thread>
 #include <vector>
 
 #include "fixture.h"
@@ -271,6 +276,268 @@ void verify_duration_cap() {
     require(threw, "media past the duration cap throws");
 }
 
+void verify_stall_cut_default_window(const std::string& jfk) {
+    // Issue #13: feed 40 s of PCM, block for 2 s, then deliver the rest using
+    // the default 480 s window configuration (min_window_seconds = 30,
+    // window_stall_ms = 500). A FinalSegment must arrive during the 2 s block,
+    // and the completed run must carry the fixture text with dense indexes.
+    const std::vector<float> unit = decode_pcm(jfk);
+    std::vector<float> full_pcm;
+    while (full_pcm.size() < 52 * asr::media::kModelSampleRate) {
+        full_pcm.insert(full_pcm.end(), unit.begin(), unit.end());
+    }
+    const size_t first_burst_samples = 40 * asr::media::kModelSampleRate;
+
+    std::mutex mu;
+    std::condition_variable cv;
+    size_t available = first_burst_samples;
+    bool producer_done = false;
+    bool in_stall = true;
+    std::atomic<bool> final_during_stall{false};
+
+    std::jthread producer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            in_stall = false;
+            available = full_pcm.size();
+            producer_done = true;
+        }
+        cv.notify_all();
+    });
+
+    EngineOptions options;
+    options.language = "en";
+    options.threads = 4;
+    options.window_seconds = 480;
+    options.min_window_seconds = 30;
+    options.window_stall_ms = 500;
+
+    size_t cursor = 0;
+    std::vector<EngineSegment> finals;
+    const EngineResult result = Transcriber::run(
+        g_ctx, g_state, options,
+        [&](float* out, size_t max_samples) -> size_t {
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [&] { return producer_done || available > cursor; });
+            if (cursor >= available) {
+                return 0;
+            }
+            const size_t count = std::min(max_samples, available - cursor);
+            std::copy_n(full_pcm.data() + cursor, count, out);
+            cursor += count;
+            return count;
+        },
+        [&](const EngineSegment& segment, bool is_final) {
+            if (is_final) {
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    if (in_stall) {
+                        final_during_stall.store(true);
+                    }
+                }
+                finals.push_back(segment);
+            }
+            return true;
+        },
+        {},
+        [&](std::chrono::milliseconds timeout) -> bool {
+            std::unique_lock<std::mutex> lock(mu);
+            return cv.wait_for(lock, timeout, [&] { return producer_done || available > cursor; });
+        });
+
+    require(final_during_stall.load(),
+            "a FinalSegment must arrive during the 2 s upload stall with default 480 s window");
+    require(!finals.empty(), "stall-cut run produced final segments");
+    std::string transcript;
+    for (size_t i = 0; i < finals.size(); ++i) {
+        require(finals[i].index == i, "stall-cut final indexes remain dense");
+        transcript += finals[i].text;
+    }
+    require(lower(transcript).find("country") != std::string::npos,
+            "stall-cut transcript contains 'country', got: " + transcript);
+    require(result.final_segments == finals.size(), "stall-cut trailer matches finals");
+    require(result.windows >= 2, "stall-cut executed at least two windows");
+}
+
+void verify_decoding_options(const std::string& jfk) {
+    // Issue #14:
+    // 1. initial_prompt with a distinctive proper-noun spelling ("Amerikans")
+    //    conditions the decoder to adopt that spelling across windows.
+    {
+        EngineOptions options;
+        options.language = "en";
+        options.threads = 4;
+        options.window_seconds = 10;
+        options.decoding.initial_prompt = "And so my fellow Amerikans, ask not.";
+        Collected prompted = run_over(jfk, options);
+        std::string transcript;
+        for (const EngineSegment& segment : prompted.finals) {
+            require(segment.has_no_speech_prob, "no_speech_prob populated on segment");
+            require(segment.no_speech_prob >= 0.0f && segment.no_speech_prob <= 1.0f,
+                    "no_speech_prob within [0, 1]");
+            require(!segment.suppressed, "clear speech segment is not suppressed");
+            transcript += segment.text;
+        }
+        require(lower(transcript).find("amerikans") != std::string::npos,
+                "initial_prompt conditioned proper-noun spelling 'Amerikans', got: " +
+                    transcript);
+    }
+
+    // 2. Beam search strategy produces the fixture text cleanly.
+    {
+        EngineOptions options;
+        options.language = "en";
+        options.threads = 4;
+        options.window_seconds = 30;
+        options.decoding.strategy = asr::engine::SamplingMode::kBeamSearch;
+        options.decoding.beam_size = 3;
+        Collected beamed = run_over(jfk, options);
+        std::string transcript;
+        for (const EngineSegment& segment : beamed.finals) {
+            transcript += segment.text;
+        }
+        require(lower(transcript).find("country") != std::string::npos,
+                "beam search transcript contains 'country', got: " + transcript);
+    }
+
+    // 3. Hiss fixture with default and explicit hallucination gates: when a
+    //    segment appears on hiss/silence, no_speech_prob > 0.5 and suppressed.
+    {
+        EngineOptions options;
+        options.language = "en";
+        options.window_seconds = 30;
+        Collected hiss_default = run_over(make_hiss_wav(6.0), options);
+        for (const EngineSegment& segment : hiss_default.finals) {
+            require(segment.has_no_speech_prob && segment.no_speech_prob > 0.5f,
+                    "hiss segment reports high no_speech_prob");
+            require(segment.suppressed, "hiss hallucinated segment is marked suppressed");
+        }
+
+        // Also deterministically trigger suppression on digital silence, where
+        // whisper emits "[BLANK_AUDIO]" with high no_speech_prob and logprob < 0.
+        options.decoding.no_speech_threshold = 0.4f;
+        options.decoding.logprob_threshold = 0.0f;
+        Collected gated_silence = run_over(make_wav(4.0, 0.0), options);
+        require(!gated_silence.finals.empty(), "digital silence emits non-speech marker");
+        for (const EngineSegment& segment : gated_silence.finals) {
+            require(segment.has_no_speech_prob && segment.no_speech_prob > 0.5f,
+                    "gated non-speech segment has no_speech_prob > 0.5");
+            require(segment.suppressed, "gated non-speech segment has suppressed=true");
+        }
+    }
+}
+
+void verify_per_channel_labels(const std::string& jfk) {
+    // Issue #15: channel=0 labels segments "C1" without diarize and "C1-S1"
+    // with diarize.
+    EngineOptions options;
+    options.language = "en";
+    options.window_seconds = 30;
+    options.channel = 0;
+    Collected ch0 = run_over(jfk, options);
+    require(!ch0.finals.empty(), "per-channel run produced segments");
+    for (const EngineSegment& segment : ch0.finals) {
+        require(segment.channel == std::optional<uint32_t>(0), "segment carries channel 0");
+        require(segment.speaker == "C1", "segment speaker is C1, got: " + segment.speaker);
+    }
+
+    options.diarize = true;
+    options.channel = 1;
+    Collected ch1_diarize = run_over(jfk, options);
+    require(!ch1_diarize.finals.empty(), "per-channel + diarize run produced segments");
+    for (const EngineSegment& segment : ch1_diarize.finals) {
+        require(segment.channel == std::optional<uint32_t>(1), "segment carries channel 1");
+        require(segment.speaker.starts_with("C2-S"),
+                "per-channel + diarize speaker starts with C2-S, got: " + segment.speaker);
+    }
+}
+
+void verify_language_switch(const std::string& jfk) {
+    // Issue #16: concatenate the ~11 s English fixture (padded to 10 s boundary)
+    // with the committed Spanish fixture on the multilingual model using a 10 s
+    // window, and assert per-segment language switches to "es" and the trailer
+    // lists both ["en", "es"] with language == "en".
+    const char* multi_model = env_or_null("GRPC_ASR_TEST_MULTILINGUAL_MODEL");
+    const char* es_sample = env_or_null("GRPC_ASR_TEST_ES_SAMPLE");
+    if (multi_model == nullptr || slurp(multi_model).empty() || es_sample == nullptr ||
+        slurp(es_sample).empty()) {
+        std::println(stderr, "note: skipping multilingual switch sub-test (no multilingual model)");
+        return;
+    }
+
+    whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu = false;
+    whisper_context* mctx = whisper_init_from_file_with_params_no_state(multi_model, cparams);
+    require(mctx != nullptr, "multilingual model loads");
+    whisper_state* mstate = whisper_init_state(mctx);
+    require(mstate != nullptr, "multilingual state allocates");
+
+    try {
+        std::vector<float> en_pcm = decode_pcm(jfk);
+        // Pad English part to 20 s (two clean 10 s windows, trailing silence so
+        // cut_window does not hold English speech into the Spanish window).
+        if (en_pcm.size() < 20 * asr::media::kModelSampleRate) {
+            en_pcm.resize(20 * asr::media::kModelSampleRate, 0.0f);
+        }
+        const std::vector<float> es_pcm = decode_pcm(slurp(es_sample));
+        require(!es_pcm.empty(), "Spanish fixture decoded to PCM");
+
+        std::vector<float> combined = en_pcm;
+        combined.insert(combined.end(), es_pcm.begin(), es_pcm.end());
+
+        EngineOptions options;
+        options.language.clear();  // autodetect per window
+        options.threads = 4;
+        options.window_seconds = 10;
+
+        size_t pos = 0;
+        std::vector<EngineSegment> finals;
+        const EngineResult res = Transcriber::run(
+            mctx, mstate, options,
+            [&](float* out, size_t max_samples) -> size_t {
+                const size_t n = std::min(max_samples, combined.size() - pos);
+                std::copy_n(combined.data() + pos, n, out);
+                pos += n;
+                return n;
+            },
+            [&](const EngineSegment& segment, bool is_final) {
+                if (is_final) {
+                    finals.push_back(segment);
+                }
+                return true;
+            });
+
+        bool saw_en = false;
+        bool saw_es_after_switch = false;
+        for (const EngineSegment& seg : finals) {
+            if (seg.start_ms < 15000 && seg.language == "en") {
+                saw_en = true;
+            }
+            if (seg.start_ms >= 20000 && seg.language == "es") {
+                saw_es_after_switch = true;
+            }
+        }
+        require(saw_en, "English window segments tagged with language 'en'");
+        require(saw_es_after_switch,
+                "segments after the 20 s switch tagged with language 'es'");
+        require(res.language == "en", "trailer primary language stays first ('en'), got: " +
+                                          res.language);
+        require(std::find(res.languages.begin(), res.languages.end(), "en") !=
+                    res.languages.end(),
+                "trailer languages lists 'en'");
+        require(std::find(res.languages.begin(), res.languages.end(), "es") !=
+                    res.languages.end(),
+                "trailer languages lists 'es'");
+    } catch (...) {
+        whisper_free_state(mstate);
+        whisper_free(mctx);
+        throw;
+    }
+    whisper_free_state(mstate);
+    whisper_free(mctx);
+}
+
 }  // namespace
 
 int main() {
@@ -298,6 +565,10 @@ int main() {
         verify_silence();
         verify_empty_windows_before_speech(jfk);
         verify_duration_cap();
+        verify_stall_cut_default_window(jfk);
+        verify_decoding_options(jfk);
+        verify_per_channel_labels(jfk);
+        verify_language_switch(jfk);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

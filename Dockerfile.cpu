@@ -10,7 +10,7 @@ FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl g++ git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libssl-dev libcurl4-openssl-dev libopenh264-dev \
+        ca-certificates cmake curl g++ git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libopencore-amrnb0 libssl-dev libcurl4-openssl-dev libopenh264-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
@@ -55,7 +55,7 @@ RUN --mount=type=cache,id=grpc-asr-ubuntu26-cpu-cxx23-grpc1.83.0-whisper1.9.5-r2
 FROM ubuntu:26.04
 
 # libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libcurl4t64 libssl3t64 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 libcurl4t64 libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server

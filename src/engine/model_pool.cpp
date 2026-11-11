@@ -13,6 +13,7 @@
 
 #include "cancellation.h"
 #include "ggml-backend.h"
+#include "metrics.h"
 #include "whisper.h"
 
 namespace asr::engine {
@@ -67,6 +68,8 @@ std::vector<std::string> discover_models(const std::string& models_dir) {
 }
 
 struct ModelPool::Entry {
+    std::string name;
+    size_t registered_states = 0;
     std::string hash;
     whisper_context* ctx = nullptr;
     std::mutex mutex;
@@ -76,6 +79,9 @@ struct ModelPool::Entry {
     std::vector<whisper_state*> all_states;
 
     ~Entry() {
+        if (registered_states > 0) {
+            metrics_remove_model_states(name, registered_states);
+        }
         for (whisper_state* state : all_states) {
             whisper_free_state(state);
         }
@@ -85,7 +91,7 @@ struct ModelPool::Entry {
     }
 };
 
-ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
+ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up_(config.warmup) {
     whisper_context_params cparams = whisper_context_default_params();
     if (backend_ == "cuda") {
         if (ggml_backend_reg_by_name("CUDA") == nullptr) {
@@ -109,6 +115,9 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
         names = discover_models(config.models_dir);
     }
 
+    constexpr size_t kWarmupSamples = 16000;
+    const std::vector<float> warmup_silence(config.warmup ? kWarmupSamples : 0, 0.0f);
+
     for (const std::string& name : names) {
         std::filesystem::path path = model_path(config.models_dir, name);
         if (!std::filesystem::exists(path)) {
@@ -116,6 +125,7 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                                         path.string());
         }
         auto entry = std::make_unique<Entry>();
+        entry->name = name;
         std::ifstream weights(path, std::ios::binary | std::ios::ate);
         const auto size = weights.tellg();
         if (!weights || size <= 0 || size > INT64_C(8589934592))
@@ -138,17 +148,21 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                 throw std::runtime_error("allocating state " + std::to_string(i) +
                                          " for model '" + name + "' failed");
             }
+            // Push before OpenVINO/warmup so ~Entry frees the state on throw.
+            entry->all_states.push_back(state);
             if (backend_ == "openvino") {
                 // Buffer-loaded weights do not retain a filesystem path. Pass
-                // the matching encoder XML explicitly; cache stays on tmpfs.
+                // the matching encoder XML explicitly; cache directory comes
+                // from GRPC_ASR_OPENVINO_CACHE_DIR.
                 // Returns non-zero both when the converted encoder is
                 // missing, when the device is unavailable, and when this
                 // binary was built without the OpenVINO encoder; either way
                 // the operator asked for something this process cannot do.
-                static const std::string openvino_cache_dir = "/tmp/grpc-asr-openvino-cache";
                 if (whisper_ctx_init_openvino_encoder_with_state(
-                        entry->ctx, state, (path.parent_path() / (path.stem().string() + "-encoder-openvino.xml")).c_str(), config.openvino_device.c_str(),
-                        openvino_cache_dir.c_str()) != 0) {
+                        entry->ctx, state,
+                        (path.parent_path() / (path.stem().string() + "-encoder-openvino.xml"))
+                            .c_str(),
+                        config.openvino_device.c_str(), config.openvino_cache_dir.c_str()) != 0) {
                     throw std::runtime_error(
                         "GRPC_ASR_BACKEND=openvino: OpenVINO encoder init failed for model '" +
                         name + "' on device '" + config.openvino_device +
@@ -157,12 +171,43 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend) {
                         "weights, and a device this host has");
                 }
             }
+            if (config.warmup) {
+                whisper_full_params wparams =
+                    whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+                wparams.n_threads = static_cast<int>(config.threads);
+                wparams.no_context = true;
+                wparams.single_segment = true;
+                wparams.print_special = false;
+                wparams.print_progress = false;
+                wparams.print_realtime = false;
+                wparams.print_timestamps = false;
+                wparams.language = "en";
+                const auto start = std::chrono::steady_clock::now();
+                const int rc = whisper_full_with_state(
+                    entry->ctx, state, wparams, warmup_silence.data(),
+                    static_cast<int>(warmup_silence.size()));
+                const auto elapsed_ms = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count());
+                if (rc != 0) {
+                    throw std::runtime_error("warmup failed for model '" + name + "' state " +
+                                             std::to_string(i) + " (rc=" + std::to_string(rc) +
+                                             ")");
+                }
+                warmup_ms_ += elapsed_ms;
+                std::println("grpc-asr warmup: {} state {} {}ms", name, i, elapsed_ms);
+            }
             entry->free_states.push_back(state);
-            entry->all_states.push_back(state);
         }
+        metrics_add_model_states(name, config.concurrency);
+        entry->registered_states = config.concurrency;
         entries_[name] = std::move(entry);
         std::println("grpc-asr model loaded: {} ({} state(s), backend {})", name,
                      config.concurrency, backend_);
+    }
+    if (config.warmup) {
+        metrics_record_warmup_ms(warmup_ms_);
     }
     std::println("grpc-asr backend: {} (GRPC_ASR_BACKEND={})", backend_, backend_);
 }
@@ -190,14 +235,44 @@ ModelPool::Lease ModelPool::acquire(const std::string& model, std::stop_token st
         throw std::invalid_argument("model '" + model + "' is not loaded");
     }
     Entry& entry = *found->second;
+    const auto wait_start = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(entry.mutex);
     const auto state_free = [&] { return !entry.free_states.empty(); };
-    // A cancelled or timed-out stream leaves the queue at once instead of
-    // holding its RPC thread and its whole upload until a state frees.
-    const bool got_state =
-        deadline == std::chrono::steady_clock::time_point::max()
-            ? entry.available.wait(lock, stop, state_free)
-            : entry.available.wait_until(lock, stop, deadline, state_free);
+
+    struct QueueDepthGuard {
+        std::string_view model_name;
+        bool queued = false;
+        explicit QueueDepthGuard(std::string_view name, bool needs_wait)
+            : model_name(name), queued(needs_wait) {
+            if (queued) {
+                metrics_inc_queue_depth(model_name);
+            }
+        }
+        ~QueueDepthGuard() {
+            if (queued) {
+                metrics_dec_queue_depth(model_name);
+            }
+        }
+    };
+
+    bool got_state = state_free();
+    if (!got_state) {
+        QueueDepthGuard depth_guard(model, true);
+        // A cancelled or timed-out stream leaves the queue at once instead of
+        // holding its RPC thread and its whole upload until a state frees.
+        got_state = deadline == std::chrono::steady_clock::time_point::max()
+                        ? entry.available.wait(lock, stop, state_free)
+                        : entry.available.wait_until(lock, stop, deadline, state_free);
+    } else if (stop.stop_requested()) {
+        got_state = false;
+    }
+
+    const auto wait_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             wait_start)
+            .count());
+    metrics_observe_queue_wait(model, wait_ns);
+
     if (!got_state) {
         if (stop.stop_requested()) {
             throw Cancelled("the stream went away while waiting for a '" + model + "' state");
@@ -206,6 +281,7 @@ ModelPool::Lease ModelPool::acquire(const std::string& model, std::stop_token st
     }
     whisper_state* state = entry.free_states.front();
     entry.free_states.pop_front();
+    metrics_inc_model_busy(model);
     return Lease(this, model, entry.ctx, state);
 }
 
@@ -219,6 +295,7 @@ void ModelPool::release(const std::string& model, whisper_state* state) {
         std::lock_guard<std::mutex> lock(entry.mutex);
         entry.free_states.push_back(state);
     }
+    metrics_dec_model_busy(model);
     entry.available.notify_one();
 }
 

@@ -1,5 +1,6 @@
 #include "document/document_fold.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -28,6 +29,19 @@ std::string trimmed(const std::string& text) {
     }
     size_t end = text.find_last_not_of(whitespace);
     return text.substr(begin, end - begin + 1);
+}
+
+bool is_spoken_text(const std::string& trimmed_text) {
+    if (trimmed_text.empty()) {
+        return false;
+    }
+    if ((trimmed_text.front() == '[' && trimmed_text.back() == ']' &&
+         trimmed_text.find(']') == trimmed_text.size() - 1) ||
+        (trimmed_text.front() == '(' && trimmed_text.back() == ')' &&
+         trimmed_text.find(')') == trimmed_text.size() - 1)) {
+        return false;
+    }
+    return true;
 }
 
 void set_number(google::protobuf::Map<std::string, google::protobuf::Value>* fields,
@@ -216,7 +230,22 @@ void AsrDocumentFold::add_word_provenance(docv1::TextItemBase* base, const asrv1
     }
 }
 
+void AsrDocumentFold::insert_body_child(const std::string& ref, uint64_t start_ms, bool is_text) {
+    const ChildKey key{start_ms, is_text};
+    const auto it = std::upper_bound(body_child_keys_.begin(), body_child_keys_.end(), key);
+    const int index = static_cast<int>(it - body_child_keys_.begin());
+    body_child_keys_.insert(it, key);
+    auto* children = document_.mutable_body()->mutable_children();
+    children->Add()->set_ref(ref);
+    for (int j = children->size() - 1; j > index; --j) {
+        children->SwapElements(j, j - 1);
+    }
+}
+
 void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
+    if (segment.suppressed()) {
+        return;
+    }
     std::string ref = "#/texts/" + std::to_string(document_.texts_size());
     docv1::TextItemBase* base = document_.add_texts()->mutable_text()->mutable_base();
     base->set_self_ref(ref);
@@ -227,8 +256,14 @@ void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
     const std::string text = trimmed(segment.text());
     base->set_text(text);
 
-    if (!segment.speaker_id().empty()) {
+    if (!segment.speaker_id().empty() && is_spoken_text(text)) {
         register_speaker(segment.speaker_id());
+    }
+    if (!segment.language().empty()) {
+        docv1::LanguageMetaField* language = base->mutable_meta()->mutable_language();
+        language->set_code(language_label(segment.language()));
+        language->set_code_raw(segment.language());
+        language->set_created_by(kCollector);
     }
 
     // prov[0] locates the whole item; the word entries that may follow
@@ -245,7 +280,7 @@ void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
                   static_cast<double>(segment.end_ms()) / 1000.0,
                   segment.has_avg_logprob() ? std::optional<float>(segment.avg_logprob())
                                             : std::nullopt);
-    document_.mutable_body()->add_children()->set_ref(ref);
+    insert_body_child(ref, segment.start_ms(), /*is_text=*/true);
 }
 
 void AsrDocumentFold::on_keyframe(const asrv1::Keyframe& keyframe) {
@@ -267,20 +302,25 @@ void AsrDocumentFold::on_keyframe(const asrv1::Keyframe& keyframe) {
     time_span(picture->add_prov(), keyframe.timestamp_ms(), keyframe.timestamp_ms(), "");
     double seconds = static_cast<double>(keyframe.timestamp_ms()) / 1000.0;
     stamp_sources(picture->mutable_source(), seconds, seconds, std::nullopt);
-    document_.mutable_body()->add_children()->set_ref(ref);
+    insert_body_child(ref, keyframe.timestamp_ms(), /*is_text=*/false);
 }
 
 void AsrDocumentFold::on_complete(const asrv1::TranscriptComplete& complete) {
     docv1::BaseMeta* meta = document_.mutable_body()->mutable_meta();
-    if (!complete.language().empty()) {
-        // The detected language belongs in the slots the schema already
-        // has: the enum for consumers that switch on it, the raw string
-        // for codes the enum does not know, and the document-level tag.
-        docv1::LanguageMetaField* language = meta->mutable_language();
-        language->set_code(language_label(complete.language()));
-        language->set_code_raw(complete.language());
-        language->set_created_by(kCollector);
-        document_.mutable_source_meta()->set_language(complete.language());
+    // Only stamp document-level language when the transcript is monolingual
+    // (at most one entry in `languages`). Multi-language transcripts carry
+    // per-item `TextItemBase.meta.language` and leave the document-level
+    // slot empty so downstream chunkers know items differ.
+    if (complete.languages_size() <= 1) {
+        const std::string doc_language =
+            complete.languages_size() == 1 ? complete.languages(0) : complete.language();
+        if (!doc_language.empty()) {
+            docv1::LanguageMetaField* language = meta->mutable_language();
+            language->set_code(language_label(doc_language));
+            language->set_code_raw(doc_language);
+            language->set_created_by(kCollector);
+            document_.mutable_source_meta()->set_language(doc_language);
+        }
     }
     auto* fields = meta->mutable_custom_fields();
     set_number(fields, "asr.duration_ms", static_cast<double>(complete.duration_ms()));

@@ -5,21 +5,23 @@ into the gRParse Document data plane.
 
 A standalone C++ gRPC server embedding whisper.cpp. Media streams in over a
 bidirectional `Transcribe` RPC; timed transcript segments stream back as the
-decoder commits them, so for audio containers transcription starts while the
-upload is still in flight. Video containers are demuxed through ffmpeg over a
-memfd (diskless), with optional keyframe stills emitted alongside the
-transcript.
+decoder commits them, so transcription starts while the upload is still in
+flight for both in-process audio (WAV, MP3, FLAC) and streamable containers
+demuxed over an ffmpeg pipe (Ogg, Matroska/WebM, fast-start MP4/MOV, AMR,
+MPEG-PS/TS, raw ADTS AAC). Seekable-only containers (trailing-`moov` MP4, AVI,
+ASF/WMA/WMV) and keyframe extraction use a single-copy anonymous memfd
+(diskless), with optional keyframe stills emitted alongside the transcript.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as grpc-asr server
-    participant F as ffmpeg (video only)
+    participant F as ffmpeg (pipe:0 or sealed memfd)
     participant W as whisper.cpp
     C->>S: TranscribeOptions, then MediaChunk stream
-    S->>F: demux audio from sealed memfd
-    F-->>S: PCM
-    S->>W: whisper_full over PCM windows
+    S->>F: stream pipe:0 live (or demux sealed memfd)
+    F-->>S: 16 kHz PCM
+    S->>W: whisper_full over stall-aware PCM windows
     S-->>C: MediaInfo
     W-->>S: committed segments
     S-->>C: PartialSegment / FinalSegment
@@ -88,26 +90,65 @@ ARM and GPU results must be reported separately from CPU results.
 `Transcribe(stream TranscribeRequest) returns (stream TranscribeResponse)`:
 the first request message carries `TranscribeOptions` (`model`, `language`,
 `task`, `word_timestamps`, `emit_keyframes`, `keyframe_interval_seconds`,
-`emit_document`, `diarize`, `filename`), the rest carry the encoded media as
-`MediaChunk` messages. Response events arrive in order: `MediaInfo`, then
-`PartialSegment` and `FinalSegment` events (finals replace partials by
-index), optional `Keyframe` PNGs, and a `TranscriptComplete` trailer with
-counts.
+`emit_document`, `diarize`, `filename`, `window_seconds`, `decoding`,
+`channel_mode`, `remote`), the rest carry the encoded media as
+`MediaChunk` messages. Response events arrive in order: `MediaInfo`
+(including `ContainerFamily`), then `PartialSegment` and `FinalSegment`
+events (finals replace partials by index), optional `Keyframe` PNGs, and a
+`TranscriptComplete` trailer with counts, effective `window_seconds`,
+per-channel segment counts, and distinct detected `languages`.
 
-`diarize` asks the decoder for speaker turns; segments then carry a
-stream-local `speaker_id` ("S1", "S2", ...). A model without speaker-turn
-training never predicts a turn, so everything stays on the first speaker.
+- **Local decoding options (`TranscribeOptions.decoding`):** `initial_prompt`
+  (<= 1024 UTF-8 bytes), `SamplingStrategy` (`GREEDY` or `BEAM_SEARCH`),
+  `beam_size` (1..8), `best_of` (1..8), `no_speech_threshold` (default 0.6),
+  `logprob_threshold` (default -1.0), `entropy_threshold` (default 2.4), and
+  `suppress_non_speech_tokens`. Out-of-range values fail `INVALID_ARGUMENT`
+  before any media byte is read. Every Whisper segment carries
+  `no_speech_prob` and `suppressed` (set when `no_speech_prob` exceeds the
+  no-speech threshold and `avg_logprob` falls below the logprob threshold).
+- **Multi-channel separation (`TranscribeOptions.channel_mode`):**
+  `CHANNEL_MODE_MIXDOWN` (default) mixes all channels to mono;
+  `CHANNEL_MODE_PER_CHANNEL` decodes each source channel independently (up to
+  `GRPC_ASR_MAX_CHANNELS`, default 2; above the cap fails `INVALID_ARGUMENT`
+  before decoding). Segments carry zero-based `channel` and speaker labels
+  `C1`, `C2`, ... (or `C1-S1`, `C2-S1`, ... when `diarize` is also set), and
+  `TranscriptComplete.segment_count_by_channel` reports per-channel counts.
+- **Speaker diarization (`diarize`):** asks the decoder for speaker turns;
+  mono/mixdown segments carry stream-local `speaker_id` (`S1`, `S2`, ...). A
+  model without speaker-turn training never predicts a turn, so everything
+  stays on the first speaker.
+- **Per-segment language:** `Segment.language` carries the ISO 639-1 code
+  detected (or pinned) for that window, and `TranscriptComplete.languages`
+  lists distinct codes in first-appearance order (`TranscriptComplete.language`
+  remains the first).
+- **Stall-aware windowing:** `TranscribeOptions.window_seconds` is clamped into
+  `[GRPC_ASR_MIN_WINDOW_SECONDS, GRPC_ASR_WINDOW_SECONDS]`. Once at least
+  `min_window_seconds` of PCM is buffered, if the upload stalls for
+  `GRPC_ASR_WINDOW_STALL_MS` before EOF, the window cuts early and decodes
+  immediately rather than waiting for the full maximum window.
+- **Remote transcription (`TranscribeOptions.remote`):** forwards the media as
+  streaming `multipart/form-data` over `libcurl` to an OpenAI-compatible
+  `verbose_json` endpoint when authorized by `GRPC_ASR_REMOTE_ALLOWED_HOSTS`
+  (`FAILED_PRECONDITION` when unset; `PERMISSION_DENIED` when unlisted or
+  resolving to loopback/private/link-local addresses without an explicit
+  `localhost` or IP literal allowlist entry). Caller HTTP headers are never
+  logged or echoed in status messages.
 
 With `emit_document`, one `ai.pipestream.document.v1.Document` event is
 emitted immediately before the trailer: the collector-side fold of the
 transcript.
 
-- Final segments become text items located by **time provenance**:
-  `prov[0].time` is the segment's span in milliseconds, and with
-  `word_timestamps` one further entry per word carries that word's span
-  plus its charspan (Unicode code points) inside the item text. Speakers,
-  when diarizing, ride the spans and are registered once in
-  `Document.media.speakers`.
+- Final non-suppressed segments become text items located by **time
+  provenance**: `prov[0].time` is the segment's span in milliseconds, and with
+  `word_timestamps` one further entry per word carries that word's span plus
+  its charspan (Unicode code points) inside the item text. Segments with
+  `suppressed = true` stay on the typed stream and are skipped by the fold.
+  Speakers are registered in `Document.media.speakers` only for speakers/channels
+  that produced spoken text.
+- `Document.body.children` is ordered by media time (`prov[0].time.start_ms`,
+  pictures before texts at identical timestamps) so interleaved video keyframes
+  and transcript segments read chronologically while the `texts` and `pictures`
+  arenas keep arrival order.
 - Every item keeps `TrackSource` (seconds) and
   `CollectorSource{collector: "asr", model, version, confidence}` for
   consumers that already read them. The confidence is a rescaled decoder
@@ -115,30 +156,53 @@ transcript.
   the same `CollectorSource` as a typed `raw_score` with `raw_score_kind`
   `"avg_logprob"`. A segment that scored no token claims neither field, and
   nothing is written in their place; a score of exactly 0 is a real value.
-- The detected language lands in `body.meta.language` (enum plus raw code)
-  and in `Document.source_meta.language`; the decoded duration and codec in
-  `Document.media`; the filename, sniffed mimetype, and FNV-1a content hash
-  in `Document.name` and `Document.origin`.
+- Each text item sets `TextItemBase.meta.language` from `Segment.language`.
+  Document-level `body.meta.language` and `Document.source_meta.language` are
+  populated when at most one language is present and left unset on
+  multi-language transcripts. The decoded duration and codec land in
+  `Document.media`; the filename, sniffed mimetype, and incremental FNV-1a
+  content hash in `Document.name` and `Document.origin`.
 - Keyframes become picture items whose `ImageRef.uri` is
   `keyframe:<timestamp_ms>`, a pointer back at the typed event rather than
   embedded PNG bytes, so the Document stays one bounded message; the frame's
   true instant is its own zero-length time span.
 
 The typed event stream remains the lossless wire: per-word probabilities,
-segment indexes, and the trailer's counts stay there. The document schema is
-vendored verbatim from gRParse
+segment indexes, suppressed hallucinations, and the trailer's counts stay
+there. The document schema is vendored verbatim from gRParse
 (`proto/ai/pipestream/document/v1/document.proto`); do not edit it here.
 
-`GetServiceInfo` reports the build, backend, loaded models, and caps, plus
-the `UiInfo` block the shared demo shell reads to build its tab bar.
+`GetServiceInfo` reports the build, backend, loaded models, caps,
+`min_window_seconds`, `max_window_seconds`, `warmed_up`, and `remote_enabled`,
+plus the `UiInfo` block the shared demo shell reads to build its tab bar.
 Standard `grpc.health.v1.Health` and server reflection are registered.
 
-Containers: wav, mp3 and flac decode in process; ogg (Vorbis, Opus),
-mp4/mov and mkv/webm are demuxed by ffmpeg once the upload is complete
-(the media needs an audio track). Raw ADTS AAC is not sniffed and is
-refused as an unknown container. Errors: cap overruns are
-`RESOURCE_EXHAUSTED`, undecodable media is `INVALID_ARGUMENT`, unknown
-containers are `UNIMPLEMENTED`, decoder faults are `INTERNAL`.
+### Supported containers and memory model
+
+| Container family | Extensions | Ingest & decode path |
+|---|---|---|
+| WAV, MP3, FLAC | `.wav`, `.mp3`, `.flac` | In-process (`miniaudio`) live while uploading |
+| Ogg (Opus, Vorbis, FLAC, Speex) | `.ogg`, `.oga`, `.opus` | Live `ffmpeg -i pipe:0` while uploading |
+| Matroska / WebM | `.mkv`, `.webm` | Live `ffmpeg -i pipe:0` while uploading |
+| ISO BMFF (fast-start `moov` before `mdat`) | `.mp4`, `.m4a`, `.m4v`, `.mov` | Live `ffmpeg -i pipe:0` while uploading |
+| ISO BMFF (trailing `moov` after `mdat`) | `.mp4`, `.m4a`, `.m4v`, `.mov` | Single-copy sealed memfd once upload finishes |
+| AVI, ASF / WMA / WMV | `.avi`, `.asf`, `.wma`, `.wmv` | Single-copy sealed memfd once upload finishes |
+| AMR-NB / AMR-WB | `.amr` | Live `ffmpeg -i pipe:0` while uploading |
+| MPEG-PS, MPEG-TS | `.mpg`, `.mpeg`, `.ts`, `.m2ts` | Live `ffmpeg -i pipe:0` while uploading |
+| Raw ADTS AAC | `.aac` | Live `ffmpeg -i pipe:0` while uploading |
+
+When magic-byte sniffing does not match (for example custom header wrappers),
+a `TranscribeOptions.filename` ending in one of the routed media extensions
+above falls back to the ffmpeg path instead of failing `UNIMPLEMENTED`.
+Trade-off: audio-only transcription on a pipeable container allocates zero
+memfds beyond the upload chunks; enabling `emit_keyframes` or
+`CHANNEL_MODE_PER_CHANNEL` on an ffmpeg container switches the upload buffer
+itself into a single anonymous memfd so `ffprobe` and concurrent `ffmpeg`
+readers share strictly one in-memory copy (`1x` media size, never `2x`).
+Errors: cap overruns are `RESOURCE_EXHAUSTED`, undecodable media is
+`INVALID_ARGUMENT`, unknown containers are `UNIMPLEMENTED`, remote allowlist
+blocks are `FAILED_PRECONDITION` / `PERMISSION_DENIED`, decoder faults are
+`INTERNAL`.
 
 A stream stops working the moment its client cancels or its deadline
 passes, whether it is decoding speech or a silent stretch that commits no
@@ -189,19 +253,48 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_BACKEND` | `cuda` | `cuda` \| `openvino` \| `cpu`; never silently substituted |
 | `GRPC_ASR_CUDA_DEVICE` | `0` | CUDA device index |
 | `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the whisper encoder, e.g. `GPU.1` on a multi-GPU host; the OpenVINO image ships only the GPU plugin, and an unavailable device stops the boot |
+| `GRPC_ASR_OPENVINO_CACHE_DIR` | `/tmp/grpc-asr-openvino-cache` | OpenVINO compiled-kernel cache directory; mount a persistent volume here to skip first-boot shader compilation across container restarts |
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
 | `GRPC_ASR_CONCURRENCY` | `2` | whisper states per model (concurrent transcriptions) |
+| `GRPC_ASR_WARMUP` | `1` | run a 1 s digital-silence inference pass on every pooled whisper state before listening (`0` disables); warmup failures exit non-zero at startup |
 | `GRPC_ASR_QUEUE_TIMEOUT_SECONDS` | `1800` | how long a stream waits for a free whisper state before `RESOURCE_EXHAUSTED`; `0` waits as long as the client does |
 | `GRPC_ASR_MAX_MEDIA_BYTES` | `268435456` | upload cap, overrun is `RESOURCE_EXHAUSTED` |
 | `GRPC_ASR_MAX_DURATION_SECONDS` | `14400` | media duration cap, overrun is `RESOURCE_EXHAUSTED` |
-| `GRPC_ASR_WINDOW_SECONDS` | `480` | PCM window per `whisper_full`; bounds resident PCM |
+| `GRPC_ASR_WINDOW_SECONDS` | `480` | maximum PCM window per `whisper_full`; bounds resident PCM |
+| `GRPC_ASR_MIN_WINDOW_SECONDS` | `30` | minimum buffered PCM seconds before an upload stall triggers an early window cut; also lower clamp bound for `TranscribeOptions.window_seconds` |
+| `GRPC_ASR_WINDOW_STALL_MS` | `500` | upload stall threshold (ms) after `GRPC_ASR_MIN_WINDOW_SECONDS` is buffered; `0` disables stall cuts |
+| `GRPC_ASR_MAX_CHANNELS` | `2` | maximum source channels allowed under `CHANNEL_MODE_PER_CHANNEL` |
 | `GRPC_ASR_THREADS` | `min(4,hw)` | whisper decode threads |
 | `GRPC_ASR_KEYFRAME_INTERVAL_SECONDS` | `10` | default keyframe spacing |
 | `GRPC_ASR_DOCUMENT_WORD_PROVENANCE` | `1` | per-word provenance in the folded Document; `0` keeps segment spans only. Costs one provenance entry per word (~150 per transcribed minute, ~72k over eight hours) in a single bounded message |
+| `GRPC_ASR_REMOTE_ALLOWED_HOSTS` | *(empty, off)* | comma-separated host allowlist for `TranscribeOptions.remote` (`host`, `host:port`, `*.domain`, or `*`); loopback/private/link-local targets additionally require an explicit `localhost` or IP literal entry |
+| `GRPC_ASR_METRICS_ADDRESS` | *(empty, off)* | `host:port` for the HTTP/1.1 Prometheus `/metrics` exporter |
 | `GRPC_ASR_METRICS_INTERVAL_SECONDS` | `60` | stdout metrics line; `0` off |
 | `GRPC_ASR_TOOL_INACTIVITY_SECONDS` | `120` | ffmpeg/ffprobe no-output kill timer |
 | `GRPC_ASR_FFMPEG` / `GRPC_ASR_FFPROBE` | `ffmpeg`/`ffprobe` | tool paths |
+
+### Observability (`GRPC_ASR_METRICS_ADDRESS`)
+
+Setting `GRPC_ASR_METRICS_ADDRESS=0.0.0.0:9095` (or `127.0.0.1:9095`) starts an
+HTTP/1.1 listener serving Prometheus text exposition at `GET /metrics`:
+
+- **Pool & queue:** `grpc_asr_states_total{model}`, `grpc_asr_states_busy{model}`,
+  `grpc_asr_queue_depth{model}`, `grpc_asr_queue_depth_max{model}`,
+  `grpc_asr_queue_wait_seconds{model}` (histogram), `grpc_asr_warmup_seconds`.
+- **Active streams & resident media bytes:** `grpc_asr_streams_active`,
+  `grpc_asr_upload_bytes_resident`, `grpc_asr_memfd_bytes_resident`.
+- **Latency, throughput & windowing:** `grpc_asr_first_segment_seconds{model,path}`
+  (`path="live"` or `"ffmpeg"`), `grpc_asr_realtime_factor{model,backend}`
+  (audio seconds per wall decode second), `grpc_asr_windows_total`,
+  `grpc_asr_window_redecodes_total`, `grpc_asr_window_seconds_last`.
+- **Outcomes & child tools:** `grpc_asr_stream_end_total{result}` (`ok`,
+  `cancelled`, `deadline`, `queue_timeout`, `byte_cap`, `duration_cap`,
+  `invalid_media`, `unknown_container`, `tool_error`, `internal`),
+  `grpc_asr_tool_runs_total{tool,outcome}` (`tool="ffmpeg"|"ffprobe"`,
+  `outcome="ok"|"rejected"|"exec_failed"|"inactivity_killed"|"cancelled"`),
+  `grpc_asr_audio_seconds_total{model}`, `grpc_asr_keyframes_total`,
+  `process_resident_memory_bytes`, `process_cpu_seconds_total`.
 
 ## Docker
 
@@ -236,8 +329,12 @@ docker run --rm --read-only --tmpfs /tmp --device /dev/dri \
 ```
 
 `--group-add render` because the image runs as the unprivileged user, which
-has no render-node access otherwise. The OpenVINO compile cache lives under
-`/tmp` (tmpfs in the documented run) because the models mount is read-only.
+has no render-node access otherwise. The OpenVINO compile cache defaults to
+`GRPC_ASR_OPENVINO_CACHE_DIR=/tmp/grpc-asr-openvino-cache` because the models
+mount is read-only; mount a dedicated persistent volume at that directory (or on
+CUDA, mount `CUDA_CACHE_PATH` with `CUDA_CACHE_DISABLE=0`) to persist compiled
+device kernels across restarts, while startup warmup (`GRPC_ASR_WARMUP=1`)
+pre-populates per-state scratch buffers and kernels before the gRPC port opens.
 Without `/dev/dri` or without the converted encoder files the server refuses
 to boot: OpenVINO encoder init fails loud at startup, never on the first RPC.
 

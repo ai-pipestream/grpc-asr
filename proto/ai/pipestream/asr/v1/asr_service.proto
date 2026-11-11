@@ -96,9 +96,10 @@ message TranscribeOptions {
   // /audio/transcriptions endpoint instead of the local whisper.cpp pool
   // (docling's ApiAsrOptions). When set, `model`, `language` and
   // `word_timestamps` above are not used: the remote options carry their
-  // own. Validated before any media byte is read; this build has no HTTP
-  // engine yet, so a valid request fails with UNIMPLEMENTED and an invalid
-  // one with INVALID_ARGUMENT.
+  // own. Validated before any media byte is read; requires
+  // GRPC_ASR_REMOTE_ALLOWED_HOSTS on the server (FAILED_PRECONDITION when
+  // unset, PERMISSION_DENIED when the host or its resolved address is not
+  // allowed, INVALID_ARGUMENT when options are malformed).
   RemoteTranscriptionOptions remote = 10;
 
   // Typed ASR preset. Unsupported presets are rejected even with `model` set.
@@ -120,6 +121,71 @@ message TranscribeOptions {
   optional InlineAsrMlxWhisperOptions mlx_whisper = 15;
   // openai-whisper native options. UNIMPLEMENTED here.
   optional InlineAsrNativeWhisperOptions native_whisper = 16;
+
+  // Upper bound on the PCM window per decode pass, in seconds. Zero
+  // means the server default. Smaller windows give earlier first
+  // segments at the price of more re-decoded window edges; the server
+  // clamps the value into its configured [min_window_seconds,
+  // max_window_seconds] range.
+  uint32 window_seconds = 17;
+
+  // Local decoder settings. Unset means the server defaults.
+  DecodingOptions decoding = 18;
+
+  // How multi-channel audio is decoded. Unset is CHANNEL_MODE_MIXDOWN.
+  ChannelMode channel_mode = 19;
+}
+
+// Decoder settings for the local whisper.cpp engine.
+message DecodingOptions {
+  // Text prepended to the decoder prompt to condition vocabulary and
+  // style, e.g. names and acronyms expected in the media. Applied to
+  // every window, since windows are decoded without context from their
+  // predecessor. Capped at 1024 bytes.
+  string initial_prompt = 1;
+  // Sampling strategy; unset is greedy.
+  SamplingStrategy strategy = 2;
+  // Beam width for SAMPLING_STRATEGY_BEAM_SEARCH; 0 means the server
+  // default of 5. Capped at 8; ignored for greedy.
+  uint32 beam_size = 3;
+  // Candidates per temperature step for greedy; 0 means the default.
+  // Capped at 8.
+  uint32 best_of = 4;
+  // Segments where the no-speech probability exceeds this and the mean
+  // token logprob is below logprob_threshold are reported with
+  // Segment.suppressed = true instead of being dropped. Unset keeps
+  // the decoder default (0.6).
+  optional float no_speech_threshold = 5;
+  // Mean token logprob threshold paired with no_speech_threshold. Unset
+  // keeps the decoder default (-1.0).
+  optional float logprob_threshold = 6;
+  // Compression-ratio style entropy gate; unset keeps the default (2.4).
+  optional float entropy_threshold = 7;
+  // Suppress non-speech tokens (sound tags such as music markers).
+  bool suppress_non_speech_tokens = 8;
+}
+
+// Local decoder token-sampling strategy.
+enum SamplingStrategy {
+  // Defaults to SAMPLING_STRATEGY_GREEDY.
+  SAMPLING_STRATEGY_UNSPECIFIED = 0;
+  // Greedy token selection at each temperature step.
+  SAMPLING_STRATEGY_GREEDY = 1;
+  // Beam search over beam_size candidates.
+  SAMPLING_STRATEGY_BEAM_SEARCH = 2;
+}
+
+// How multi-channel audio is decoded.
+enum ChannelMode {
+  // Defaults to CHANNEL_MODE_MIXDOWN.
+  CHANNEL_MODE_UNSPECIFIED = 0;
+  // Mix every channel to mono and decode once.
+  CHANNEL_MODE_MIXDOWN = 1;
+  // Decode each source channel on its own; segments have `channel` and
+  // speaker ids become C1, C2, ... (or C1-S1, ... when diarize is also
+  // set). Capped by the server at GRPC_ASR_MAX_CHANNELS; above the cap
+  // the request fails INVALID_ARGUMENT.
+  CHANNEL_MODE_PER_CHANNEL = 2;
 }
 
 // Docling slim AsrModelFamily (transformers / NeMo families).
@@ -367,6 +433,39 @@ message MediaInfo {
   bool has_video = 5;
   // Video codec name when has_video is true, empty otherwise.
   string video_codec = 6;
+  // Container family the server sniffed from the first bytes (or matched
+  // from the filename extension fallback).
+  ContainerFamily container = 7;
+}
+
+// Media container family recognized by the server.
+enum ContainerFamily {
+  // Unknown or unrecognized container family.
+  CONTAINER_FAMILY_UNSPECIFIED = 0;
+  // RIFF WAVE audio.
+  CONTAINER_FAMILY_WAV = 1;
+  // MPEG-1/2/2.5 Layer III audio (with or without ID3v2).
+  CONTAINER_FAMILY_MP3 = 2;
+  // Free Lossless Audio Codec.
+  CONTAINER_FAMILY_FLAC = 3;
+  // Ogg container (Opus, Vorbis).
+  CONTAINER_FAMILY_OGG = 4;
+  // ISO Base Media File Format (MP4, M4A, M4V, QuickTime MOV).
+  CONTAINER_FAMILY_MP4 = 5;
+  // EBML container (Matroska MKV, WebM).
+  CONTAINER_FAMILY_MATROSKA = 6;
+  // Audio Video Interleave (RIFF AVI).
+  CONTAINER_FAMILY_AVI = 7;
+  // Advanced Systems Format (WMA, WMV).
+  CONTAINER_FAMILY_ASF = 8;
+  // Adaptive Multi-Rate audio (AMR-NB, AMR-WB).
+  CONTAINER_FAMILY_AMR = 9;
+  // MPEG-1/2 Program Stream (MPG, MPEG).
+  CONTAINER_FAMILY_MPEG_PS = 10;
+  // MPEG-2 Transport Stream (TS).
+  CONTAINER_FAMILY_MPEG_TS = 11;
+  // Audio Data Transport Stream raw AAC.
+  CONTAINER_FAMILY_ADTS_AAC = 12;
 }
 
 // A timed span of transcribed text.
@@ -386,14 +485,26 @@ message Segment {
   // decoded no scored token; a present 0 is a real score (a segment the
   // decoder was certain of), never a stand-in for "unknown".
   optional float avg_logprob = 6;
-  // Field 7 is held for the decoder's non-speech probability.
-  //
+  // Decoder probability that the span contains no speech, in [0, 1].
+  optional float no_speech_prob = 7;
   // True when the decoder predicted a speaker change at the end of this
   // segment. Only ever true when TranscribeOptions.diarize was set.
   bool speaker_turn_next = 8;
   // Speaker attributed to this segment, as a stream-local label ("S1",
-  // "S2", ...). Empty when diarization is off.
+  // "S2", ... or "C1", "C2", ... under per-channel mode). Empty when
+  // neither diarization nor per-channel mode is active.
   string speaker_id = 9;
+  // True when the server's hallucination gate flagged this segment
+  // (no_speech_prob above and avg_logprob below the configured
+  // thresholds). The text is still delivered on the typed stream; the
+  // Document fold skips flagged segments.
+  bool suppressed = 10;
+  // Zero-based source channel the segment was decoded from; only set
+  // under CHANNEL_MODE_PER_CHANNEL.
+  uint32 channel = 11;
+  // ISO 639-1 code the decoder detected (or was given) for the window
+  // this segment came from, e.g. "en".
+  string language = 12;
 }
 
 // A single word with its timing inside a segment.
@@ -433,6 +544,15 @@ message TranscriptComplete {
   // Total keyframes emitted; zero for audio-only media or when
   // keyframes were not requested.
   uint32 keyframe_count = 5;
+  // Effective upper bound on the PCM window per decode pass in seconds,
+  // after server clamping; zero on the remote path.
+  uint32 window_seconds = 6;
+  // Final segment count per source channel in channel order (0..N-1)
+  // when CHANNEL_MODE_PER_CHANNEL is active; empty in mixdown mode.
+  repeated uint32 segment_count_by_channel = 7;
+  // Every distinct language seen across the final segments, in first
+  // appearance order; `language` stays the first one.
+  repeated string languages = 8;
 }
 
 // Request for GetServiceInfo. Empty by design.
@@ -458,6 +578,17 @@ message GetServiceInfoResponse {
   // Frontend advertisement for the shared demo shell, which reads it to
   // build its tab bar.
   UiInfo ui = 7;
+  // Minimum PCM window length in seconds the server starts a stalled
+  // decode pass with, and the lower bound for TranscribeOptions.window_seconds.
+  uint32 min_window_seconds = 11;
+  // Maximum PCM window length in seconds per decode pass, and the upper
+  // bound for TranscribeOptions.window_seconds.
+  uint32 max_window_seconds = 12;
+  // True when every loaded whisper state ran a startup warmup inference.
+  bool warmed_up = 13;
+  // True when GRPC_ASR_REMOTE_ALLOWED_HOSTS is non-empty so
+  // TranscribeOptions.remote requests are enabled on this server.
+  bool remote_enabled = 14;
 }
 
 // Frontend advertisement. Same shape in every ai-pipestream grpc service:

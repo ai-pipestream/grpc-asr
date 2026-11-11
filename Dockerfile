@@ -19,7 +19,7 @@ ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:12.9.2-runtime-ubuntu24.04
 FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates cmake curl gcc-14 g++-14 git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libssl-dev libcurl4-openssl-dev libopenh264-dev \
+        ca-certificates cmake curl gcc-14 g++-14 git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libopencore-amrnb0 libssl-dev libcurl4-openssl-dev libopenh264-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
@@ -52,7 +52,7 @@ RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda12.9-gcc14-cxx23-grpc1.83.0-whis
 FROM ${GRPC_ASR_RUNTIME_IMAGE}
 
 # libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libcurl4t64 libssl3t64 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 libcurl4t64 libssl3t64 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
