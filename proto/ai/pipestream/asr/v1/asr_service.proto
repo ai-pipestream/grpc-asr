@@ -134,6 +134,12 @@ message TranscribeOptions {
 
   // How multi-channel audio is decoded. Unset is CHANNEL_MODE_MIXDOWN.
   ChannelMode channel_mode = 19;
+
+  // Raw task string when a caller passes an unparsed task name (docling
+  // parity). Recognized values ("transcribe", "translate", case-insensitive,
+  // or enum names) resolve onto `task`; a conflict with `task` or an unknown
+  // non-empty value fails with INVALID_ARGUMENT.
+  optional string task_raw = 20;
 }
 
 // Decoder settings for the local whisper.cpp engine.

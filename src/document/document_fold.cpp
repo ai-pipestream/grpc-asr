@@ -230,8 +230,9 @@ void AsrDocumentFold::add_word_provenance(docv1::TextItemBase* base, const asrv1
     }
 }
 
-void AsrDocumentFold::insert_body_child(const std::string& ref, uint64_t start_ms, bool is_text) {
-    const ChildKey key{start_ms, is_text};
+void AsrDocumentFold::insert_body_child(const std::string& ref, uint64_t start_ms, bool is_text,
+                                        uint32_t channel, uint32_t segment_index) {
+    const ChildKey key{start_ms, is_text, channel, segment_index};
     const auto it = std::upper_bound(body_child_keys_.begin(), body_child_keys_.end(), key);
     const int index = static_cast<int>(it - body_child_keys_.begin());
     body_child_keys_.insert(it, key);
@@ -239,6 +240,80 @@ void AsrDocumentFold::insert_body_child(const std::string& ref, uint64_t start_m
     children->Add()->set_ref(ref);
     for (int j = children->size() - 1; j > index; --j) {
         children->SwapElements(j, j - 1);
+    }
+}
+
+void AsrDocumentFold::canonicalize_arenas_and_speakers() {
+    auto* children = document_.mutable_body()->mutable_children();
+    std::vector<int> text_order;
+    text_order.reserve(static_cast<size_t>(document_.texts_size()));
+    std::vector<int> picture_order;
+    picture_order.reserve(static_cast<size_t>(document_.pictures_size()));
+
+    bool texts_monotonic = true;
+    bool pictures_monotonic = true;
+    for (int i = 0; i < children->size(); ++i) {
+        const std::string& ref = children->Get(i).ref();
+        if (ref.starts_with("#/texts/")) {
+            const int idx = std::stoi(ref.substr(8));
+            if (idx != static_cast<int>(text_order.size())) {
+                texts_monotonic = false;
+            }
+            text_order.push_back(idx);
+        } else if (ref.starts_with("#/pictures/")) {
+            const int idx = std::stoi(ref.substr(11));
+            if (idx != static_cast<int>(picture_order.size())) {
+                pictures_monotonic = false;
+            }
+            picture_order.push_back(idx);
+        }
+    }
+
+    if (!texts_monotonic && static_cast<int>(text_order.size()) == document_.texts_size()) {
+        google::protobuf::RepeatedPtrField<docv1::BaseTextItem> sorted_texts;
+        sorted_texts.Reserve(document_.texts_size());
+        for (size_t new_i = 0; new_i < text_order.size(); ++new_i) {
+            docv1::BaseTextItem* dst = sorted_texts.Add();
+            *dst = std::move(*document_.mutable_texts(text_order[new_i]));
+            dst->mutable_text()->mutable_base()->set_self_ref("#/texts/" + std::to_string(new_i));
+        }
+        document_.mutable_texts()->Swap(&sorted_texts);
+    }
+
+    if (!pictures_monotonic &&
+        static_cast<int>(picture_order.size()) == document_.pictures_size()) {
+        google::protobuf::RepeatedPtrField<docv1::PictureItem> sorted_pictures;
+        sorted_pictures.Reserve(document_.pictures_size());
+        for (size_t new_p = 0; new_p < picture_order.size(); ++new_p) {
+            docv1::PictureItem* dst = sorted_pictures.Add();
+            *dst = std::move(*document_.mutable_pictures(picture_order[new_p]));
+            dst->set_self_ref("#/pictures/" + std::to_string(new_p));
+        }
+        document_.mutable_pictures()->Swap(&sorted_pictures);
+    }
+
+    if (!texts_monotonic || !pictures_monotonic) {
+        int next_text = 0;
+        int next_picture = 0;
+        for (int i = 0; i < children->size(); ++i) {
+            const std::string& ref = children->Get(i).ref();
+            if (ref.starts_with("#/texts/")) {
+                children->Mutable(i)->set_ref("#/texts/" + std::to_string(next_text++));
+            } else if (ref.starts_with("#/pictures/")) {
+                children->Mutable(i)->set_ref("#/pictures/" + std::to_string(next_picture++));
+            }
+        }
+    }
+
+    if (document_.media().speakers_size() > 1) {
+        document_.mutable_media()->clear_speakers();
+        for (const docv1::BaseTextItem& item : document_.texts()) {
+            const docv1::TextItemBase& base = item.text().base();
+            if (base.prov_size() > 0 && !base.prov(0).time().speaker().empty() &&
+                is_spoken_text(base.text())) {
+                register_speaker(base.prov(0).time().speaker());
+            }
+        }
     }
 }
 
@@ -280,7 +355,8 @@ void AsrDocumentFold::on_final_segment(const asrv1::Segment& segment) {
                   static_cast<double>(segment.end_ms()) / 1000.0,
                   segment.has_avg_logprob() ? std::optional<float>(segment.avg_logprob())
                                             : std::nullopt);
-    insert_body_child(ref, segment.start_ms(), /*is_text=*/true);
+    insert_body_child(ref, segment.start_ms(), /*is_text=*/true, segment.channel(),
+                      segment.index());
 }
 
 void AsrDocumentFold::on_keyframe(const asrv1::Keyframe& keyframe) {
@@ -302,10 +378,11 @@ void AsrDocumentFold::on_keyframe(const asrv1::Keyframe& keyframe) {
     time_span(picture->add_prov(), keyframe.timestamp_ms(), keyframe.timestamp_ms(), "");
     double seconds = static_cast<double>(keyframe.timestamp_ms()) / 1000.0;
     stamp_sources(picture->mutable_source(), seconds, seconds, std::nullopt);
-    insert_body_child(ref, keyframe.timestamp_ms(), /*is_text=*/false);
+    insert_body_child(ref, keyframe.timestamp_ms(), /*is_text=*/false, /*channel=*/0U);
 }
 
 void AsrDocumentFold::on_complete(const asrv1::TranscriptComplete& complete) {
+    canonicalize_arenas_and_speakers();
     docv1::BaseMeta* meta = document_.mutable_body()->mutable_meta();
     // Only stamp document-level language when the transcript is monolingual
     // (at most one entry in `languages`). Multi-language transcripts carry

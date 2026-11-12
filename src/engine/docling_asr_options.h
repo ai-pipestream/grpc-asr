@@ -20,7 +20,8 @@ std::optional<std::string> whisper_cpp_model_for(ai::pipestream::asr::v1::AsrMod
 grpc::Status validate_docling_asr_options(const ai::pipestream::asr::v1::TranscribeOptions& options);
 
 // Fills options.model from model_type when model is empty and the preset
-// maps to a whisper.cpp id. Call after validate_docling_asr_options succeeds.
+// maps to a whisper.cpp id, and resolves options.task from options.task_raw
+// when task is unspecified. Call after validate_docling_asr_options succeeds.
 void apply_model_type_default(ai::pipestream::asr::v1::TranscribeOptions* options);
 
 }  // namespace asr::engine

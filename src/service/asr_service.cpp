@@ -111,6 +111,36 @@ std::string source_filename(const std::string& requested, media::MediaFamily fam
     return requested.substr(requested.find_last_of('/') + 1);
 }
 
+std::optional<std::string> resolve_pipe_audio_codec(media::MediaFamily family,
+                                                    media::ByteStream& upload,
+                                                    const std::string& initial_prefix) {
+    const size_t initial_avail = static_cast<size_t>(
+        std::min<uint64_t>(upload.size(), media::kMaxPipeCodecProbeBytes));
+    std::string codec_prefix =
+        initial_avail > initial_prefix.size() ? upload.prefix_bytes(initial_avail) : initial_prefix;
+    while (true) {
+        size_t needed = 0;
+        const bool complete = upload.is_complete();
+        const std::string_view codec = media::sniff_pipe_audio_codec(
+            family, reinterpret_cast<const uint8_t*>(codec_prefix.data()), codec_prefix.size(),
+            complete, &needed);
+        if (!codec.empty()) {
+            return std::string(codec);
+        }
+        if (complete || needed <= codec_prefix.size() || needed > media::kMaxPipeCodecProbeBytes) {
+            const std::string_view fallback = media::sniff_pipe_audio_codec(
+                family, reinterpret_cast<const uint8_t*>(codec_prefix.data()), codec_prefix.size(),
+                /*stream_complete=*/true);
+            return std::string(fallback);
+        }
+        const size_t got = upload.wait_for_prefix(needed);
+        if (upload.is_aborted()) {
+            return std::nullopt;
+        }
+        codec_prefix = upload.prefix_bytes(got);
+    }
+}
+
 void fill_segment(const engine::EngineSegment& source, asrv1::Segment* out) {
     out->set_index(source.index);
     out->set_start_ms(source.start_ms);
@@ -277,8 +307,12 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             first_segment_path = FirstSegmentPath::kFfmpeg;
             info->set_duration_ms(0);
             if (family != media::MediaFamily::kUnknown) {
-                info->set_audio_codec(
-                    std::string(media::sniff_pipe_audio_codec(family, prefix_ptr, prefix.size())));
+                const auto codec = resolve_pipe_audio_codec(family, upload, prefix);
+                if (!codec.has_value()) {
+                    telemetry->result = StreamEndResult::kCancelled;
+                    return {grpc::StatusCode::CANCELLED, "upload aborted"};
+                }
+                info->set_audio_codec(*codec);
             }
             if (!writer.write(info_response)) {
                 telemetry->result = StreamEndResult::kCancelled;
@@ -434,9 +468,9 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             const auto inactivity =
                 std::chrono::milliseconds(config_.tool_inactivity_seconds * 1000);
             media::StreamLayout layout = media::StreamLayout::kSeekableMemfd;
+            std::string layout_prefix = prefix;
             if (!used_extension_fallback) {
                 constexpr size_t kMaxLayoutProbeBytes = 1024 * 1024;
-                std::string layout_prefix = prefix;
                 while (true) {
                     size_t needed = 0;
                     layout = media::sniff_stream_layout(
@@ -466,8 +500,12 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 // memfd.
                 first_segment_path = FirstSegmentPath::kLive;
                 info->set_duration_ms(0);
-                info->set_audio_codec(
-                    std::string(media::sniff_pipe_audio_codec(family, prefix_ptr, prefix.size())));
+                const auto codec = resolve_pipe_audio_codec(family, upload, layout_prefix);
+                if (!codec.has_value()) {
+                    telemetry->result = StreamEndResult::kCancelled;
+                    return {grpc::StatusCode::CANCELLED, "upload aborted"};
+                }
+                info->set_audio_codec(*codec);
                 info->set_sample_rate_hz(0);
                 info->set_channels(0);
                 info->set_has_video(false);
@@ -838,6 +876,7 @@ grpc::Status AsrServiceImpl::Transcribe(
             return status;
         }
         call.options = options;
+        engine::apply_model_type_default(&call.options);
         call.remote_policy = std::move(policy);
     } else {
         if (const auto err = engine::parse_decoding_options(options.decoding(), &call.decoding);

@@ -24,6 +24,34 @@ env:
   TEST_MODEL_SHA256: 921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
 
 jobs:
+  proto-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Install buf
+        env:
+          BUF_VERSION: 1.59.0
+          BUF_SHA256: d7462609e3814629c642ac10f0e7e27ec7e8e21d1dd75742f4434c31619e986b
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/buf" \
+            "https://github.com/bufbuild/buf/releases/download/v$BUF_VERSION/buf-Linux-x86_64"
+          echo "$BUF_SHA256  $RUNNER_TEMP/buf" | sha256sum -c
+          chmod +x "$RUNNER_TEMP/buf"
+      - name: buf lint
+        run: '"$RUNNER_TEMP/buf" lint'
+      - name: buf breaking against the base (additive only)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base=${BASE_SHA:-HEAD~1}
+          git fetch --no-tags --depth=1 origin "$base" 2>/dev/null || true
+          mkdir -p "$RUNNER_TEMP/base"
+          git archive "$base" | tar -x -C "$RUNNER_TEMP/base"
+          "$RUNNER_TEMP/buf" breaking --against "$RUNNER_TEMP/base"
+
   image:
     name: image ${{ matrix.variant }} ${{ matrix.arch }}
     # GitHub provides native aarch64 qualification. Forgejo covers amd64.

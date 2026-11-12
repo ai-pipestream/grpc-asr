@@ -12,6 +12,10 @@ namespace asr::media {
 // MPEG-TS packets (sync 0x47 at offsets 0, 188 and 376).
 inline constexpr size_t kSniffPrefixBytes = 400;
 
+// Upper bound on header bytes inspected to extract an audio codec name before
+// the first media packet on the live pipe path.
+inline constexpr size_t kMaxPipeCodecProbeBytes = 64 * 1024;
+
 // Container family detected from magic bytes or routed filename extension.
 // Drives the decode path: wav, mp3 and flac decode in-process when recognized
 // by magic; everything else demuxes via ffmpeg.
@@ -80,9 +84,15 @@ std::string_view family_name(MediaFamily family);
 std::string_view family_mimetype(MediaFamily family);
 
 // Best-effort audio codec name derived from the leading container header bytes
-// when ffprobe is skipped on the live pipe/remote path (e.g. "opus" or "vorbis"
-// from an Ogg BOS page, "amr_nb"/"amr_wb" from an AMR header, falling back to
-// family_name(family)).
-std::string_view sniff_pipe_audio_codec(MediaFamily family, const uint8_t* data, size_t size);
+// when ffprobe is skipped on the live pipe/remote path (Ogg BOS Opus/Vorbis/
+// FLAC/Speex, AMR-NB/WB magic, Matroska/WebM EBML Tracks CodecID, and ISO BMFF
+// fast-start moov/trak/mdia/minf/stbl/stsd sample entry fourcc, falling back to
+// family_name(family)). When `stream_complete` is false and a bounded header
+// box (`moov` or EBML `Tracks` prior to `Cluster`) extends past `size`, returns
+// an empty string_view and sets `*needed_prefix` (<= kMaxPipeCodecProbeBytes)
+// to the header offset to wait for.
+std::string_view sniff_pipe_audio_codec(MediaFamily family, const uint8_t* data, size_t size,
+                                        bool stream_complete = true,
+                                        size_t* needed_prefix = nullptr);
 
 }  // namespace asr::media

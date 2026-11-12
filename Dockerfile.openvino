@@ -107,7 +107,8 @@ COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 # scripts/smoke-test.sh checks the label, NOTICE and that the build is not
 # a GPL one.
 COPY --from=build /opt/ffmpeg /opt/ffmpeg
-RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf && ldconfig
+RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf && ldconfig \
+    && install -d -o 65532 -g 65532 /var/cache/openvino
 COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
 COPY --from=build /out/openh264-copyright /usr/share/doc/grpc-asr/openh264-copyright
 LABEL ai.pipestream.ffmpeg.license="LGPL-2.1-or-later" \

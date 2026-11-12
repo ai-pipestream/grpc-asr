@@ -197,6 +197,75 @@ void verify_family_kinds_and_proto() {
                 MediaFamily::kAmr, reinterpret_cast<const uint8_t*>("#!AMR\n\x3c"), 7) ==
                 "amr_nb",
             "AMR-NB header sniffs as amr_nb");
+
+    // Fast-start MP4 moov/trak/mdia/(hdlr 'soun' + minf/stbl/stsd 'mp4a' and 'Opus').
+    auto wrap_box = [](std::string_view type, const std::string& body) {
+        const auto sz = static_cast<uint32_t>(8 + body.size());
+        std::string out;
+        out.push_back(static_cast<char>((sz >> 24) & 0xFF));
+        out.push_back(static_cast<char>((sz >> 16) & 0xFF));
+        out.push_back(static_cast<char>((sz >> 8) & 0xFF));
+        out.push_back(static_cast<char>(sz & 0xFF));
+        out.append(type);
+        out.append(body);
+        return out;
+    };
+    auto make_mp4_header = [&](std::string_view sample_fourcc) {
+        std::string hdlr_body(8, '\0');
+        hdlr_body += "soun";
+        hdlr_body.append(12, '\0');
+        std::string stsd_body(8, '\0');
+        stsd_body[7] = 1;  // entry_count = 1
+        stsd_body += wrap_box(sample_fourcc, std::string(28, '\0'));
+        const std::string mdia =
+            wrap_box("hdlr", hdlr_body) +
+            wrap_box("minf", wrap_box("stbl", wrap_box("stsd", stsd_body)));
+        return box(16, "ftyp", 8) + wrap_box("moov", wrap_box("trak", wrap_box("mdia", mdia)));
+    };
+    const std::string mp4_aac = make_mp4_header("mp4a");
+    require(asr::media::sniff_pipe_audio_codec(
+                MediaFamily::kMp4, reinterpret_cast<const uint8_t*>(mp4_aac.data()),
+                mp4_aac.size()) == "aac",
+            "fast-start MP4 moov/stsd mp4a sniffs as aac");
+    const std::string mp4_opus = make_mp4_header("Opus");
+    require(asr::media::sniff_pipe_audio_codec(
+                MediaFamily::kMp4, reinterpret_cast<const uint8_t*>(mp4_opus.data()),
+                mp4_opus.size()) == "opus",
+            "fast-start MP4 moov/stsd Opus sniffs as opus");
+
+    // Open stream truncated mid-moov asks for the full moov box before mdat.
+    size_t codec_needed = 0;
+    require(asr::media::sniff_pipe_audio_codec(
+                MediaFamily::kMp4, reinterpret_cast<const uint8_t*>(mp4_aac.data()), 32,
+                /*stream_complete=*/false, &codec_needed)
+                .empty() &&
+                codec_needed == mp4_aac.size(),
+            "incomplete open fast-start MP4 requests full moov size");
+
+    // Matroska / WebM EBML header + Segment (unknown size) + Tracks (A_OPUS, TrackType=2).
+    auto ebml_vint1 = [](uint8_t payload_len) {
+        return static_cast<char>(0x80U | payload_len);
+    };
+    std::string track_entry;
+    track_entry.push_back(static_cast<char>(0x83));  // TrackType
+    track_entry.push_back(ebml_vint1(1));
+    track_entry.push_back(0x02);                     // 2 = audio
+    track_entry.push_back(static_cast<char>(0x86));  // CodecID
+    track_entry.push_back(ebml_vint1(6));
+    track_entry += "A_OPUS";
+    std::string tracks_body;
+    tracks_body.push_back(static_cast<char>(0xAE));  // TrackEntry
+    tracks_body.push_back(ebml_vint1(static_cast<uint8_t>(track_entry.size())));
+    tracks_body += track_entry;
+    std::string mkv_hdr("\x1A\x45\xDF\xA3\x84\x42\x86\x81\x01", 9);  // EBML header
+    mkv_hdr.append("\x18\x53\x80\x67\xFF", 5);                        // Segment (unknown size)
+    mkv_hdr.append("\x16\x54\xAE\x6B", 4);                            // Tracks
+    mkv_hdr.push_back(ebml_vint1(static_cast<uint8_t>(tracks_body.size())));
+    mkv_hdr += tracks_body;
+    require(asr::media::sniff_pipe_audio_codec(
+                MediaFamily::kMkv, reinterpret_cast<const uint8_t*>(mkv_hdr.data()),
+                mkv_hdr.size()) == "opus",
+            "Matroska/WebM EBML Tracks A_OPUS sniffs as opus");
 }
 
 }  // namespace

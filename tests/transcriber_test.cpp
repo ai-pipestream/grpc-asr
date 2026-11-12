@@ -277,10 +277,13 @@ void verify_duration_cap() {
 }
 
 void verify_stall_cut_default_window(const std::string& jfk) {
-    // Issue #13: feed 40 s of PCM, block for 2 s, then deliver the rest using
-    // the default 480 s window configuration (min_window_seconds = 30,
-    // window_stall_ms = 500). A FinalSegment must arrive during the 2 s block,
-    // and the completed run must carry the fixture text with dense indexes.
+    // Issue #13: feed 40 s of PCM, stall the upload until a FinalSegment
+    // arrives (bounded by 15 s so a regression fails promptly rather than
+    // hanging), then deliver the rest using the default 480 s window
+    // configuration (min_window_seconds = 30, window_stall_ms = 500). A
+    // FinalSegment must arrive while the upload is still stalled, proving the
+    // 500 ms stall threshold cut the 480 s window early without racing CPU
+    // inference wall-clock speed.
     const std::vector<float> unit = decode_pcm(jfk);
     std::vector<float> full_pcm;
     while (full_pcm.size() < 52 * asr::media::kModelSampleRate) {
@@ -290,15 +293,18 @@ void verify_stall_cut_default_window(const std::string& jfk) {
 
     std::mutex mu;
     std::condition_variable cv;
+    std::condition_variable stall_done_cv;
     size_t available = first_burst_samples;
     bool producer_done = false;
     bool in_stall = true;
     std::atomic<bool> final_during_stall{false};
 
     std::jthread producer([&] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
         {
-            std::lock_guard<std::mutex> lock(mu);
+            std::unique_lock<std::mutex> lock(mu);
+            stall_done_cv.wait_for(lock, std::chrono::seconds(15), [&] {
+                return final_during_stall.load(std::memory_order_acquire);
+            });
             in_stall = false;
             available = full_pcm.size();
             producer_done = true;
@@ -333,7 +339,8 @@ void verify_stall_cut_default_window(const std::string& jfk) {
                 {
                     std::lock_guard<std::mutex> lock(mu);
                     if (in_stall) {
-                        final_during_stall.store(true);
+                        final_during_stall.store(true, std::memory_order_release);
+                        stall_done_cv.notify_all();
                     }
                 }
                 finals.push_back(segment);
@@ -347,7 +354,7 @@ void verify_stall_cut_default_window(const std::string& jfk) {
         });
 
     require(final_during_stall.load(),
-            "a FinalSegment must arrive during the 2 s upload stall with default 480 s window");
+            "a FinalSegment must arrive during the upload stall with default 480 s window");
     require(!finals.empty(), "stall-cut run produced final segments");
     std::string transcript;
     for (size_t i = 0; i < finals.size(); ++i) {

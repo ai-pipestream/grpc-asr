@@ -28,7 +28,7 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 
 Options on the first message: `model` (`tiny`, `small`, `medium`,
 `large-v3`, `distil-large-v3`, and the rest of the Whisper family),
-`language` (empty means detect), `task` (`transcribe` by default, or
+`language` (empty means detect), `task` / `task_raw` (`transcribe` by default, or
 `translate`), `word_timestamps`, `emit_keyframes` (video only),
 `keyframe_interval_seconds`, `diarize` (speaker turns; a model without
 speaker-turn training never predicts one), `filename` (names the folded
@@ -134,7 +134,7 @@ and emits the Document immediately before the `TranscriptComplete` trailer.
 
 | ASR | Document |
 |---|---|
-| final segment | `TextItem` (label TEXT) in `Document.texts` in arrival order (segments with `suppressed = true` are skipped); `Document.body.children` orders all text and picture refs chronologically by `prov[0].time.start_ms` (pictures before texts on ties) |
+| final segment | `TextItem` (label TEXT) in `Document.texts` (segments with `suppressed = true` are skipped); `Document.body.children` orders all text and picture refs chronologically by `(prov[0].time.start_ms, picture_before_text, channel)` and `TranscriptComplete` canonicalizes `Document.texts`, `Document.pictures`, and `Document.media.speakers` to that order so concurrent per-channel workers produce byte-identical Documents |
 | segment timing | `prov[0].time = TimeSpan{start_ms, end_ms}`, plus the item's whole-text charspan. Time is a locator, so it belongs in provenance; media has no pages, so `page_no` stays 0 and no box is invented. `TrackSource{start_time, end_time}` in seconds stays alongside for consumers that already read it, and keeps its 1 ms epsilon where the schema requires `end > start` strictly |
 | words | one further `ProvenanceItem` each, in reading order: the word's own `TimeSpan` and its charspan (Unicode code points) inside the item text. On by default, `GRPC_ASR_DOCUMENT_WORD_PROVENANCE=0` off. Per-word probabilities stay on the typed stream: the schema has no per-word confidence slot |
 | speaker | `TimeSpan.speaker` on the segment and its words (`S1..Sn`, `C1..Cn` under `CHANNEL_MODE_PER_CHANNEL`, or `C1-S1..`), with distinct labels for speakers who actually produced spoken text registered in `Document.media.speakers` in first-appearance order |
@@ -172,8 +172,10 @@ the growing `ByteStream`. Streamable containers on the ffmpeg path (Ogg Vorbis
 and Opus, Matroska/WebM, fast-start MP4/MOV whose `moov` box precedes `mdat`,
 AMR-NB/WB, MPEG-PS, MPEG-TS, and raw ADTS AAC) stream live into
 `ffmpeg -i pipe:0` via `VideoDemux::open_audio_from_pipe` while the upload is
-still in flight, skipping `ffprobe` and allocating zero memfds so `MediaInfo`
-and committed segments arrive before the client half-closes.
+still in flight, skipping `ffprobe`, extracting `MediaInfo.audio_codec` from
+the container's leading header boxes (Ogg BOS, AMR magic, Matroska/WebM EBML
+`Tracks`, and ISO BMFF `moov/.../stsd`), and allocating zero memfds so
+`MediaInfo` and committed segments arrive before the client half-closes.
 
 **Seekable layouts and single-copy memfd.** Containers that require random
 access (trailing-`moov` MP4, AVI, ASF/WMA/WMV), extension-fallback inputs,

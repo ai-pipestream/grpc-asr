@@ -9,6 +9,10 @@
 #include <print>
 #include <string>
 
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+#include <google/protobuf/util/message_differencer.h>
+
 #include "fixture.h"
 
 namespace asrv1 = ai::pipestream::asr::v1;
@@ -456,6 +460,86 @@ void verify_multilingual_fold() {
             "source_meta.language empty when multiple languages are present");
 }
 
+void verify_per_channel_arrival_permutation_determinism() {
+    auto ch_seg = [](uint32_t channel, uint32_t index, uint64_t start_ms, uint64_t end_ms,
+                     const std::string& text, const std::string& speaker) {
+        asrv1::TranscribeResponse event =
+            segment_event(/*final=*/true, index, start_ms, end_ms, text, -0.25F);
+        event.mutable_final_segment()->set_channel(channel);
+        event.mutable_final_segment()->set_speaker_id(speaker);
+        return event;
+    };
+
+    const asrv1::TranscribeResponse c0_first = ch_seg(0, 0, 0, 3000, " caller greeting", "C1");
+    const asrv1::TranscribeResponse c1_first = ch_seg(1, 0, 0, 2800, " agent greeting", "C2");
+    const asrv1::TranscribeResponse c0_second = ch_seg(0, 1, 5000, 8000, " caller question", "C1");
+    const asrv1::TranscribeResponse c1_second = ch_seg(1, 1, 3500, 6000, " agent prompt", "C2");
+    const asrv1::TranscribeResponse kf_early = keyframe_event(0);
+    const asrv1::TranscribeResponse kf_late = keyframe_event(5000);
+
+    auto run_permutation = [&](const std::vector<asrv1::TranscribeResponse>& events) {
+        asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+        fold.set_source("stereo.mp4", "video/mp4", 0xCAFEBABEULL);
+        fold.consume(media_info_event());
+        for (const asrv1::TranscribeResponse& ev : events) {
+            fold.consume(ev);
+        }
+        fold.consume(complete_event());
+        docv1::Document doc = fold.take();
+        const std::vector<std::string> errors = asr::doc::document_integrity_errors(doc);
+        require(errors.empty(),
+                "per-channel permutation integrity: " + (errors.empty() ? "" : errors.front()));
+        return doc;
+    };
+
+    const docv1::Document forward =
+        run_permutation({kf_early, c0_first, c1_first, c1_second, kf_late, c0_second});
+    const docv1::Document reversed =
+        run_permutation({c0_second, kf_late, c1_second, c1_first, c0_first, kf_early});
+    const docv1::Document interleaved =
+        run_permutation({c1_first, c1_second, kf_late, c0_first, kf_early, c0_second});
+
+    require(forward.media().speakers_size() == 2 && forward.media().speakers(0) == "C1" &&
+                forward.media().speakers(1) == "C2",
+            "speakers ordered deterministically as C1 then C2 on simultaneous t=0 speech");
+    require(forward.texts_size() == 4 &&
+                forward.texts(0).text().base().text() == "caller greeting" &&
+                forward.texts(1).text().base().text() == "agent greeting" &&
+                forward.texts(2).text().base().text() == "agent prompt" &&
+                forward.texts(3).text().base().text() == "caller question",
+            "texts arena canonicalized to (start_ms, channel) order");
+    require(forward.body().children_size() == 6 &&
+                forward.body().children(0).ref() == "#/pictures/0" &&
+                forward.body().children(1).ref() == "#/texts/0" &&
+                forward.body().children(2).ref() == "#/texts/1" &&
+                forward.body().children(3).ref() == "#/texts/2" &&
+                forward.body().children(4).ref() == "#/pictures/1" &&
+                forward.body().children(5).ref() == "#/texts/3",
+            "body.children references canonicalized arenas");
+
+    auto deterministic_bytes = [](const google::protobuf::MessageLite& msg) {
+        std::string out;
+        {
+            google::protobuf::io::StringOutputStream sink(&out);
+            google::protobuf::io::CodedOutputStream coded(&sink);
+            coded.SetSerializationDeterministic(true);
+            require(msg.SerializeToCodedStream(&coded) && !coded.HadError(),
+                    "deterministic protobuf serialization succeeded");
+        }
+        return out;
+    };
+
+    require(google::protobuf::util::MessageDifferencer::Equals(forward, reversed),
+            "reversed arrival permutation equals forward Document");
+    require(google::protobuf::util::MessageDifferencer::Equals(forward, interleaved),
+            "interleaved arrival permutation equals forward Document");
+    const std::string bytes_forward = deterministic_bytes(forward);
+    require(bytes_forward == deterministic_bytes(reversed),
+            "reversed arrival permutation yields byte-identical deterministic Document");
+    require(bytes_forward == deterministic_bytes(interleaved),
+            "interleaved arrival permutation yields byte-identical deterministic Document");
+}
+
 }  // namespace
 
 int main() {
@@ -470,6 +554,7 @@ int main() {
         verify_time_ordered_body_with_early_keyframes();
         verify_suppressed_segment_skipped();
         verify_multilingual_fold();
+        verify_per_channel_arrival_permutation_determinism();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

@@ -40,6 +40,10 @@
 #include "media/sniff.h"
 #include "metrics.h"
 
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+#include <google/protobuf/util/message_differencer.h>
+
 namespace asrv1 = ai::pipestream::asr::v1;
 
 namespace {
@@ -457,6 +461,21 @@ std::string make_stereo_jfk_ch0_wav(const std::string& jfk) {
         stereo.push_back(mono[i + 1]);
         stereo.push_back('\0');
         stereo.push_back('\0');
+    }
+    return wrap_wav_pcm16(stereo, /*channels=*/2, 16000);
+}
+
+// Builds a stereo 16 kHz WAV with mono `jfk` speech on both channels so
+// concurrent PER_CHANNEL worker threads emit overlapping spoken segments.
+std::string make_stereo_jfk_both_wav(const std::string& jfk) {
+    const std::string mono = extract_wav_pcm16_data(jfk);
+    std::string stereo;
+    stereo.reserve(mono.size() * 2);
+    for (size_t i = 0; i + 1 < mono.size(); i += 2) {
+        stereo.push_back(mono[i]);
+        stereo.push_back(mono[i + 1]);
+        stereo.push_back(mono[i]);
+        stereo.push_back(mono[i + 1]);
     }
     return wrap_wav_pcm16(stereo, /*channels=*/2, 16000);
 }
@@ -961,6 +980,25 @@ void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel, asr::Con
     require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
                 result.status.error_message().find("model 'tiny' is not loaded") != std::string::npos,
             "whisper_tiny preset resolves to model tiny, got " + result.status.error_message());
+
+    asrv1::TranscribeOptions bad_task_raw = options_for("tiny.en");
+    bad_task_raw.set_task_raw("summarize");
+    result = transcribe(channel, bad_task_raw, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.status.error_message().find("task_raw") != std::string::npos &&
+                result.finals.empty() && !result.got_media_info,
+            "unknown task_raw is INVALID_ARGUMENT before decoding, got " +
+                result.status.error_message());
+
+    asrv1::TranscribeOptions conflicting_task = options_for("tiny.en");
+    conflicting_task.set_task(asrv1::TASK_TRANSCRIBE);
+    conflicting_task.set_task_raw("translate");
+    result = transcribe(channel, conflicting_task, make_wav(1.0, 440.0));
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.status.error_message().find("conflicts") != std::string::npos &&
+                result.finals.empty() && !result.got_media_info,
+            "conflicting task and task_raw is INVALID_ARGUMENT before decoding, got " +
+                result.status.error_message());
 }
 
 void verify_window_stall_and_clamping(asr::Config config, asr::engine::ModelPool& pool,
@@ -1075,10 +1113,11 @@ void verify_window_stall_and_clamping(asr::Config config, asr::engine::ModelPool
 }
 
 void verify_per_channel_stereo(const std::shared_ptr<grpc::Channel>& channel,
-                               const std::string& jfk) {
+                               asr::Config base_config, const std::string& jfk) {
     const std::string stereo = make_stereo_jfk_ch0_wav(jfk);
     asrv1::TranscribeOptions options = options_for("tiny.en");
     options.set_channel_mode(asrv1::CHANNEL_MODE_PER_CHANNEL);
+    options.set_task_raw("transcribe");
     options.set_emit_document(true);
 
     StreamResult result = transcribe(channel, options, stereo);
@@ -1121,6 +1160,52 @@ void verify_per_channel_stereo(const std::shared_ptr<grpc::Channel>& channel,
                 result.document.media().speakers(0) == "C1",
             "Document registers only C1 when channel 1 did not speak, got " +
                 std::to_string(result.document.media().speakers_size()) + " speaker(s)");
+
+    // Dual-spoken-channel concurrency=2 determinism: both channel worker
+    // threads run concurrently on distinct ModelPool states and fold into a
+    // byte-identical Document with sorted ["C1", "C2"] speakers.
+    base_config.concurrency = 2;
+    base_config.threads = 2;
+    base_config.warmup = false;
+    asr::engine::ModelPool dual_pool(base_config);
+    asr::AsrServiceImpl dual_svc(base_config, dual_pool);
+    int dual_port = 0;
+    grpc::ServerBuilder sb;
+    sb.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &dual_port);
+    sb.RegisterService(&dual_svc);
+    auto dual_srv = sb.BuildAndStart();
+    require(dual_srv != nullptr, "dual-channel concurrency=2 server started");
+    auto dual_ch = grpc::CreateChannel("127.0.0.1:" + std::to_string(dual_port),
+                                       grpc::InsecureChannelCredentials());
+
+    const std::string both_wav = make_stereo_jfk_both_wav(jfk);
+    const StreamResult run1 = transcribe(dual_ch, options, both_wav);
+    const StreamResult run2 = transcribe(dual_ch, options, both_wav);
+    dual_srv->Shutdown();
+
+    require(run1.status.ok() && run2.status.ok(),
+            "dual-spoken stereo PER_CHANNEL runs completed OK");
+    require(asr::doc::document_integrity_errors(run1.document).empty(),
+            "dual-spoken stereo Document integrity clean");
+    require(run1.document.media().speakers_size() == 2 &&
+                run1.document.media().speakers(0) == "C1" &&
+                run1.document.media().speakers(1) == "C2",
+            "dual-spoken stereo Document registers canonical [C1, C2] speakers");
+    auto deterministic_bytes = [](const google::protobuf::MessageLite& msg) {
+        std::string out;
+        {
+            google::protobuf::io::StringOutputStream sink(&out);
+            google::protobuf::io::CodedOutputStream coded(&sink);
+            coded.SetSerializationDeterministic(true);
+            require(msg.SerializeToCodedStream(&coded) && !coded.HadError(),
+                    "deterministic protobuf serialization succeeded");
+        }
+        return out;
+    };
+    require(google::protobuf::util::MessageDifferencer::Equals(run1.document, run2.document),
+            "concurrent PER_CHANNEL Document fold equals across runs");
+    require(deterministic_bytes(run1.document) == deterministic_bytes(run2.document),
+            "concurrent PER_CHANNEL Document fold is byte-identical across runs");
 }
 
 void verify_byte_cap(asr::Config config, asr::engine::ModelPool& pool) {
@@ -1222,14 +1307,15 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
         std::string args;
         const char* suffix;
         asr::media::MediaFamily family;
+        const char* expected_codec;
     };
     const std::vector<PipeCase> pipe_cases = {
         {"ogg", "-stream_loop 1 -i " + jfk_path + " -c:a libopus", ".ogg",
-         asr::media::MediaFamily::kOgg},
+         asr::media::MediaFamily::kOgg, "opus"},
         {"webm", "-stream_loop 1 -i " + jfk_path + " -c:a libopus", ".webm",
-         asr::media::MediaFamily::kMkv},
+         asr::media::MediaFamily::kMkv, "opus"},
         {"faststart-mp4", "-stream_loop 1 -i " + jfk_path + " -c:a aac -movflags +faststart",
-         ".mp4", asr::media::MediaFamily::kMp4},
+         ".mp4", asr::media::MediaFamily::kMp4, "aac"},
     };
     for (const PipeCase& c : pipe_cases) {
         const std::string bytes = generate_media(c.args, c.suffix);
@@ -1239,18 +1325,27 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
         require(layout == asr::media::StreamLayout::kPipeable,
                 std::string(c.label) + " classified as kPipeable");
 
-        StreamResult res = transcribe(channel, options_for("tiny.en"), bytes, /*hold_back=*/4096);
+        asrv1::TranscribeOptions opts = options_for("tiny.en");
+        opts.set_emit_document(true);
+        StreamResult res = transcribe(channel, opts, bytes, /*hold_back=*/4096);
         require(res.final_before_upload_done,
                 std::string(c.label) + " emitted a FinalSegment before upload finished");
         require(res.status.ok(),
                 std::string(c.label) + " live pipe stream completed OK: " +
                     res.status.error_message());
+        require(res.media_info.audio_codec() == c.expected_codec,
+                std::string(c.label) + " MediaInfo.audio_codec expected " + c.expected_codec +
+                    ", got '" + res.media_info.audio_codec() + "'");
+        require(res.document.media().codec() == c.expected_codec,
+                std::string(c.label) + " Document.media.codec expected " + c.expected_codec +
+                    ", got '" + res.document.media().codec() + "'");
         require(lower(final_text(res)).find("country") != std::string::npos,
                 std::string(c.label) + " transcript contains 'country'");
     }
 
     // Trailing-moov mp4 (default muxer order: mdat before moov) still
-    // transcribes cleanly through the seekable memfd path.
+    // transcribes cleanly through the seekable memfd path and reports the
+    // identical "aac" audio codec as fast-start mp4.
     const std::string trailing_mp4 = generate_media("-i " + jfk_path + " -c:a aac", ".mp4");
     const asr::media::StreamLayout trailing_layout = asr::media::sniff_stream_layout(
         asr::media::MediaFamily::kMp4, reinterpret_cast<const uint8_t*>(trailing_mp4.data()),
@@ -1260,6 +1355,8 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
     StreamResult trailing_res = transcribe(channel, options_for("tiny.en"), trailing_mp4);
     require(trailing_res.status.ok(),
             "trailing-moov mp4 transcribes OK: " + trailing_res.status.error_message());
+    require(trailing_res.media_info.audio_codec() == "aac",
+            "trailing-moov mp4 MediaInfo.audio_codec matches fast-start ('aac')");
     require(lower(final_text(trailing_res)).find("country") != std::string::npos,
             "trailing-moov mp4 transcript contains 'country'");
 }
@@ -1569,7 +1666,7 @@ int main() {
         verify_streaming_during_upload(channel, jfk);
         verify_document(channel, jfk);
         verify_silence(channel);
-        verify_per_channel_stereo(channel, jfk);
+        verify_per_channel_stereo(channel, config, jfk);
         verify_window_stall_and_clamping(config, pool, jfk);
         verify_trailer_to_gone_client("127.0.0.1:" + std::to_string(port), service);
         {
