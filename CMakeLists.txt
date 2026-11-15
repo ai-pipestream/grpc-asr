@@ -5,8 +5,8 @@ include(CTest)
 
 # C++23 for first-party code (gRParse parity). ggml pins its own targets to
 # C++17 at directory scope ("don't bump" upstream), so nvcc never sees this
-# value; nvcc's host-compiler ceiling for CUDA 12.9 is GCC 14, which is why
-# the CUDA image builds with g++-14 while the CPU/OpenVINO images use the
+# value. The CUDA image stays on the ubuntu24.04 base, whose newest GCC is
+# 14, so it builds with g++-14 while the CPU/OpenVINO images use the
 # ubuntu:26.04 default GCC 15.
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -260,10 +260,15 @@ if(BUILD_TESTING)
   # never references whisper symbols and links clean without it.
   # model-discovery-test links model_pool.o, which references the whisper and
   # ggml backend symbols, so it shares the same load-time exposure.
+  # remote-engine-test links remote_engine.o, which calls whisper for
+  # language ids; from CUDA 13 the ggml CUDA backend links the driver
+  # library directly, so it is gated with the others.
   if(GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER)
-    set_tests_properties(transcriber-test asr-service-test model-discovery-test PROPERTIES DISABLED TRUE)
+    set_tests_properties(transcriber-test asr-service-test model-discovery-test remote-engine-test
+      PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
-      "disabling transcriber-test, asr-service-test, and model-discovery-test. GPU hosts with the driver installed still run them.")
+      "disabling transcriber-test, asr-service-test, model-discovery-test and remote-engine-test. "
+      "GPU hosts with the driver installed still run them.")
   endif()
   # Same shape for OpenVINO: the whisper-linked tests carry a load-time
   # dependency on libopenvino.so through the encoder objects. Hosts with the
