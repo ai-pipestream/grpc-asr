@@ -205,6 +205,13 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
         entries_[name] = std::move(entry);
         std::println("grpc-asr model loaded: {} ({} state(s), backend {})", name,
                      config.concurrency, backend_);
+        if (backend_ == "openvino") {
+            // Say where each half runs: whisper.cpp's OpenVINO support
+            // compiles only the encoder; the decoder stays on the ggml CPU
+            // graph (#30).
+            std::println("grpc-asr placement: {} encoder on OpenVINO {}, decoder on CPU", name,
+                         config.openvino_device);
+        }
     }
     if (config.warmup) {
         metrics_record_warmup_ms(warmup_ms_);
