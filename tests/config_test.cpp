@@ -120,6 +120,17 @@ void verify_rejects() {
     require(rejects("GRPC_ASR_CONCURRENCY", "2x"), "trailing junk fails loud");
     require(rejects("GRPC_ASR_WINDOW_SECONDS", "5"), "sub-minimum window fails loud");
     require(rejects("GRPC_ASR_MAX_MEDIA_BYTES", "512"), "sub-minimum media cap fails loud");
+    for (const char* device : {"AUTO:GPU,CPU", "AUTO", "HETERO:GPU,CPU", "MULTI:GPU,CPU",
+                               "BATCH:GPU", "GPU.", "GPU.x", "GPUX", "gpu"}) {
+        require(rejects("GRPC_ASR_OPENVINO_DEVICE", device),
+                std::string("an OpenVINO device list or malformed device fails loud: ") + device);
+    }
+    for (const char* device : {"GPU", "GPU.1", "NPU", "NPU.0", "CPU"}) {
+        clear_env();
+        ::setenv("GRPC_ASR_OPENVINO_DEVICE", device, 1);
+        require(load_config_from_env().openvino_device == device,
+                std::string("a single OpenVINO device is accepted: ") + device);
+    }
 }
 
 void verify_queue_timeout() {

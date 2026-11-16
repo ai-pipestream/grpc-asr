@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace asr {
@@ -28,6 +29,21 @@ size_t configured_size(const char* name, size_t fallback, size_t minimum, size_t
                                     std::to_string(minimum) + " and " + std::to_string(maximum));
     }
     return static_cast<size_t>(value);
+}
+
+// One OpenVINO device by name. Lists (AUTO:, HETERO:, MULTI:, BATCH:) are
+// refused because they let OpenVINO pick CPU for the encoder without a word.
+bool single_openvino_device(std::string_view device) {
+    if (device == "CPU") return true;
+    for (const std::string_view family : {"GPU", "NPU"}) {
+        if (!device.starts_with(family)) continue;
+        const std::string_view rest = device.substr(family.size());
+        if (rest.empty()) return true;
+        return rest.size() > 1 && rest.front() == '.' &&
+               std::all_of(rest.begin() + 1, rest.end(),
+                           [](unsigned char c) { return std::isdigit(c) != 0; });
+    }
+    return false;
 }
 
 std::string configured_string(const char* name, const std::string& fallback) {
@@ -188,6 +204,13 @@ Config load_config_from_env() {
     config.cuda_device =
         static_cast<int>(configured_size("GRPC_ASR_CUDA_DEVICE", 0, 0, 63));
     config.openvino_device = configured_string("GRPC_ASR_OPENVINO_DEVICE", config.openvino_device);
+    if (!single_openvino_device(config.openvino_device)) {
+        throw std::invalid_argument(
+            "GRPC_ASR_OPENVINO_DEVICE must be GPU, GPU.<n>, NPU, NPU.<n> or CPU (got " +
+            config.openvino_device +
+            "); AUTO, HETERO, MULTI and BATCH device lists can move the encoder to CPU on "
+            "their own");
+    }
     config.openvino_cache_dir =
         configured_string("GRPC_ASR_OPENVINO_CACHE_DIR", config.openvino_cache_dir);
     config.models_dir = configured_string("GRPC_ASR_MODELS_DIR", config.models_dir);

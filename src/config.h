@@ -19,8 +19,10 @@ struct Config {
     int cuda_device = 0;
     // OpenVINO device the whisper encoder compiles for under the openvino
     // backend ("GPU", "GPU.1", ...; other devices need their OpenVINO
-    // plugin, and the OpenVINO image ships only the GPU one). An
-    // unavailable device fails the boot, like every other backend choice.
+    // plugin, and the OpenVINO image ships only the GPU one). One device
+    // only: GPU, GPU.<n>, NPU, NPU.<n> or CPU; AUTO/HETERO/MULTI/BATCH lists
+    // are refused. An unavailable device fails the boot, like every other
+    // backend choice.
     std::string openvino_device = "GPU";
     // Directory where OpenVINO caches compiled encoder blobs; mount a
     // persistent volume here to skip recompiling on container restart.
