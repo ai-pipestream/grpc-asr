@@ -1,3 +1,4 @@
+#include "socket_compat.h"
 // Unit and loopback HTTP integration tests for src/engine/remote_engine.{h,cpp}:
 // allowlist/SSRF policy, multipart field order and streaming body, header
 // confidentiality, verbose_json segment/word parsing, 16 MiB cap, HTTP status
@@ -47,7 +48,7 @@ class LoopbackHttpServer {
                                        std::atomic<bool>& stop_flag)>;
 
     explicit LoopbackHttpServer(Handler handler) {
-        listen_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        listen_fd_ = asr::cloexec_socket(AF_INET, SOCK_STREAM, 0);
         require(listen_fd_ >= 0, "loopback socket creation succeeded");
         int one = 1;
         ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -70,7 +71,7 @@ class LoopbackHttpServer {
                 if (r <= 0) {
                     continue;
                 }
-                const int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+                const int fd = asr::cloexec_accept(listen_fd_);
                 if (fd < 0) {
                     return;
                 }
@@ -158,7 +159,7 @@ void send_all(int fd, std::string_view data) {
     size_t sent = 0;
     while (sent < data.size()) {
         const ssize_t n =
-            ::send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+            asr::send_no_signal(fd, data.data() + sent, data.size() - sent);
         if (n <= 0) {
             return;
         }
@@ -460,7 +461,7 @@ void verify_error_mapping_and_secret_redaction() {
             size_t sent = 0;
             while (sent < total && !stop.load()) {
                 const ssize_t n =
-                    ::send(fd, chunk.data(), std::min(chunk.size(), total - sent), MSG_NOSIGNAL);
+                    asr::send_no_signal(fd, chunk.data(), std::min(chunk.size(), total - sent));
                 if (n <= 0) {
                     break;
                 }

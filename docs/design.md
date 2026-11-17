@@ -186,6 +186,17 @@ completion, keeping resident media memory strictly at one copy (`1x` upload
 size, never `2x`) while `ffprobe` and concurrent audio/keyframe `ffmpeg`
 children read `/dev/fd/3`.
 
+**Native demux compatibility (macOS default).** `GRPC_ASR_NATIVE_DEMUX=ON`
+implements the same live input API with libavformat custom AVIO and a bounded
+16 x 4096-sample PCM queue. No ffmpeg child is launched for decoding. Stop
+requests interrupt waiting input and queue producers. Completed seekable
+uploads remain in one immutable heap buffer on macOS; `switch_to_memfd()`
+is explicitly a no-op there. Native Linux qualification shares the sealed
+memfd through a read-only mapping. Both paths preserve per-channel decoding
+and the common media-relative audio/video timeline, duration lower bounds,
+and bounded Whisper timestamps. Model-driven timeline/RPC gates remain
+registered separately from the model-free native demux tests.
+
 **Stall-aware windowing.** PCM is decoded into rolling windows bounded by
 `GRPC_ASR_WINDOW_SECONDS` (or per-request `TranscribeOptions.window_seconds`,
 clamped into `[GRPC_ASR_MIN_WINDOW_SECONDS, GRPC_ASR_WINDOW_SECONDS]`). Once at

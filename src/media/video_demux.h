@@ -26,6 +26,9 @@ class ToolError : public std::runtime_error {
 struct ProbeInfo {
     // Declared container duration, 0 when unknown.
     uint64_t duration_ms = 0;
+    // Confirmed media endpoint even when total duration is unknown. Admission
+    // must enforce this lower bound independently of the declared duration.
+    uint64_t duration_lower_bound_ms = 0;
     // True when the container has at least one audio stream.
     bool has_audio = false;
     // Audio codec name ("aac", "opus", ...), empty without audio.
@@ -40,16 +43,15 @@ struct ProbeInfo {
     std::string video_codec;
 };
 
-// Demuxes a media container held in memory through ffmpeg without ever touching
-// a filesystem:
-//   - Pipe mode: streams bytes directly from an in-flight ByteStream into
-//     `ffmpeg -i pipe:0` on a background feeder thread, with zero memfd copy.
-//   - Borrowed-memfd mode: duplicates a ByteStream's already-sealed memfd so
-//     the upload buffer and ffmpeg share the same kernel pages (1x RAM).
-//   - Owned-memfd mode: creates and seals a memfd from a contiguous buffer.
+// Diskless media demux. Linux defaults to child ffmpeg/ffprobe with live
+// pipe input or shared sealed memfd storage. Native FFmpeg (macOS default)
+// uses custom AVIO over a live ByteStream or a completed immutable buffer,
+// emits PCM through a bounded queue, and never launches decoder children.
+// Native keyframes retain the sampled source frame's media-relative time.
+// Both implementations support cancellation, mixdown and channel selection.
 class VideoDemux {
   public:
-    // Creates and seals a fresh memfd from [data, data + size).
+    // Owns a copy of [data, data + size): sealed memfd on Linux, heap on native.
     VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path,
                std::string ffprobe_path, std::chrono::milliseconds inactivity_timeout);
 
@@ -58,8 +60,13 @@ class VideoDemux {
     VideoDemux(int sealed_memfd, std::string ffmpeg_path, std::string ffprobe_path,
                std::chrono::milliseconds inactivity_timeout);
 
-    // Pipe-only demuxer (no memfd allocated); use open_audio_from_pipe().
+    // Live-input demuxer (no memfd allocated); use open_audio_from_pipe().
     VideoDemux(std::string ffmpeg_path, std::string ffprobe_path,
+               std::chrono::milliseconds inactivity_timeout);
+
+    // Borrows a completed upload. It must outlive the demuxer. Linux shares
+    // its sealed memfd; native macOS reads the immutable heap buffer directly.
+    VideoDemux(ByteStream& completed, std::string ffmpeg_path, std::string ffprobe_path,
                std::chrono::milliseconds inactivity_timeout);
 
     ~VideoDemux();
@@ -69,8 +76,7 @@ class VideoDemux {
     VideoDemux(const VideoDemux&) = delete;
     VideoDemux& operator=(const VideoDemux&) = delete;
 
-    // Runs ffprobe over the memfd container. Throws DecodeError when ffprobe
-    // rejects the media, ToolError when ffprobe itself fails.
+    // Probes completed media using ffprobe or native libavformat.
     ProbeInfo probe(std::stop_token stop = {});
 
     // Opens an ffmpeg child decoding the first audio track from the memfd to
@@ -78,8 +84,8 @@ class VideoDemux {
     // source channel (`-af pan=mono|c0=c<N>`); otherwise mixes down (`-ac 1`).
     void open_audio(std::stop_token stop = {}, std::optional<uint32_t> channel = std::nullopt);
 
-    // Opens an ffmpeg child reading encoded bytes from `stream` via `pipe:0`
-    // while the upload is still in flight.
+    // Decodes `stream` before upload completion, via child pipe or native AVIO.
+    // The stream must outlive close_audio()/cancel_audio().
     void open_audio_from_pipe(ByteStream& stream, std::stop_token stop = {},
                               std::optional<uint32_t> channel = std::nullopt);
 

@@ -1,0 +1,8 @@
+grpc-asr model loaded: tiny.en (1 state(s), backend cpu)
+grpc-asr backend: cpu (GRPC_ASR_BACKEND=cpu)
+warm_rpc backend=cpu repeat=0 elapsed_us=886389
+warm_rpc backend=cpu repeat=1 elapsed_us=849322
+warm_rpc backend=cpu repeat=2 elapsed_us=888016
+warm_rpc backend=cpu repeat=3 elapsed_us=877195
+warm_rpc backend=cpu repeat=4 elapsed_us=835180
+asr-service-test passed

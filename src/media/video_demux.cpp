@@ -445,6 +445,10 @@ VideoDemux::VideoDemux(std::string ffmpeg_path, std::string ffprobe_path,
     impl_->inactivity_timeout = inactivity_timeout;
 }
 
+VideoDemux::VideoDemux(ByteStream& stream, std::string ffmpeg, std::string ffprobe,
+                       std::chrono::milliseconds timeout)
+    : VideoDemux(stream.memfd(), std::move(ffmpeg), std::move(ffprobe), timeout) {}
+
 VideoDemux::~VideoDemux() = default;
 VideoDemux::VideoDemux(VideoDemux&&) noexcept = default;
 VideoDemux& VideoDemux::operator=(VideoDemux&&) noexcept = default;

@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "whisperVersion": "1.9.5-dev",
+  "backend": "sycl",
+  "models": [
+    "tiny.en"
+  ],
+  "maxMediaBytes": "268435456",
+  "maxDurationMs": "14400000",
+  "ui": {
+    "title": "ASR",
+    "path": "/ui/asr",
+    "description": "Speech-to-text via embedded whisper.cpp"
+  }
+}

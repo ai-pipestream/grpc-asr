@@ -1,0 +1,15 @@
+{
+  "rpc_requests": 5,
+  "exit_code": 0,
+  "placement_rows": 133,
+  "stages": {
+    "conv": 5,
+    "encoder": 5,
+    "cross": 5,
+    "decoder": 118
+  },
+  "cpu_only": true,
+  "elapsed": "0:02.24",
+  "peak_rss_kib": 214020,
+  "log_sha256": "0ed09654c2f2fc92e402455ac9c4ef8fb9d22601075a5371a335ea016edb8ea3"
+}

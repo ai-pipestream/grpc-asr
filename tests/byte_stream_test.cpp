@@ -96,6 +96,7 @@ void verify_memfd_mode_and_gauges() {
         require(s1.memfd_bytes_resident == base.memfd_bytes_resident, "memfd bytes still unchanged");
 
         stream.switch_to_memfd();
+#ifdef __linux__
         require(stream.is_memfd_backed() && stream.memfd() >= 0, "memfd allocated");
         require(stream.completed_bytes().empty(), "heap buffer freed on switch_to_memfd");
 
@@ -122,6 +123,15 @@ void verify_memfd_mode_and_gauges() {
         const int wanted = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL;
         require(seals >= 0 && (seals & wanted) == wanted, "complete() seals the memfd");
         require(::pwrite(stream.memfd(), "x", 1, 0) < 0, "sealed memfd rejects writes");
+#else
+        require(!stream.is_memfd_backed(), "native portable storage remains in memory");
+        stream.append("world!", 6);
+        stream.complete();
+        require(stream.completed_bytes() == "hello world!", "portable completed upload preserved");
+        require(stream.content_hash() == fnv1a_ref("hello world!"), "portable upload hash preserved");
+        require(asr::metrics_summary().upload_bytes_resident == base.upload_bytes_resident + 12,
+                "portable upload has one resident copy");
+#endif
     }
     const auto after = asr::metrics_summary();
     require(after.upload_bytes_resident == base.upload_bytes_resident &&

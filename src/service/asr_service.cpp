@@ -554,7 +554,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                     telemetry->result = StreamEndResult::kCancelled;
                     return {grpc::StatusCode::CANCELLED, "upload aborted"};
                 }
-                media::VideoDemux demux(upload.memfd(), config_.ffmpeg, config_.ffprobe,
+                media::VideoDemux demux(upload, config_.ffmpeg, config_.ffprobe,
                                         inactivity);
                 media::ProbeInfo probe = demux.probe(stop);
                 if (!probe.has_audio) {
@@ -569,7 +569,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                                 " exceeds GRPC_ASR_MAX_CHANNELS=" +
                                 std::to_string(config_.max_channels)};
                 }
-                if (probe.duration_ms > max_duration_ms) {
+                if (std::max(probe.duration_ms, probe.duration_lower_bound_ms) > max_duration_ms) {
                     telemetry->result = StreamEndResult::kDurationCap;
                     return {grpc::StatusCode::RESOURCE_EXHAUSTED,
                             "media duration exceeds GRPC_ASR_MAX_DURATION_SECONDS=" +
@@ -668,7 +668,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                                     std::stop_token token = group_stop.get_token();
                                     std::optional<engine::ModelPool::Lease> lease(
                                         acquire_state(token));
-                                    media::VideoDemux ch_demux(upload.memfd(), config_.ffmpeg,
+                                    media::VideoDemux ch_demux(upload, config_.ffmpeg,
                                                                config_.ffprobe, inactivity);
                                     ch_demux.open_audio(token, ch);
                                     engine::EngineOptions ch_opts = base_engine_options;
@@ -965,6 +965,12 @@ grpc::Status AsrServiceImpl::Transcribe(
         upload.complete();
     }
 
+    // With the upload in, a gone client surfaces only as a failed write,
+    // and the worker can go minutes without one: a silent stretch, a
+    // queue, the video probes. Watch the call instead, so a cancel or a
+    // passed deadline (gRPC cancels the call at its deadline) requests stop
+    // within one watcher interval. Completion is cooperative: worker.join()
+    // below still waits for the current engine/decoder work to finish.
     {
         std::unique_lock<std::mutex> lock(worker_mutex);
         while (!worker_finished.wait_for(lock, kCallWatchInterval, [&] { return worker_done; })) {

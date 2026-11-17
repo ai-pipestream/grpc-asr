@@ -126,8 +126,13 @@ inline double tone_power(const std::vector<float>& samples, double target_hz,
 // 12.2 kbps MR122 20 ms frames) using libopencore-amrnb.so.0 at test time so no
 // binary fixture files are committed and the runtime image stays untouched.
 inline std::string encode_amr_nb_8k(const std::vector<int16_t>& pcm_8k) {
+#ifdef __APPLE__
+    void* lib = ::dlopen("libopencore-amrnb.dylib", RTLD_LAZY);
+    if (!lib) lib = ::dlopen("/opt/homebrew/lib/libopencore-amrnb.dylib", RTLD_LAZY);
+#else
     void* lib = ::dlopen("libopencore-amrnb.so.0", RTLD_LAZY);
-    require(lib != nullptr, "libopencore-amrnb.so.0 available for AMR-NB fixture encoding");
+#endif
+    require(lib != nullptr, "libopencore-amrnb available for AMR-NB fixture encoding (macOS: brew install opencore-amr)");
     using InitFn = void* (*)(int);
     using ExitFn = void (*)(void*);
     using EncodeFn = int (*)(void*, int, const short*, unsigned char*, int);

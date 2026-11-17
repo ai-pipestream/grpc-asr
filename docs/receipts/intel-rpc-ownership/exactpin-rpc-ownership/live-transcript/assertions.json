@@ -1,0 +1,159 @@
+{
+  "fixture_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+  "seconds": {
+    "GetServiceInfo": 0.028805373003706336,
+    "Transcribe": 5.654461908969097
+  },
+  "text": " And so my fellow Americans ask not what your country can do for you  ask what you can do for your country.",
+  "segments": [
+    {
+      "endMs": "8000",
+      "text": " And so my fellow Americans ask not what your country can do for you",
+      "words": [
+        {
+          "text": " And",
+          "startMs": "320",
+          "endMs": "400",
+          "probability": 0.66331124
+        },
+        {
+          "text": " so",
+          "startMs": "400",
+          "endMs": "520",
+          "probability": 0.9719768
+        },
+        {
+          "text": " my",
+          "startMs": "690",
+          "endMs": "940",
+          "probability": 0.5674359
+        },
+        {
+          "text": " fellow",
+          "startMs": "940",
+          "endMs": "1750",
+          "probability": 0.9990144
+        },
+        {
+          "text": " Americans",
+          "startMs": "1750",
+          "endMs": "2110",
+          "probability": 0.85406643
+        },
+        {
+          "text": " ask",
+          "startMs": "3290",
+          "endMs": "3650",
+          "probability": 0.5765432
+        },
+        {
+          "text": " not",
+          "startMs": "4000",
+          "endMs": "4300",
+          "probability": 0.81161994
+        },
+        {
+          "text": " what",
+          "startMs": "5410",
+          "endMs": "5570",
+          "probability": 0.7585416
+        },
+        {
+          "text": " your",
+          "startMs": "5650",
+          "endMs": "5830",
+          "probability": 0.9728207
+        },
+        {
+          "text": " country",
+          "startMs": "5970",
+          "endMs": "6340",
+          "probability": 0.9838751
+        },
+        {
+          "text": " can",
+          "startMs": "6340",
+          "endMs": "6650",
+          "probability": 0.95375544
+        },
+        {
+          "text": " do",
+          "startMs": "6670",
+          "endMs": "6880",
+          "probability": 0.98993254
+        },
+        {
+          "text": " for",
+          "startMs": "6880",
+          "endMs": "6900",
+          "probability": 0.9186796
+        },
+        {
+          "text": " you",
+          "startMs": "7010",
+          "endMs": "7550",
+          "probability": 0.9643724
+        }
+      ],
+      "avgLogprob": -0.17303242
+    },
+    {
+      "index": 1,
+      "startMs": "8000",
+      "endMs": "11000",
+      "text": " ask what you can do for your country.",
+      "words": [
+        {
+          "text": " ask",
+          "startMs": "8310",
+          "endMs": "8310",
+          "probability": 0.8035808
+        },
+        {
+          "text": " what",
+          "startMs": "8340",
+          "endMs": "8720",
+          "probability": 0.9918849
+        },
+        {
+          "text": " you",
+          "startMs": "8720",
+          "endMs": "9030",
+          "probability": 0.9937748
+        },
+        {
+          "text": " can",
+          "startMs": "9030",
+          "endMs": "9240",
+          "probability": 0.9972458
+        },
+        {
+          "text": " do",
+          "startMs": "9370",
+          "endMs": "9540",
+          "probability": 0.9984048
+        },
+        {
+          "text": " for",
+          "startMs": "9540",
+          "endMs": "9850",
+          "probability": 0.9983115
+        },
+        {
+          "text": " your",
+          "startMs": "9850",
+          "endMs": "10100",
+          "probability": 0.99610895
+        },
+        {
+          "text": " country.",
+          "startMs": "10100",
+          "endMs": "11000",
+          "probability": 0.6116621
+        }
+      ],
+      "avgLogprob": -0.08171739
+    }
+  ],
+  "scope": "actual RPC content/timestamps; device placement and lifecycle checked separately"
+}

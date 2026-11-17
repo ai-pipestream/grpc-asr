@@ -1,0 +1,6 @@
+.git/
+build*/
+models/
+receipts/
+docs/receipts/
+**/__pycache__/

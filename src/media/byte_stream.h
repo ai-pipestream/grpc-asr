@@ -77,12 +77,14 @@ class ByteStream {
     }
 
     // Migrates buffered bytes to an anonymous sealable memfd and routes future
-    // append() calls directly into it. Idempotent.
+    // append() calls directly into it. Idempotent. On non-Linux hosts this is
+    // a no-op: native demux borrows the completed immutable heap buffer.
     void switch_to_memfd() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (memfd_ >= 0) {
             return;
         }
+#ifdef __linux__
         const int fd =
             static_cast<int>(::memfd_create("grpc-asr-media", MFD_CLOEXEC | MFD_ALLOW_SEALING));
         if (fd < 0) {
@@ -118,6 +120,7 @@ class ByteStream {
             metrics_add_upload_bytes(-static_cast<int64_t>(total_size_));
             metrics_add_memfd_bytes(static_cast<int64_t>(total_size_));
         }
+#endif
     }
 
     // Producer side: no more bytes will arrive; reads past the end now return
@@ -126,6 +129,7 @@ class ByteStream {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             complete_ = true;
+#ifdef __linux__
             if (memfd_ >= 0 && !sealed_) {
                 if (::fcntl(memfd_, F_ADD_SEALS,
                             F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL) != 0) {
@@ -134,6 +138,7 @@ class ByteStream {
                 }
                 sealed_ = true;
             }
+#endif
         }
         grew_.notify_all();
     }

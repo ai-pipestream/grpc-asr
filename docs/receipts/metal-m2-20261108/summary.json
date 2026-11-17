@@ -1,0 +1,187 @@
+{
+  "metal": {
+    "warm_rpc_us": [
+      158021,
+      158152,
+      153904,
+      160842,
+      156725
+    ],
+    "median_us": 158021,
+    "stage_records": {
+      "conv": 161,
+      "encoder": 161,
+      "cross": 161,
+      "decoder": 1338
+    },
+    "raw_log_sha256": "7a9b6abf0c84fc827de70eb207a4371f3afb4e94b40ec69f53afef959ce30e67"
+  },
+  "cpu": {
+    "warm_rpc_us": [
+      438256,
+      431480,
+      435765,
+      507371,
+      470879
+    ],
+    "median_us": 438256,
+    "stage_records": {
+      "conv": 67,
+      "encoder": 67,
+      "cross": 67,
+      "decoder": 769
+    },
+    "raw_log_sha256": "7c8c9475e1cfe830ca8a5413f4fe4b4ae081bdaf53b669927fbbeb0ef4ce6822"
+  },
+  "median_speedup": 2.7734035349731996,
+  "raw_rpc_segments": [
+    {
+      "endMs": "8000",
+      "text": " And so my fellow Americans ask not what your country can do for you",
+      "words": [
+        {
+          "text": " And",
+          "startMs": "320",
+          "endMs": "400",
+          "probability": 0.66497695
+        },
+        {
+          "text": " so",
+          "startMs": "400",
+          "endMs": "520",
+          "probability": 0.97210664
+        },
+        {
+          "text": " my",
+          "startMs": "690",
+          "endMs": "940",
+          "probability": 0.5656475
+        },
+        {
+          "text": " fellow",
+          "startMs": "940",
+          "endMs": "1750",
+          "probability": 0.9991059
+        },
+        {
+          "text": " Americans",
+          "startMs": "1750",
+          "endMs": "2110",
+          "probability": 0.8543108
+        },
+        {
+          "text": " ask",
+          "startMs": "3290",
+          "endMs": "3650",
+          "probability": 0.5757279
+        },
+        {
+          "text": " not",
+          "startMs": "4000",
+          "endMs": "4300",
+          "probability": 0.8090126
+        },
+        {
+          "text": " what",
+          "startMs": "5410",
+          "endMs": "5570",
+          "probability": 0.7568666
+        },
+        {
+          "text": " your",
+          "startMs": "5650",
+          "endMs": "5830",
+          "probability": 0.9729042
+        },
+        {
+          "text": " country",
+          "startMs": "5970",
+          "endMs": "6380",
+          "probability": 0.9839821
+        },
+        {
+          "text": " can",
+          "startMs": "6380",
+          "endMs": "6650",
+          "probability": 0.9537136
+        },
+        {
+          "text": " do",
+          "startMs": "6670",
+          "endMs": "6880",
+          "probability": 0.989993
+        },
+        {
+          "text": " for",
+          "startMs": "6880",
+          "endMs": "6900",
+          "probability": 0.91811204
+        },
+        {
+          "text": " you",
+          "startMs": "7010",
+          "endMs": "7550",
+          "probability": 0.9643374
+        }
+      ],
+      "avgLogprob": -0.17356266
+    },
+    {
+      "index": 1,
+      "startMs": "8000",
+      "endMs": "11000",
+      "text": " ask what you can do for your country.",
+      "words": [
+        {
+          "text": " ask",
+          "startMs": "8310",
+          "endMs": "8310",
+          "probability": 0.8026097
+        },
+        {
+          "text": " what",
+          "startMs": "8340",
+          "endMs": "8720",
+          "probability": 0.99195683
+        },
+        {
+          "text": " you",
+          "startMs": "8720",
+          "endMs": "9030",
+          "probability": 0.9938051
+        },
+        {
+          "text": " can",
+          "startMs": "9030",
+          "endMs": "9240",
+          "probability": 0.99739033
+        },
+        {
+          "text": " do",
+          "startMs": "9370",
+          "endMs": "9540",
+          "probability": 0.99851716
+        },
+        {
+          "text": " for",
+          "startMs": "9540",
+          "endMs": "9850",
+          "probability": 0.99835724
+        },
+        {
+          "text": " your",
+          "startMs": "9850",
+          "endMs": "10100",
+          "probability": 0.9962268
+        },
+        {
+          "text": " country.",
+          "startMs": "10100",
+          "endMs": "11000",
+          "probability": 0.6116294
+        }
+      ],
+      "avgLogprob": -0.08179241
+    }
+  ]
+}

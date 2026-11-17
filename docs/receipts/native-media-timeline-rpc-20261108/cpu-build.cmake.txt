@@ -1,0 +1,158 @@
+cmake_minimum_required(VERSION 3.20)
+project(asr_timeline_rpc LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 23)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+set(GGML_METAL OFF CACHE BOOL "" FORCE)
+set(GGML_SYCL OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_BLAS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(whisper_SOURCE_DIR "/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/build-rpc-support/whisper-source")
+add_subdirectory("${whisper_SOURCE_DIR}" whisper)
+include("/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/cmake/ObserveWhisperPlacement.cmake")
+include("/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/streaming/cmake/PatchGgmlDepthwise.cmake")
+include("/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/streaming/cmake/PatchParakeetContext.cmake")
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FF REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswresample libswscale)
+set(TIMELINE_DEMUX_SOURCE "/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/media/video_demux_native.cpp" CACHE FILEPATH "Native demux source for differential gate")
+add_library(timeline_core STATIC "/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/config.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/media/sniff.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/media/audio_decoder.cpp"
+"${TIMELINE_DEMUX_SOURCE}"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/engine/model_pool.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/engine/transcriber.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/engine/remote_options.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/engine/docling_asr_options.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/document/document_fold.cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src/service/asr_service.cpp")
+target_include_directories(timeline_core PUBLIC "/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/src")
+target_include_directories(timeline_core SYSTEM PUBLIC "/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/protobuf/src" "/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/generated"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/include"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/abseil-cpp"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/re2"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/zlib"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/zlib"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/cares/cares"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/cares/cares"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/cares/cares/include"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/deps/grpc-clean/third_party/protobuf/third_party/utf8_range")
+target_include_directories(timeline_core SYSTEM PRIVATE "/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/third_party/miniaudio")
+target_compile_options(timeline_core PRIVATE -Wall -Wextra -Wnon-virtual-dtor -Werror)
+target_compile_definitions(timeline_core PRIVATE GRPC_ASR_VERSION="0.1.0")
+target_link_libraries(timeline_core PUBLIC "/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/libasr_proto.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libgrpc++.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libgrpc.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_json_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_textformat_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_lex_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_reflection_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_mini_descriptor_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_descriptor_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_wire_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libutf8_range_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_message_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_mini_table_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_hash_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_base_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libupb_mem_lib.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/re2/libre2.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/zlib/libz.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/cares/cares/src/lib/libcares.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libgpr.a"
+"/usr/lib/x86_64-linux-gnu/libssl.so"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/libaddress_sorting.a"
+"-lrt"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/protobuf/libprotobuf.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_check_op.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/status/libabsl_statusor.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_die_if_null.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_conditions.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_message.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_nullguard.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_examine_stack.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_format.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_structured_proto.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_proto.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_log_sink_set.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_sink.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_marshalling.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_reflection.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_config.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_program_name.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_private_handle_accessor.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_commandlineflag.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/flags/libabsl_flags_commandlineflag_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_initialize.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_globals.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_globals.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_vlog_config_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/log/libabsl_log_internal_fnmatch.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/container/libabsl_raw_hash_set.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/hash/libabsl_hash.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/hash/libabsl_city.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/hash/libabsl_low_level_hash.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/container/libabsl_hashtablez_sampler.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_distributions.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_seed_sequences.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_entropy_pool.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_randen.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_randen_hwaes.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_randen_hwaes_impl.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_randen_slow.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_platform.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_internal_seed_material.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/random/libabsl_random_seed_gen_exception.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/status/libabsl_status.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_cord.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_cordz_info.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_cord_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_cordz_functions.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/profiling/libabsl_exponential_biased.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_cordz_handle.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/crc/libabsl_crc_cord_state.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/crc/libabsl_crc32c.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/crc/libabsl_crc_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/crc/libabsl_crc_cpu_detect.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_str_format_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_leak_check.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_strerror.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/synchronization/libabsl_synchronization.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_stacktrace.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_symbolize.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_debugging_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_demangle_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_demangle_rust.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_decode_rust_punycode.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/debugging/libabsl_utf8_for_code_point.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/synchronization/libabsl_graphcycles_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/synchronization/libabsl_kernel_timeout_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_malloc_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_tracing_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/time/libabsl_time.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/time/libabsl_civil_time.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/time/libabsl_time_zone.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/protobuf/third_party/utf8_range/libutf8_validity.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_strings.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_strings_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/strings/libabsl_string_view.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/numeric/libabsl_int128.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_base.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_spinlock_wait.a"
+"-lrt"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_throw_delegate.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_raw_logging_internal.a"
+"/work/main/grpc-services/worktrees/grpc-asr-cuda-20261108/build-cuda/_deps/grpc-build/third_party/abseil-cpp/absl/base/libabsl_log_severity.a"
+"-lm"
+"/usr/lib/gcc/x86_64-linux-gnu/15/libgomp.so"
+"/usr/lib/x86_64-linux-gnu/libpthread.a"
+"-ldl"
+"/usr/lib/x86_64-linux-gnu/librt.a"
+"/usr/lib/x86_64-linux-gnu/libcrypto.so" whisper PkgConfig::FF)
+add_executable(asr-service-test "/work/main/grpc-services/worktrees/grpc-asr-native-timeline-20261108/tests/asr_service_test.cpp")
+target_compile_definitions(asr-service-test PRIVATE GRPC_ASR_TEST_NATIVE_DEMUX=1)
+target_compile_options(asr-service-test PRIVATE -Wall -Wextra -Wnon-virtual-dtor -Werror)
+target_link_libraries(asr-service-test PRIVATE timeline_core)

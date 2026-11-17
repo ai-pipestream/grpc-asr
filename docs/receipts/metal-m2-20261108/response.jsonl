@@ -1,0 +1,674 @@
+{
+  "mediaInfo": {
+    "durationMs": "11000",
+    "audioCodec": "wav",
+    "sampleRateHz": 16000,
+    "channels": 1
+  }
+}
+{
+  "partialSegment": {
+    "endMs": "8000",
+    "text": " And so my fellow Americans ask not what your country can do for you",
+    "words": [
+      {
+        "text": " And",
+        "startMs": "320",
+        "endMs": "400",
+        "probability": 0.66497695
+      },
+      {
+        "text": " so",
+        "startMs": "400",
+        "endMs": "520",
+        "probability": 0.97210664
+      },
+      {
+        "text": " my",
+        "startMs": "690",
+        "endMs": "940",
+        "probability": 0.5656475
+      },
+      {
+        "text": " fellow",
+        "startMs": "940",
+        "endMs": "1750",
+        "probability": 0.9991059
+      },
+      {
+        "text": " Americans",
+        "startMs": "1750",
+        "endMs": "2110",
+        "probability": 0.8543108
+      },
+      {
+        "text": " ask",
+        "startMs": "3290",
+        "endMs": "3650",
+        "probability": 0.5757279
+      },
+      {
+        "text": " not",
+        "startMs": "4000",
+        "endMs": "4300",
+        "probability": 0.8090126
+      },
+      {
+        "text": " what",
+        "startMs": "5410",
+        "endMs": "5570",
+        "probability": 0.7568666
+      },
+      {
+        "text": " your",
+        "startMs": "5650",
+        "endMs": "5830",
+        "probability": 0.9729042
+      },
+      {
+        "text": " country",
+        "startMs": "5970",
+        "endMs": "6380",
+        "probability": 0.9839821
+      },
+      {
+        "text": " can",
+        "startMs": "6380",
+        "endMs": "6650",
+        "probability": 0.9537136
+      },
+      {
+        "text": " do",
+        "startMs": "6670",
+        "endMs": "6880",
+        "probability": 0.989993
+      },
+      {
+        "text": " for",
+        "startMs": "6880",
+        "endMs": "6900",
+        "probability": 0.91811204
+      },
+      {
+        "text": " you",
+        "startMs": "7010",
+        "endMs": "7550",
+        "probability": 0.9643374
+      }
+    ],
+    "avgLogprob": -0.17356266
+  }
+}
+{
+  "partialSegment": {
+    "index": 1,
+    "startMs": "8000",
+    "endMs": "11000",
+    "text": " ask what you can do for your country.",
+    "words": [
+      {
+        "text": " ask",
+        "startMs": "8310",
+        "endMs": "8310",
+        "probability": 0.8026097
+      },
+      {
+        "text": " what",
+        "startMs": "8340",
+        "endMs": "8720",
+        "probability": 0.99195683
+      },
+      {
+        "text": " you",
+        "startMs": "8720",
+        "endMs": "9030",
+        "probability": 0.9938051
+      },
+      {
+        "text": " can",
+        "startMs": "9030",
+        "endMs": "9240",
+        "probability": 0.99739033
+      },
+      {
+        "text": " do",
+        "startMs": "9370",
+        "endMs": "9540",
+        "probability": 0.99851716
+      },
+      {
+        "text": " for",
+        "startMs": "9540",
+        "endMs": "9850",
+        "probability": 0.99835724
+      },
+      {
+        "text": " your",
+        "startMs": "9850",
+        "endMs": "10100",
+        "probability": 0.9962268
+      },
+      {
+        "text": " country.",
+        "startMs": "10100",
+        "endMs": "11000",
+        "probability": 0.6116294
+      }
+    ],
+    "avgLogprob": -0.08179241
+  }
+}
+{
+  "finalSegment": {
+    "endMs": "8000",
+    "text": " And so my fellow Americans ask not what your country can do for you",
+    "words": [
+      {
+        "text": " And",
+        "startMs": "320",
+        "endMs": "400",
+        "probability": 0.66497695
+      },
+      {
+        "text": " so",
+        "startMs": "400",
+        "endMs": "520",
+        "probability": 0.97210664
+      },
+      {
+        "text": " my",
+        "startMs": "690",
+        "endMs": "940",
+        "probability": 0.5656475
+      },
+      {
+        "text": " fellow",
+        "startMs": "940",
+        "endMs": "1750",
+        "probability": 0.9991059
+      },
+      {
+        "text": " Americans",
+        "startMs": "1750",
+        "endMs": "2110",
+        "probability": 0.8543108
+      },
+      {
+        "text": " ask",
+        "startMs": "3290",
+        "endMs": "3650",
+        "probability": 0.5757279
+      },
+      {
+        "text": " not",
+        "startMs": "4000",
+        "endMs": "4300",
+        "probability": 0.8090126
+      },
+      {
+        "text": " what",
+        "startMs": "5410",
+        "endMs": "5570",
+        "probability": 0.7568666
+      },
+      {
+        "text": " your",
+        "startMs": "5650",
+        "endMs": "5830",
+        "probability": 0.9729042
+      },
+      {
+        "text": " country",
+        "startMs": "5970",
+        "endMs": "6380",
+        "probability": 0.9839821
+      },
+      {
+        "text": " can",
+        "startMs": "6380",
+        "endMs": "6650",
+        "probability": 0.9537136
+      },
+      {
+        "text": " do",
+        "startMs": "6670",
+        "endMs": "6880",
+        "probability": 0.989993
+      },
+      {
+        "text": " for",
+        "startMs": "6880",
+        "endMs": "6900",
+        "probability": 0.91811204
+      },
+      {
+        "text": " you",
+        "startMs": "7010",
+        "endMs": "7550",
+        "probability": 0.9643374
+      }
+    ],
+    "avgLogprob": -0.17356266
+  }
+}
+{
+  "finalSegment": {
+    "index": 1,
+    "startMs": "8000",
+    "endMs": "11000",
+    "text": " ask what you can do for your country.",
+    "words": [
+      {
+        "text": " ask",
+        "startMs": "8310",
+        "endMs": "8310",
+        "probability": 0.8026097
+      },
+      {
+        "text": " what",
+        "startMs": "8340",
+        "endMs": "8720",
+        "probability": 0.99195683
+      },
+      {
+        "text": " you",
+        "startMs": "8720",
+        "endMs": "9030",
+        "probability": 0.9938051
+      },
+      {
+        "text": " can",
+        "startMs": "9030",
+        "endMs": "9240",
+        "probability": 0.99739033
+      },
+      {
+        "text": " do",
+        "startMs": "9370",
+        "endMs": "9540",
+        "probability": 0.99851716
+      },
+      {
+        "text": " for",
+        "startMs": "9540",
+        "endMs": "9850",
+        "probability": 0.99835724
+      },
+      {
+        "text": " your",
+        "startMs": "9850",
+        "endMs": "10100",
+        "probability": 0.9962268
+      },
+      {
+        "text": " country.",
+        "startMs": "10100",
+        "endMs": "11000",
+        "probability": 0.6116294
+      }
+    ],
+    "avgLogprob": -0.08179241
+  }
+}
+{
+  "document": {
+    "schemaName": "docling_document_v2",
+    "name": "media.wav",
+    "origin": {
+      "mimetype": "audio/wav",
+      "binaryHash": "14638014960358665587",
+      "filename": "media.wav"
+    },
+    "body": {
+      "selfRef": "#/body",
+      "children": [
+        {
+          "ref": "#/texts/0"
+        },
+        {
+          "ref": "#/texts/1"
+        }
+      ],
+      "contentLayer": "CONTENT_LAYER_BODY",
+      "meta": {
+        "language": {
+          "createdBy": "asr",
+          "code": "HUMAN_LANGUAGE_LABEL_EN",
+          "codeRaw": "en"
+        },
+        "customFields": {
+          "asr.audio_codec": "wav",
+          "asr.channels": 1,
+          "asr.declared_duration_ms": 11000,
+          "asr.duration_ms": 11000,
+          "asr.has_video": false,
+          "asr.sample_rate_hz": 16000,
+          "asr.token_count": 23
+        }
+      }
+    },
+    "texts": [
+      {
+        "text": {
+          "base": {
+            "selfRef": "#/texts/0",
+            "parent": {
+              "ref": "#/body"
+            },
+            "contentLayer": "CONTENT_LAYER_BODY",
+            "label": "DOC_ITEM_LABEL_TEXT",
+            "prov": [
+              {
+                "charspan": {
+                  "end": 67
+                },
+                "time": {
+                  "endMs": 8000
+                }
+              },
+              {
+                "charspan": {
+                  "end": 3
+                },
+                "time": {
+                  "startMs": 320,
+                  "endMs": 400
+                }
+              },
+              {
+                "charspan": {
+                  "start": 4,
+                  "end": 6
+                },
+                "time": {
+                  "startMs": 400,
+                  "endMs": 520
+                }
+              },
+              {
+                "charspan": {
+                  "start": 7,
+                  "end": 9
+                },
+                "time": {
+                  "startMs": 690,
+                  "endMs": 940
+                }
+              },
+              {
+                "charspan": {
+                  "start": 10,
+                  "end": 16
+                },
+                "time": {
+                  "startMs": 940,
+                  "endMs": 1750
+                }
+              },
+              {
+                "charspan": {
+                  "start": 17,
+                  "end": 26
+                },
+                "time": {
+                  "startMs": 1750,
+                  "endMs": 2110
+                }
+              },
+              {
+                "charspan": {
+                  "start": 27,
+                  "end": 30
+                },
+                "time": {
+                  "startMs": 3290,
+                  "endMs": 3650
+                }
+              },
+              {
+                "charspan": {
+                  "start": 31,
+                  "end": 34
+                },
+                "time": {
+                  "startMs": 4000,
+                  "endMs": 4300
+                }
+              },
+              {
+                "charspan": {
+                  "start": 35,
+                  "end": 39
+                },
+                "time": {
+                  "startMs": 5410,
+                  "endMs": 5570
+                }
+              },
+              {
+                "charspan": {
+                  "start": 40,
+                  "end": 44
+                },
+                "time": {
+                  "startMs": 5650,
+                  "endMs": 5830
+                }
+              },
+              {
+                "charspan": {
+                  "start": 45,
+                  "end": 52
+                },
+                "time": {
+                  "startMs": 5970,
+                  "endMs": 6380
+                }
+              },
+              {
+                "charspan": {
+                  "start": 53,
+                  "end": 56
+                },
+                "time": {
+                  "startMs": 6380,
+                  "endMs": 6650
+                }
+              },
+              {
+                "charspan": {
+                  "start": 57,
+                  "end": 59
+                },
+                "time": {
+                  "startMs": 6670,
+                  "endMs": 6880
+                }
+              },
+              {
+                "charspan": {
+                  "start": 60,
+                  "end": 63
+                },
+                "time": {
+                  "startMs": 6880,
+                  "endMs": 6900
+                }
+              },
+              {
+                "charspan": {
+                  "start": 64,
+                  "end": 67
+                },
+                "time": {
+                  "startMs": 7010,
+                  "endMs": 7550
+                }
+              }
+            ],
+            "orig": " And so my fellow Americans ask not what your country can do for you",
+            "text": "And so my fellow Americans ask not what your country can do for you",
+            "source": [
+              {
+                "track": {
+                  "endTime": 8
+                }
+              },
+              {
+                "collector": {
+                  "collector": "asr",
+                  "model": "tiny.en",
+                  "version": "0.1.0",
+                  "confidence": 0.8406644727918596,
+                  "rawScore": -0.1735626608133316,
+                  "rawScoreKind": "avg_logprob"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "text": {
+          "base": {
+            "selfRef": "#/texts/1",
+            "parent": {
+              "ref": "#/body"
+            },
+            "contentLayer": "CONTENT_LAYER_BODY",
+            "label": "DOC_ITEM_LABEL_TEXT",
+            "prov": [
+              {
+                "charspan": {
+                  "end": 37
+                },
+                "time": {
+                  "startMs": 8000,
+                  "endMs": 11000
+                }
+              },
+              {
+                "charspan": {
+                  "end": 3
+                },
+                "time": {
+                  "startMs": 8310,
+                  "endMs": 8310
+                }
+              },
+              {
+                "charspan": {
+                  "start": 4,
+                  "end": 8
+                },
+                "time": {
+                  "startMs": 8340,
+                  "endMs": 8720
+                }
+              },
+              {
+                "charspan": {
+                  "start": 9,
+                  "end": 12
+                },
+                "time": {
+                  "startMs": 8720,
+                  "endMs": 9030
+                }
+              },
+              {
+                "charspan": {
+                  "start": 13,
+                  "end": 16
+                },
+                "time": {
+                  "startMs": 9030,
+                  "endMs": 9240
+                }
+              },
+              {
+                "charspan": {
+                  "start": 17,
+                  "end": 19
+                },
+                "time": {
+                  "startMs": 9370,
+                  "endMs": 9540
+                }
+              },
+              {
+                "charspan": {
+                  "start": 20,
+                  "end": 23
+                },
+                "time": {
+                  "startMs": 9540,
+                  "endMs": 9850
+                }
+              },
+              {
+                "charspan": {
+                  "start": 24,
+                  "end": 28
+                },
+                "time": {
+                  "startMs": 9850,
+                  "endMs": 10100
+                }
+              },
+              {
+                "charspan": {
+                  "start": 29,
+                  "end": 37
+                },
+                "time": {
+                  "startMs": 10100,
+                  "endMs": 11000
+                }
+              }
+            ],
+            "orig": " ask what you can do for your country.",
+            "text": "ask what you can do for your country.",
+            "source": [
+              {
+                "track": {
+                  "startTime": 8,
+                  "endTime": 11
+                }
+              },
+              {
+                "collector": {
+                  "collector": "asr",
+                  "model": "tiny.en",
+                  "version": "0.1.0",
+                  "confidence": 0.9214632284000878,
+                  "rawScore": -0.08179240673780441,
+                  "rawScoreKind": "avg_logprob"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "furniture": {
+      "selfRef": "#/furniture",
+      "contentLayer": "CONTENT_LAYER_FURNITURE"
+    },
+    "sourceMeta": {
+      "language": "en"
+    },
+    "media": {
+      "durationMs": 11000,
+      "codec": "wav"
+    }
+  }
+}
+{
+  "complete": {
+    "language": "en",
+    "durationMs": "11000",
+    "segmentCount": 2,
+    "tokenCount": "23"
+  }
+}

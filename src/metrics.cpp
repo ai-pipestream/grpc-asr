@@ -1,3 +1,4 @@
+#include "socket_compat.h"
 #include "metrics.h"
 
 #include <arpa/inet.h>
@@ -6,6 +7,9 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -200,6 +204,13 @@ struct ProcessUsage {
 
 ProcessUsage read_process_usage() {
     ProcessUsage usage;
+#ifdef __APPLE__
+    mach_task_basic_info_data_t task{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&task), &count) == KERN_SUCCESS)
+        usage.resident_bytes = task.resident_size;
+#else
     if (std::ifstream statm("/proc/self/statm"); statm) {
         uint64_t total_pages = 0;
         uint64_t resident_pages = 0;
@@ -209,6 +220,7 @@ ProcessUsage read_process_usage() {
                 resident_pages * static_cast<uint64_t>(page_size > 0 ? page_size : 4096);
         }
     }
+#endif
     struct rusage self {};
     if (::getrusage(RUSAGE_SELF, &self) == 0) {
         usage.cpu_seconds = static_cast<double>(self.ru_utime.tv_sec) +
@@ -231,7 +243,7 @@ std::string http_response(const char* status_line, const std::string& content_ty
 void write_all(int fd, const std::string& data) {
     size_t sent = 0;
     while (sent < data.size()) {
-        const ssize_t wrote = ::send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        const ssize_t wrote = asr::send_no_signal(fd, data.data() + sent, data.size() - sent);
         if (wrote <= 0) {
             return;
         }
@@ -551,7 +563,7 @@ MetricsHttpServer::MetricsHttpServer(const std::string& listen_address, Renderer
     std::string last_error = "no usable address";
     for (addrinfo* cur = results; cur != nullptr; cur = cur->ai_next) {
         const int fd =
-            ::socket(cur->ai_family, cur->ai_socktype | SOCK_CLOEXEC, cur->ai_protocol);
+            asr::cloexec_socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol);
         if (fd < 0) {
             last_error = std::strerror(errno);
             continue;
@@ -594,7 +606,7 @@ void MetricsHttpServer::serve() {
     constexpr std::chrono::milliseconds kMaximumBackoff{1000};
     std::chrono::milliseconds backoff{0};
     while (!stopping_.load()) {
-        const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+        const int client = asr::cloexec_accept(listen_fd_);
         if (client < 0) {
             if (stopping_.load()) {
                 return;

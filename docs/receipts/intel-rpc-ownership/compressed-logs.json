@@ -1,0 +1,47 @@
+[
+  {
+    "original": "exactpin-rpc-ownership/cpu.stderr",
+    "gzip": "exactpin-rpc-ownership/cpu.stderr.gz",
+    "original_sha256": "2fd1ee42dcba087b7a094358ff3eeed458714cfd2a8e2fb266bdcc1a55ef683f",
+    "original_bytes": 58707,
+    "gzip_sha256": "d40eba08eaa7da7c64a8fc43aab7c5ff06e37d26419a134131ea75e81f3e85d5",
+    "gzip_bytes": 1550,
+    "mtime": 0
+  },
+  {
+    "original": "exactpin-rpc-ownership/live-transcript/Transcribe.stdout",
+    "gzip": "exactpin-rpc-ownership/live-transcript/Transcribe.stdout.gz",
+    "original_sha256": "118ad8d56b40b7c9d187db25deb81504876d50663e0450b08d9b260c5144f790",
+    "original_bytes": 15540,
+    "gzip_sha256": "bb1cb25845b0e26b08a633197ba08b71740de49c25e2411228190a014947a1fb",
+    "gzip_bytes": 1810,
+    "mtime": 0
+  },
+  {
+    "original": "exactpin-rpc-ownership/sycl.stderr",
+    "gzip": "exactpin-rpc-ownership/sycl.stderr.gz",
+    "original_sha256": "fedb1914bc4e98f54bdea4633cf470b1fd3f5beea71d53bc5e9a8004fc9e99dc",
+    "original_bytes": 88402,
+    "gzip_sha256": "1e0be7aa639fcce5fbd6fc72a27910f18038d096713f1694944d551e898e4523",
+    "gzip_bytes": 1748,
+    "mtime": 0
+  },
+  {
+    "original": "exactpin-rpc-run1/sycl.stderr",
+    "gzip": "exactpin-rpc-run1/sycl.stderr.gz",
+    "original_sha256": "e42011c96e46b79a37f9ebd04c5806e41484d8c9cd48e250730f9b4364501fb5",
+    "original_bytes": 87625,
+    "gzip_sha256": "71572ad28b777e08a40ab018ebfef586f7d98c9c479ea73d19202cdd9af0d430",
+    "gzip_bytes": 1753,
+    "mtime": 0
+  },
+  {
+    "original": "exactpin-rpc-run2/sycl.stderr",
+    "gzip": "exactpin-rpc-run2/sycl.stderr.gz",
+    "original_sha256": "2937d1a41191efc1f01dd67076133552a16e96887965aaa9a7edd94f4d540c91",
+    "original_bytes": 84388,
+    "gzip_sha256": "d4fd3d95f12bfd90eb4c206db9b96ad3462bfbaf8fbac574af0b33fc4ae1fa0f",
+    "gzip_bytes": 1704,
+    "mtime": 0
+  }
+]

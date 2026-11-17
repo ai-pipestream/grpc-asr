@@ -1,0 +1,4 @@
+grpc-asr selected sycl device: Intel(R) Arc(TM) Pro B70 Graphics (SYCL0)
+grpc-asr model loaded: tiny.en (1 state(s), backend sycl)
+grpc-asr backend: sycl (GRPC_ASR_BACKEND=sycl)
+grpc-asr listening on 127.0.0.1:51055 (whisper.cpp 1.9.5-dev, backend sycl)

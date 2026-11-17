@@ -11,12 +11,17 @@
 # load time, which a docker build never has; CMake disables those two at
 # configure time when libcuda.so.1 is absent (GPU hosts still run them).
 
+ARG GRPC_ASR_BUILD_IMAGE=nvidia/cuda:13.5.0-devel-ubuntu24.04
 ARG GRPC_ASR_RUNTIME_IMAGE=nvidia/cuda:13.5.0-runtime-ubuntu24.04
 
 # ubuntu24.04 base with g++-14: the project builds as C++23 (std::println
 # needs libstdc++ 14+), and GCC 14 is the newest this base ships, so this
 # image does not follow the CPU/OpenVINO images to GCC 15.
-FROM nvidia/cuda:13.5.0-devel-ubuntu24.04 AS build
+FROM ${GRPC_ASR_BUILD_IMAGE} AS build
+# Override with a distinct scope when testing a different toolkit/ABI.
+ARG GRPC_ASR_BUILD_CACHE_SCOPE=cuda13.5
+ARG BUILD_JOBS=2
+RUN case "$BUILD_JOBS" in ''|*[!0-9]*|0*) echo "BUILD_JOBS must be a positive integer" >&2; exit 1;; esac
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake curl gcc-14 g++-14 git make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libopencore-amrnb0 libssl-dev libcurl4-openssl-dev libopenh264-dev \
@@ -30,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # libvorbis), never ship it, and run the code under test against
 # /opt/ffmpeg, which comes first on PATH for ctest.
 COPY scripts/build-ffmpeg.sh /tmp/build-ffmpeg.sh
-RUN CC=gcc-14 /tmp/build-ffmpeg.sh /opt/ffmpeg
+RUN BUILD_JOBS="$BUILD_JOBS" CC=gcc-14 /tmp/build-ffmpeg.sh /opt/ffmpeg
 ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 
 WORKDIR /src
@@ -38,11 +43,11 @@ COPY . .
 
 # The cache id encodes every ABI-sensitive dependency; bump it when gRPC,
 # whisper.cpp, CUDA, or the toolchain moves.
-RUN --mount=type=cache,id=grpc-asr-ubuntu24-cuda13.5-gcc14-cxx23-grpc1.83.0-whisper1.9.5,target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu24-${GRPC_ASR_BUILD_CACHE_SCOPE}-gcc14-cxx23-grpc1.83.0-whisper1.9.5,target=/build \
     cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
         -DGRPC_ASR_WERROR=ON -DGRPC_ASR_CUDA=ON \
-    && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
+    && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel "$BUILD_JOBS" \
     && PATH=/opt/ffmpeg/bin:$PATH GRPC_ASR_TEST_FIXTURE_FFMPEG=/usr/bin/ffmpeg \
         ctest --test-dir /build -L asr --output-on-failure \
     && mkdir -p /out && cp /build/grpc-asr-server /out/ \
