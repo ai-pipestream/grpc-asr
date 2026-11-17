@@ -5,9 +5,12 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+
+#include "media/byte_stream.h"
 
 namespace asr::media {
 
@@ -19,7 +22,7 @@ class ToolError : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// Stream-level facts ffprobe reports about a video container.
+// Stream-level facts ffprobe reports about a media container.
 struct ProbeInfo {
     // Declared container duration, 0 when unknown.
     uint64_t duration_ms = 0;
@@ -40,57 +43,65 @@ struct ProbeInfo {
     std::string video_codec;
 };
 
-// Demuxes a video container held in memory through ffmpeg without ever
-// touching a filesystem. On macOS, native FFmpeg reads a seekable memory
-// buffer, emits PCM/PNG directly, and never starts child tools. Its keyframe
-// timestamps are the sampled source frame times. On Linux by default,
-// the encoded bytes live in a sealed memfd
-// (anonymous RAM file, seekable, so mp4 trailing-moov layouts work), and
-// every child reads it via /dev/fd. The memfd and the children's pipes are
-// close-on-exec, so concurrent streams never inherit each other's. PCM and
-// PNG output stream back through pipes with backpressure, so memory stays
-// bounded no matter the media length.
-//
-// Every child watches the stop token its call was given: a stop request
-// kills the child within a fraction of a second and throws Cancelled from
-// that call (from read_audio for the audio child), whether the child was
-// streaming or silent.
+// Diskless media demux. Linux defaults to child ffmpeg/ffprobe with live
+// pipe input or shared sealed memfd storage. Native FFmpeg (macOS default)
+// uses custom AVIO over a live ByteStream or a completed immutable buffer,
+// emits PCM through a bounded queue, and never launches decoder children.
+// Native keyframes retain the sampled source frame's media-relative time.
+// Both implementations support cancellation, mixdown and channel selection.
 class VideoDemux {
   public:
-    // Copies nothing to disk: creates a memfd, writes the media bytes into
-    // it, and seals it against writes and resizes. inactivity_timeout
-    // bounds how long a child may go without producing output before it is
-    // killed.
+    // Owns a copy of [data, data + size): sealed memfd on Linux, heap on native.
     VideoDemux(const uint8_t* data, size_t size, std::string ffmpeg_path,
                std::string ffprobe_path, std::chrono::milliseconds inactivity_timeout);
+
+    // Borrows an existing sealed memfd (duplicated with FD_CLOEXEC; zero byte
+    // copy). Caller retains ownership of `sealed_memfd`.
+    VideoDemux(int sealed_memfd, std::string ffmpeg_path, std::string ffprobe_path,
+               std::chrono::milliseconds inactivity_timeout);
+
+    // Live-input demuxer (no memfd allocated); use open_audio_from_pipe().
+    VideoDemux(std::string ffmpeg_path, std::string ffprobe_path,
+               std::chrono::milliseconds inactivity_timeout);
+
+    // Borrows a completed upload. It must outlive the demuxer. Linux shares
+    // its sealed memfd; native macOS reads the immutable heap buffer directly.
+    VideoDemux(ByteStream& completed, std::string ffmpeg_path, std::string ffprobe_path,
+               std::chrono::milliseconds inactivity_timeout);
+
     ~VideoDemux();
 
+    VideoDemux(VideoDemux&&) noexcept;
+    VideoDemux& operator=(VideoDemux&&) noexcept;
     VideoDemux(const VideoDemux&) = delete;
     VideoDemux& operator=(const VideoDemux&) = delete;
 
-    // Runs ffprobe over the container. Throws DecodeError when ffprobe
-    // rejects the media, ToolError when ffprobe itself fails.
+    // Probes completed media using ffprobe or native libavformat.
     ProbeInfo probe(std::stop_token stop = {});
 
-    // Opens an ffmpeg child decoding the first audio track to mono f32
-    // PCM at the model rate. Read pulls samples with pipe backpressure,
-    // scrubbed to finite values in [-1, 1] (media/pcm_scrub.h); returns 0
-    // at end of stream. A non-zero ffmpeg exit surfaces as
-    // DecodeError from read() or close_audio().
-    void open_audio(std::stop_token stop = {});
+    // Opens an ffmpeg child decoding the first audio track from the memfd to
+    // mono f32 PCM at 16 kHz. When `channel` is set, extracts only that 0-based
+    // source channel (`-af pan=mono|c0=c<N>`); otherwise mixes down (`-ac 1`).
+    void open_audio(std::stop_token stop = {}, std::optional<uint32_t> channel = std::nullopt);
+
+    // Decodes `stream` before upload completion, via child pipe or native AVIO.
+    // The stream must outlive close_audio()/cancel_audio().
+    void open_audio_from_pipe(ByteStream& stream, std::stop_token stop = {},
+                              std::optional<uint32_t> channel = std::nullopt);
+
     size_t read_audio(float* out, size_t max_samples);
+
+    // Non-blocking check returning true when stdout already has PCM bytes (or
+    // EOF) ready so read_audio() will not block waiting for the source.
+    bool has_buffered_audio() const;
+
+    // Blocks up to `timeout` until stdout has PCM bytes (or EOF/stop) ready.
+    bool wait_for_audio(std::chrono::milliseconds timeout, std::stop_token stop = {}) const;
+
     void close_audio();
-    // Kills and reaps the audio child without reading its exit status.
-    // For a reader that stopped early: the child was cut off mid-stream
-    // (blocked on the full pipe, then killed), so its status says nothing
-    // about the media. No-op when no child is open.
     void cancel_audio();
 
-    // Extracts one PNG still roughly every interval_seconds, invoking the
-    // sink per frame as it is parsed from the child's output stream. The
-    // timestamp is the frame's position on the sampling grid. A sink that
-    // returns false stops the extraction: the child is killed and the call
-    // returns normally.
+    // Extracts one PNG still roughly every interval_seconds from the memfd.
     void extract_keyframes(
         uint32_t interval_seconds,
         const std::function<bool(uint64_t timestamp_ms, uint32_t width, uint32_t height,

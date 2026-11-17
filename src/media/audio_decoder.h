@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -21,7 +22,7 @@ class DecodeError : public std::runtime_error {
 };
 
 // In-process decoder for the audio container families (wav/mp3/flac)
-// producing mono f32 PCM at the model rate. Pulls encoded bytes from a
+// producing f32 PCM at the model rate. Pulls encoded bytes from a
 // ByteStream through blocking reads, so decoding (and therefore
 // transcription) starts while the media is still uploading. Nothing
 // touches the filesystem.
@@ -40,11 +41,13 @@ class AudioDecoder {
         uint32_t channels = 0;
     };
 
-    // Opens the stream, blocking until enough header bytes exist. wav_like
-    // marks containers whose duration is declared in the header (wav), so
-    // it is safe to query before the upload completes. Throws DecodeError
-    // when the bytes cannot be opened as audio.
-    AudioDecoder(ByteStream& stream, bool header_declares_duration);
+    // Opens the stream, blocking until enough header bytes exist.
+    // `header_declares_duration` marks containers whose duration is declared in
+    // the header (wav), so it is safe to query before the upload completes.
+    // When `preserve_channels` is true, output frames stay interleaved across
+    // all source channels instead of mixing down to mono.
+    AudioDecoder(ByteStream& stream, bool header_declares_duration,
+                 bool preserve_channels = false);
     ~AudioDecoder();
 
     AudioDecoder(const AudioDecoder&) = delete;
@@ -52,12 +55,23 @@ class AudioDecoder {
 
     const Info& info() const { return info_; }
 
-    // Decodes up to max_samples mono samples at the model rate into out,
-    // scrubbed to finite values in [-1, 1] (media/pcm_scrub.h),
-    // blocking while the upload is behind. Returns the number written; 0
-    // means end of stream (or an aborted upload — the caller checks the
-    // ByteStream). Throws DecodeError on a mid-stream decode failure.
+    // Decodes up to `max_samples` mono samples at the model rate into `out`,
+    // scrubbed to finite values in [-1, 1] (media/pcm_scrub.h), blocking while
+    // the upload is behind. Returns 0 at end of stream (or aborted upload).
     size_t read(float* out, size_t max_samples);
+
+    // Decodes up to `max_frames` PCM frames at the model rate into
+    // `interleaved_out` (`max_frames * output_channels` floats), scrubbed to
+    // finite values in [-1, 1]. Returns the number of frames written.
+    size_t read_frames(float* interleaved_out, size_t max_frames);
+
+    // Non-blocking check returning true when at least `min_bytes` of encoded
+    // input (or EOF/abort) sit ahead of the decoder's read cursor.
+    bool has_buffered_input(size_t min_bytes = 32768) const;
+
+    // Blocks up to `timeout` until at least `min_bytes` of encoded input (or
+    // EOF/abort) sit ahead of the decoder's read cursor.
+    bool wait_for_input(std::chrono::milliseconds timeout, size_t min_bytes = 32768);
 
   private:
     struct Impl;

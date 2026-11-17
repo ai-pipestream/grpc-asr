@@ -1,11 +1,15 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <vector>
+
+#include "ai/pipestream/asr/v1/asr_service.pb.h"
 
 struct whisper_context;
 struct whisper_state;
@@ -18,6 +22,34 @@ class DurationCapExceeded : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
 };
+
+// Local decoder sampling strategy.
+enum class SamplingMode {
+    kGreedy,
+    kBeamSearch,
+};
+
+// Validated local decoder tuning from TranscribeOptions.decoding.
+struct DecodingConfig {
+    std::string initial_prompt;
+    SamplingMode strategy = SamplingMode::kGreedy;
+    uint32_t beam_size = 0;  // 0 -> whisper default (5), max 8
+    uint32_t best_of = 0;    // 0 -> whisper default, max 8
+    std::optional<float> no_speech_threshold;
+    std::optional<float> logprob_threshold;
+    std::optional<float> entropy_threshold;
+    bool suppress_non_speech_tokens = false;
+};
+
+inline constexpr size_t kMaxInitialPromptBytes = 1024;
+inline constexpr uint32_t kMaxBeamSize = 8;
+inline constexpr uint32_t kMaxBestOf = 8;
+
+// Validates `options` and populates `out` when non-null. Returns std::nullopt
+// when valid, or a human-readable INVALID_ARGUMENT reason otherwise.
+std::optional<std::string> parse_decoding_options(
+    const ai::pipestream::asr::v1::DecodingOptions& options,
+    DecodingConfig* out = nullptr);
 
 // A word with timings inside a segment, present when word timestamps were
 // requested.
@@ -38,10 +70,16 @@ struct EngineSegment {
     // segment that scored no token has no confidence to report, which is a
     // different statement from a confident zero.
     float avg_logprob = 0.0f;
+    bool has_avg_logprob = false;
     uint32_t token_count = 0;
+    float no_speech_prob = 0.0f;
+    bool has_no_speech_prob = false;
+    bool suppressed = false;
+    std::optional<uint32_t> channel;
+    std::string language;
     std::vector<EngineWord> words;
-    // Stream-local speaker label ("S1", "S2", ...), empty unless
-    // diarization is on.
+    // Stream-local speaker label ("S1", "S2", ... or "C1", "C1-S1", ...),
+    // empty unless diarization or per-channel mode is on.
     std::string speaker;
     // True when the decoder predicted a speaker change after this segment.
     bool speaker_turn_next = false;
@@ -50,9 +88,13 @@ struct EngineSegment {
 // Aggregates for the TranscriptComplete trailer.
 struct EngineResult {
     std::string language;
+    std::vector<std::string> languages;
     uint64_t duration_ms = 0;
     uint32_t final_segments = 0;
     uint64_t tokens = 0;
+    uint64_t windows = 0;
+    uint64_t window_redecodes = 0;
+    uint64_t decode_wall_ns = 0;
     // True when the sink asked to stop or the stop token fired (the client
     // went away); the trailer must not be sent.
     bool aborted = false;
@@ -69,43 +111,37 @@ struct EngineOptions {
     // segment stays on the first speaker.
     bool diarize = false;
     int threads = 4;
-    // PCM window per whisper_full call; bounds resident PCM memory.
+    // Upper bound on PCM window per whisper_full call; bounds resident PCM.
     size_t window_seconds = 480;
+    // Minimum PCM buffered before a stalled upload triggers an early decode.
+    size_t min_window_seconds = 30;
+    // Milliseconds of source stall after `min_window_seconds` is buffered that
+    // triggers an early decode pass (0 disables stall cuts).
+    size_t window_stall_ms = 0;
     // Hard cap on total media duration; exceeding it throws.
     size_t max_duration_seconds = 14400;
+    // Zero-based source channel when running under CHANNEL_MODE_PER_CHANNEL.
+    std::optional<uint32_t> channel;
+    DecodingConfig decoding;
 };
 
 // Streams a transcription over a pull-based PCM source.
-//
-// The window discipline: fill up to window_seconds of PCM, run
-// whisper_full over it, and emit each segment the decoder commits through
-// the sink as it commits (is_final=false while the window is still open
-// for revision). Segments wholly inside a window become final immediately
-// after the window; the window's last segment stays partial and is
-// re-decoded from its own start in the next window, so its final may
-// extend it. A window that decoded no segment (silence, music) finalizes
-// nothing and the next one starts at its end; window_cut.h has the rule.
-// Finals replace partials by index. PCM behind a final is dropped, so
-// memory never grows with media length.
 class Transcriber {
   public:
     // Pulls up to max mono f32 samples at the model rate; 0 means EOF.
     using PcmRead = std::function<size_t(float* out, size_t max_samples)>;
+    // Optional bounded readiness wait used once `min_window_seconds` of PCM is
+    // buffered: returns true when more input (or EOF/stop) becomes available
+    // within `timeout`, or false when the source stalled.
+    using PcmWait = std::function<bool(std::chrono::milliseconds timeout)>;
     // Receives segments; returning false aborts the transcription (the
-    // client is gone). is_final follows the contract above.
+    // client is gone).
     using SegmentSink = std::function<bool(const EngineSegment& segment, bool is_final)>;
 
-    // Runs to completion on the caller's thread. Throws DecodeError
-    // propagated from the source, DurationCapExceeded past the cap, and
-    // std::runtime_error on an internal whisper failure.
-    //
-    // A stop request ends the run with aborted set: between PCM reads, and
-    // inside whisper_full through its abort callback, which whisper checks
-    // after every encode and decode step. A window that commits nothing
-    // (silence, music) never reaches the sink, so this is what stops it.
     static EngineResult run(whisper_context* ctx, whisper_state* state,
                             const EngineOptions& options, const PcmRead& read,
-                            const SegmentSink& sink, std::stop_token stop = {});
+                            const SegmentSink& sink, std::stop_token stop = {},
+                            const PcmWait& wait_for_more = {});
 };
 
 }  // namespace asr::engine

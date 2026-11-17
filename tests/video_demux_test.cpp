@@ -26,6 +26,8 @@
 #include "cancellation.h"
 #include "fixture.h"
 #include "media/audio_decoder.h"
+#include "media/sniff.h"
+#include "metrics.h"
 
 using asr::media::AudioDecoder;
 using asr::media::DecodeError;
@@ -473,6 +475,198 @@ void verify_png_dimensions() {
     require(threw, "malformed PNG throws");
 }
 
+uint64_t read_rss_bytes() {
+    std::ifstream statm("/proc/self/statm");
+    uint64_t total_pages = 0;
+    uint64_t resident_pages = 0;
+    if (statm >> total_pages >> resident_pages) {
+        const long page_size = ::sysconf(_SC_PAGESIZE);
+        return resident_pages * static_cast<uint64_t>(page_size > 0 ? page_size : 4096);
+    }
+    return 0;
+}
+
+void verify_pipe_streaming_and_single_copy() {
+    // ~12.8 MiB Matroska fixture (100 s stereo 32-bit PCM at 16 kHz = 12.8 MB)
+    // so any duplicate full-file memfd copy would jump RSS and memfd count.
+    const std::string mkv = generate_media(
+        "-f lavfi -i sine=frequency=440:duration=100 -ac 2 -ar 16000 -c:a pcm_f32le", ".mkv");
+    require(mkv.size() > 10 * 1024 * 1024, "large mkv fixture > 10 MiB");
+
+    const auto base_metrics = asr::metrics_summary();
+    const uint64_t rss_before = read_rss_bytes();
+
+    {
+        asr::media::ByteStream stream;
+        // Append the first half only: open_audio_from_pipe must stream PCM while
+        // the second half has not been uploaded yet.
+        const size_t half = mkv.size() / 2;
+        stream.append(mkv.data(), half);
+
+        VideoDemux demux("ffmpeg", "ffprobe", kToolTimeout);
+        demux.open_audio_from_pipe(stream);
+
+        std::vector<float> pcm(16000);
+        const size_t early_samples = demux.read_audio(pcm.data(), pcm.size());
+        require(early_samples > 0, "pipe demux produces PCM while upload is still in flight");
+
+        // Zero memfds exist on the pipe path.
+        require(open_descriptors("/memfd:grpc-asr-media").empty(),
+                "pipe demux allocates zero media memfds");
+        const auto mid_metrics = asr::metrics_summary();
+        require(mid_metrics.memfd_bytes_resident == base_metrics.memfd_bytes_resident,
+                "pipe demux adds 0 bytes to memfd gauge");
+
+        // Feed the second half and finish.
+        stream.append(mkv.data() + half, mkv.size() - half);
+        stream.complete();
+
+        const uint64_t rss_peak = read_rss_bytes();
+        if (rss_peak > rss_before) {
+            const uint64_t rss_delta = rss_peak - rss_before;
+            require(rss_delta < mkv.size() * 2 + (8ULL << 20),
+                    "pipe demux RSS growth stays within single-copy budget: delta=" +
+                        std::to_string(rss_delta) + " media=" + std::to_string(mkv.size()));
+        }
+
+        size_t total = early_samples;
+        while (size_t got = demux.read_audio(pcm.data(), pcm.size())) {
+            total += got;
+        }
+        demux.close_audio();
+        require(total > 95 * asr::media::kModelSampleRate, "full 100 s decoded over pipe");
+        require(no_children_left(), "pipe ffmpeg child reaped cleanly");
+    }
+
+    // Borrowed-memfd path: ByteStream switches to memfd, freeing heap copy so
+    // only one copy lives in the memfd shared with VideoDemux.
+    {
+        asr::media::ByteStream memfd_stream;
+        memfd_stream.append(mkv.data(), 4096);
+        memfd_stream.switch_to_memfd();
+        memfd_stream.append(mkv.data() + 4096, mkv.size() - 4096);
+        memfd_stream.complete();
+
+        VideoDemux borrowed(memfd_stream.memfd(), "ffmpeg", "ffprobe", kToolTimeout);
+        const auto m = asr::metrics_summary();
+        require(m.upload_bytes_resident == base_metrics.upload_bytes_resident,
+                "borrowed-memfd mode keeps 0 heap upload bytes");
+        require(m.memfd_bytes_resident == base_metrics.memfd_bytes_resident + mkv.size(),
+                "borrowed-memfd mode keeps strictly 1x media bytes in memfd");
+        const asr::media::ProbeInfo info = borrowed.probe();
+        require(info.has_audio && info.channels == 2, "borrowed memfd probes cleanly");
+    }
+}
+
+void verify_new_routed_families() {
+    using asr::media::MediaFamily;
+    // AVI (mp3), ASF (wmav2), MPEG-PS (mp2), MPEG-TS (aac), raw ADTS AAC, and AMR-NB.
+    struct Case {
+        const char* label;
+        std::string bytes;
+        MediaFamily expected_family;
+        bool pipeable;
+    };
+    std::vector<Case> cases;
+    cases.push_back(
+        {"avi",
+         generate_media("-f lavfi -i sine=frequency=440:duration=2 -c:a libmp3lame", ".avi"),
+         MediaFamily::kAvi, false});
+    cases.push_back(
+        {"asf", generate_media("-f lavfi -i sine=frequency=440:duration=2 -c:a wmav2", ".asf"),
+         MediaFamily::kAsf, false});
+    cases.push_back(
+        {"mpegps", generate_media("-f lavfi -i sine=frequency=440:duration=2 -c:a mp2", ".mpg"),
+         MediaFamily::kMpegPs, true});
+    cases.push_back(
+        {"mpegts", generate_media("-f lavfi -i sine=frequency=440:duration=2 -c:a aac", ".ts"),
+         MediaFamily::kMpegTs, true});
+    cases.push_back({"adts",
+                     generate_media(
+                         "-f lavfi -i sine=frequency=440:duration=2 -c:a aac -f adts", ".aac"),
+                     MediaFamily::kAac, true});
+
+    // Author 2 s of 440 Hz 8 kHz AMR-NB in memory via OpenCORE AMR-NB.
+    std::vector<int16_t> tone_8k(16000);
+    for (size_t i = 0; i < tone_8k.size(); ++i) {
+        tone_8k[i] = static_cast<int16_t>(
+            8000.0 * std::sin(2.0 * 3.14159265358979 * 440.0 * static_cast<double>(i) / 8000.0));
+    }
+    cases.push_back({"amr", encode_amr_nb_8k(tone_8k), MediaFamily::kAmr, true});
+
+    for (const Case& c : cases) {
+        const MediaFamily got_family = asr::media::sniff(
+            reinterpret_cast<const uint8_t*>(c.bytes.data()),
+            std::min(c.bytes.size(), asr::media::kSniffPrefixBytes));
+        require(got_family == c.expected_family,
+                std::string(c.label) + " sniffs as expected family");
+
+        std::vector<float> all_pcm;
+        std::vector<float> buf(8192);
+        if (c.pipeable) {
+            asr::media::ByteStream stream;
+            stream.append(c.bytes.data(), c.bytes.size());
+            stream.complete();
+            VideoDemux demux("ffmpeg", "ffprobe", kToolTimeout);
+            demux.open_audio_from_pipe(stream);
+            while (size_t n = demux.read_audio(buf.data(), buf.size())) {
+                all_pcm.insert(all_pcm.end(), buf.begin(), buf.begin() + n);
+            }
+            demux.close_audio();
+        } else {
+            VideoDemux demux = open(c.bytes);
+            const asr::media::ProbeInfo info = demux.probe();
+            require(info.has_audio, std::string(c.label) + " probe reports audio");
+            demux.open_audio();
+            while (size_t n = demux.read_audio(buf.data(), buf.size())) {
+                all_pcm.insert(all_pcm.end(), buf.begin(), buf.begin() + n);
+            }
+            demux.close_audio();
+        }
+        require(all_pcm.size() > asr::media::kModelSampleRate,
+                std::string(c.label) + " decodes > 1 s of 16 kHz PCM, got " +
+                    std::to_string(all_pcm.size()));
+    }
+}
+
+void verify_stereo_per_channel() {
+    // Stereo Matroska with lossless 16-bit PCM: 440 Hz on left (ch 0), 880 Hz on right (ch 1).
+    std::string wav_path = "/tmp/grpc-asr-stereo-XXXXXX.wav";
+    int fd = mkstemps(wav_path.data(), 4);
+    require(fd >= 0, "temp stereo wav path");
+    {
+        const std::string stereo = make_multichannel_wav(2.0, {440.0, 880.0});
+        require(::write(fd, stereo.data(), stereo.size()) == static_cast<ssize_t>(stereo.size()),
+                "stereo wav written");
+    }
+    ::close(fd);
+    const std::string mkv = generate_media("-i " + wav_path + " -c:a pcm_s16le", ".mkv");
+    std::remove(wav_path.c_str());
+
+    VideoDemux demux = open(mkv);
+    const asr::media::ProbeInfo info = demux.probe();
+    require(info.channels == 2, "stereo mkv probed with 2 channels");
+
+    auto read_channel = [&](uint32_t ch) {
+        demux.open_audio({}, ch);
+        std::vector<float> out;
+        std::vector<float> buf(8192);
+        while (size_t n = demux.read_audio(buf.data(), buf.size())) {
+            out.insert(out.end(), buf.begin(), buf.begin() + n);
+        }
+        demux.close_audio();
+        return out;
+    };
+
+    const std::vector<float> left = read_channel(0);
+    const std::vector<float> right = read_channel(1);
+    require(left.size() > 30000 && right.size() > 30000, "both channels produced 2 s of PCM");
+    require(tone_power(left, 440.0) > 0.005 && tone_power(left, 880.0) < 1e-6,
+            "channel 0 carries 440 Hz and rejects 880 Hz");
+    require(tone_power(right, 880.0) > 0.005 && tone_power(right, 440.0) < 1e-6,
+            "channel 1 carries 880 Hz and rejects 440 Hz");
+}
+
 }  // namespace
 
 int main() {
@@ -497,6 +691,9 @@ int main() {
         verify_video_without_audio();
         verify_garbage_rejected();
         verify_png_dimensions();
+        verify_pipe_streaming_and_single_copy();
+        verify_new_routed_families();
+        verify_stereo_per_channel();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

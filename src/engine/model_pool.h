@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -90,12 +91,18 @@ class ModelPool {
     // The verified backend name: "cuda", "openvino", or "cpu".
     const std::string& backend() const { return backend_; }
 
+    // True when GRPC_ASR_WARMUP ran 1 s of silence through every state at boot.
+    bool warmed_up() const { return warmed_up_; }
+    uint64_t warmup_ms() const { return warmup_ms_; }
+
   private:
     friend class Lease;
     void release(const std::string& model, whisper_state* state);
 
     struct Entry;
     std::string backend_;
+    bool warmed_up_ = false;
+    uint64_t warmup_ms_ = 0;
     std::map<std::string, std::unique_ptr<Entry>> entries_;
 };
 

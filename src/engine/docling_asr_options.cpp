@@ -1,5 +1,9 @@
 #include "engine/docling_asr_options.h"
 
+#include <algorithm>
+#include <cctype>
+#include <string_view>
+
 namespace asrv1 = ai::pipestream::asr::v1;
 
 namespace asr::engine {
@@ -8,6 +12,28 @@ namespace {
 bool has_unsupported_inline(const asrv1::TranscribeOptions& options) {
   return options.has_transformers() || options.has_mlx_whisper() ||
          options.has_native_whisper();
+}
+
+std::optional<asrv1::Task> parse_task_raw(std::string_view raw) {
+  while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) {
+    raw.remove_prefix(1);
+  }
+  while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) {
+    raw.remove_suffix(1);
+  }
+  if (raw.empty()) {
+    return asrv1::TASK_UNSPECIFIED;
+  }
+  std::string lower(raw);
+  std::ranges::transform(
+      lower, lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (lower == "transcribe" || lower == "task_transcribe") {
+    return asrv1::TASK_TRANSCRIBE;
+  }
+  if (lower == "translate" || lower == "task_translate") {
+    return asrv1::TASK_TRANSLATE;
+  }
+  return std::nullopt;
 }
 
 }  // namespace
@@ -32,6 +58,21 @@ std::optional<std::string> whisper_cpp_model_for(asrv1::AsrModelType type) {
 }
 
 grpc::Status validate_docling_asr_options(const asrv1::TranscribeOptions& options) {
+  if (!asrv1::Task_IsValid(options.task())) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.task has an unknown value"};
+  }
+  if (options.has_task_raw()) {
+    const auto parsed = parse_task_raw(options.task_raw());
+    if (!parsed.has_value()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "TranscribeOptions.task_raw has an unknown value"};
+    }
+    if (*parsed != asrv1::TASK_UNSPECIFIED && options.task() != asrv1::TASK_UNSPECIFIED &&
+        options.task() != *parsed) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "TranscribeOptions.task conflicts with TranscribeOptions.task_raw"};
+    }
+  }
   if (options.has_model_type() && !asrv1::AsrModelType_IsValid(options.model_type())) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "TranscribeOptions.model_type has an unknown value"};
   }
@@ -113,8 +154,14 @@ grpc::Status validate_docling_asr_options(const asrv1::TranscribeOptions& option
 }
 
 void apply_model_type_default(asrv1::TranscribeOptions* options) {
-  if (options == nullptr || !options->model().empty()) return;
-  if (!options->has_model_type()) return;
+  if (options == nullptr) return;
+  if (options->task() == asrv1::TASK_UNSPECIFIED && options->has_task_raw()) {
+    if (auto parsed = parse_task_raw(options->task_raw());
+        parsed.has_value() && *parsed != asrv1::TASK_UNSPECIFIED) {
+      options->set_task(*parsed);
+    }
+  }
+  if (!options->model().empty() || !options->has_model_type()) return;
   if (auto mapped = whisper_cpp_model_for(options->model_type())) {
     options->set_model(*mapped);
   }

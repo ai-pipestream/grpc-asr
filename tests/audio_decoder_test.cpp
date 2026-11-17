@@ -173,6 +173,42 @@ void verify_bad_input() {
     require(threw, "torn wav header throws DecodeError");
 }
 
+void verify_stereo_channel_isolation() {
+    // Stereo 44.1 kHz WAV with 440 Hz on left (ch 0) and 880 Hz on right (ch 1):
+    // preserve_channels must resample to 16 kHz while keeping the two channels
+    // strictly isolated with no cross-leak.
+    const std::string wav = make_multichannel_wav(2.0, {440.0, 880.0}, 44100);
+    ByteStream stream;
+    fill(stream, wav);
+    AudioDecoder decoder(stream, /*header_declares_duration=*/true, /*preserve_channels=*/true);
+    require(decoder.info().channels == 2, "stereo channel count reported");
+    require(decoder.info().sample_rate_hz == 44100, "stereo source rate reported");
+
+    std::vector<float> interleaved(4096 * 2);
+    std::vector<float> left;
+    std::vector<float> right;
+    while (true) {
+        const size_t frames = decoder.read_frames(interleaved.data(), 4096);
+        if (frames == 0) {
+            break;
+        }
+        for (size_t f = 0; f < frames; ++f) {
+            left.push_back(interleaved[f * 2]);
+            right.push_back(interleaved[f * 2 + 1]);
+        }
+    }
+    require(left.size() > 30000 && right.size() == left.size(),
+            "2s of resampled stereo frames decoded");
+    const double left_440 = tone_power(left, 440.0);
+    const double left_880 = tone_power(left, 880.0);
+    const double right_440 = tone_power(right, 440.0);
+    const double right_880 = tone_power(right, 880.0);
+    require(left_440 > 0.005 && left_880 < 1e-6,
+            "left channel carries 440 Hz without 880 Hz leak");
+    require(right_880 > 0.005 && right_440 < 1e-6,
+            "right channel carries 880 Hz without 440 Hz leak");
+}
+
 }  // namespace
 
 int main() {
@@ -183,6 +219,7 @@ int main() {
         verify_silence();
         verify_non_finite_samples_scrubbed();
         verify_bad_input();
+        verify_stereo_channel_isolation();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
         return 1;

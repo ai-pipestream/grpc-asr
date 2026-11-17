@@ -5,8 +5,8 @@ include(CTest)
 
 # C++23 for first-party code (gRParse parity). ggml pins its own targets to
 # C++17 at directory scope ("don't bump" upstream), so nvcc never sees this
-# value; nvcc's host-compiler ceiling for CUDA 12.9 is GCC 14, which is why
-# the CUDA image builds with g++-14 while the CPU/OpenVINO images use the
+# value. The CUDA image stays on the ubuntu24.04 base, whose newest GCC is
+# 14, so it builds with g++-14 while the CPU/OpenVINO images use the
 # ubuntu:26.04 default GCC 15.
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,7 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(CURL 7.86 REQUIRED)
 
 include(FetchContent)
 
@@ -201,12 +202,14 @@ else()
 endif()
 add_library(asr_core STATIC
   src/config.cpp
+  src/metrics.cpp
   src/media/sniff.cpp
   src/media/audio_decoder.cpp
   ${ASR_VIDEO_DEMUX}
   src/engine/model_pool.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
+  src/engine/remote_engine.cpp
   src/engine/docling_asr_options.cpp
   src/document/document_fold.cpp
   src/service/asr_service.cpp)
@@ -217,7 +220,7 @@ endif()
 target_include_directories(asr_core SYSTEM PRIVATE third_party/miniaudio)
 target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}")
 target_link_libraries(asr_core
-  PUBLIC asr_proto whisper Threads::Threads OpenSSL::Crypto
+  PUBLIC asr_proto whisper Threads::Threads OpenSSL::Crypto CURL::libcurl
   PRIVATE asr_flags)
 
 add_library(asr_streaming STATIC src/engine/stream_backend.cpp src/service/streaming_runtime.cpp)
@@ -244,6 +247,7 @@ if(BUILD_TESTING)
     byte-stream-test
     config-test
     remote-options-test
+    remote-engine-test
     docling-asr-options-test
     audio-decoder-test
     document-fold-test
@@ -287,7 +291,7 @@ if(BUILD_TESTING)
     TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr)
   set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
     SKIP_RETURN_CODE 77
-    ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
+    ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_MULTILINGUAL_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-base.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_TEST_ES_SAMPLE=${CMAKE_CURRENT_SOURCE_DIR}/streaming/tests/fixtures/minds14-es-0.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
   if(GRPC_ASR_NATIVE_DEMUX)
     add_test(NAME native-media-timeline-rpc-test COMMAND asr-service-test)
     set_tests_properties(native-media-timeline-rpc-test PROPERTIES
@@ -303,10 +307,15 @@ if(BUILD_TESTING)
   # never references whisper symbols and links clean without it.
   # model-discovery-test links model_pool.o, which references the whisper and
   # ggml backend symbols, so it shares the same load-time exposure.
+  # remote-engine-test links remote_engine.o, which calls whisper for
+  # language ids; from CUDA 13 the ggml CUDA backend links the driver
+  # library directly, so it is gated with the others.
   if(GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER)
-    set_tests_properties(transcriber-test asr-service-test model-discovery-test PROPERTIES DISABLED TRUE)
+    set_tests_properties(transcriber-test asr-service-test model-discovery-test remote-engine-test
+      PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
-      "disabling transcriber-test, asr-service-test, and model-discovery-test. GPU hosts with the driver installed still run them.")
+      "disabling transcriber-test, asr-service-test, model-discovery-test and remote-engine-test. "
+      "GPU hosts with the driver installed still run them.")
   endif()
   # Same shape for OpenVINO: the whisper-linked tests carry a load-time
   # dependency on libopenvino.so through the encoder objects. Hosts with the

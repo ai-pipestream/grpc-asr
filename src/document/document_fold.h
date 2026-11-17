@@ -102,7 +102,29 @@ class AsrDocumentFold {
         google::protobuf::RepeatedPtrField<ai::pipestream::document::v1::SourceType>* source,
         double start_seconds, double end_seconds, std::optional<float> avg_logprob);
 
+    // Inserts a child ref into Document.body.children ordered by media
+    // start_ms, with pictures placed before texts at equal timestamps, lower
+    // channel indices first across per-channel segments, and arrival order
+    // preserved on remaining ties. Arenas stay append-only mid-stream and
+    // canonicalize to body.children order on TranscriptComplete.
+    void insert_body_child(const std::string& ref, uint64_t start_ms, bool is_text,
+                           uint32_t channel, uint32_t segment_index = 0);
+
+    // Reindexes texts, pictures, body.children, and media.speakers into
+    // canonical body.children order when concurrent per-channel or keyframe
+    // producers delivered items out of media-time/channel order.
+    void canonicalize_arenas_and_speakers();
+
+    struct ChildKey {
+        uint64_t start_ms = 0;
+        bool is_text = false;
+        uint32_t channel = 0;
+        uint32_t segment_index = 0;
+        auto operator<=>(const ChildKey&) const = default;
+    };
+
     ai::pipestream::document::v1::Document document_;
+    std::vector<ChildKey> body_child_keys_;
     std::string model_;
     std::string version_;
     FoldOptions options_;

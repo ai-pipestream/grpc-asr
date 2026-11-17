@@ -138,6 +138,40 @@ void verify_conflicts_and_unknown_values() {
   expect_invalid(options, "options", "remote and inline options");
 }
 
+void verify_task_and_task_raw() {
+  asrv1::TranscribeOptions options;
+  options.set_model("tiny.en");
+  options.set_task(static_cast<asrv1::Task>(12345));
+  expect_invalid(options, "TranscribeOptions.task", "unknown numeric task");
+
+  options.Clear();
+  options.set_model("tiny.en");
+  options.set_task_raw("translate");
+  expect_ok(options, "task_raw translate");
+  apply_model_type_default(&options);
+  require(options.task() == asrv1::TASK_TRANSLATE, "task_raw translate populates TASK_TRANSLATE");
+
+  options.Clear();
+  options.set_model("tiny.en");
+  options.set_task_raw("  TASK_TRANSCRIBE ");
+  expect_ok(options, "task_raw TASK_TRANSCRIBE");
+  apply_model_type_default(&options);
+  require(options.task() == asrv1::TASK_TRANSCRIBE,
+          "task_raw TASK_TRANSCRIBE populates TASK_TRANSCRIBE");
+
+  options.Clear();
+  options.set_model("tiny.en");
+  options.set_task(asrv1::TASK_TRANSCRIBE);
+  options.set_task_raw("translate");
+  expect_invalid(options, "conflicts with TranscribeOptions.task_raw",
+                 "conflicting task and task_raw");
+
+  options.Clear();
+  options.set_model("tiny.en");
+  options.set_task_raw("diarize-only");
+  expect_invalid(options, "TranscribeOptions.task_raw", "unknown task_raw");
+}
+
 }  // namespace
 
 int main() {
@@ -147,6 +181,7 @@ int main() {
     verify_engine_arms();
     verify_inline_options_unimplemented();
     verify_model_type_resolution();
+    verify_task_and_task_raw();
   } catch (const std::exception& ex) {
     std::println(stderr, "FAIL: {}", ex.what());
     return 1;

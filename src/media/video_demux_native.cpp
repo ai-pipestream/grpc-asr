@@ -1,5 +1,11 @@
 // Native, seekable memory demux for macOS. No files, subprocesses or URLs.
 #include "media/video_demux.h"
+#include "media/byte_stream.h"
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <deque>
+#include <thread>
+#include <condition_variable>
 #include "media/audio_decoder.h"
 #include "media/pcm_scrub.h"
 #include "media/native_memory_seek.h"
@@ -26,6 +32,7 @@ void check(int result, const char* message) {
 struct Input {
     std::span<const uint8_t> bytes;
     size_t position = 0;
+    ByteStream* stream = nullptr;
     std::stop_token stop;
     std::chrono::milliseconds timeout;
     std::chrono::steady_clock::time_point deadline;
@@ -39,6 +46,17 @@ struct Input {
     static int read(void* opaque, uint8_t* out, int size) {
         auto& s = *static_cast<Input*>(opaque);
         if (s.interrupted()) return AVERROR_EXIT;
+        if (s.stream) {
+            while (!s.interrupted()) {
+                const auto result = s.stream->read_at_for(s.position, out, static_cast<size_t>(size),
+                                                          std::chrono::milliseconds(20));
+                if (result.timed_out) continue;
+                if (s.stream->is_aborted()) return AVERROR_EXIT;
+                s.position += result.bytes;
+                return result.bytes ? static_cast<int>(result.bytes) : AVERROR_EOF;
+            }
+            return AVERROR_EXIT;
+        }
         const auto count = std::min(s.bytes.size() - s.position, static_cast<size_t>(size));
         if (!count) return AVERROR_EOF;
         std::memcpy(out, s.bytes.data() + s.position, count);
@@ -56,11 +74,11 @@ struct Input {
         if (stop.stop_requested()) throw Cancelled("native media decode cancelled");
         if (std::chrono::steady_clock::now() >= deadline) throw ToolError("native media operation timed out");
     }
-    void open(std::span<const uint8_t> data, std::stop_token token, std::chrono::milliseconds limit) {
-        bytes = data; stop = token; timeout = limit; begin_operation();
+    void open(std::span<const uint8_t> data, std::stop_token token, std::chrono::milliseconds limit, ByteStream* source = nullptr) {
+        stream = source; bytes = data; stop = token; timeout = limit; begin_operation();
         auto* buffer = static_cast<uint8_t*>(av_malloc(32768));
         if (!buffer) throw std::bad_alloc();
-        io = avio_alloc_context(buffer, 32768, 0, this, read, nullptr, seek);
+        io = avio_alloc_context(buffer, 32768, 0, this, read, nullptr, stream ? nullptr : seek);
         if (!io) { av_free(buffer); throw std::bad_alloc(); }
         format = avformat_alloc_context();
         if (!format) throw std::bad_alloc();
@@ -69,7 +87,7 @@ struct Input {
         format->interrupt_callback = {[](void* p) { return static_cast<Input*>(p)->interrupted() ? 1 : 0; }, this};
         format->io_open = [](AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) { return AVERROR(EPERM); };
         AVDictionary* options = nullptr;
-        av_dict_set(&options, "format_whitelist", "wav,mp3,flac,ogg,mov,matroska,webm,mpegts,aac,nut", 0);
+        av_dict_set(&options, "format_whitelist", "wav,mp3,flac,ogg,mov,matroska,webm,mpegts,mpeg,aac,nut,avi,asf,amr", 0);
         const int opened = avformat_open_input(&format, nullptr, nullptr, &options);
         av_dict_free(&options);
         cancelled(); check(opened, "native media open failed");
@@ -85,6 +103,8 @@ struct Input {
             av_dict_set_int(&probe_options[i], "max_pixels", kMaxFramePixels, 0);
             av_dict_set(&probe_options[i], "threads", "2", 0);
         }
+        // Live input must not wait for upload EOF merely to estimate duration.
+        if (stream) format->max_analyze_duration = AV_TIME_BASE;
         const int probed = avformat_find_stream_info(format, probe_options.data());
         for (auto& option : probe_options) av_dict_free(&option);
         cancelled(); check(probed, "native media probe failed");
@@ -98,9 +118,9 @@ struct Track {
     int index = -1;
     bool draining = false;
     ~Track() { avcodec_free_context(&codec); av_frame_free(&frame); av_packet_free(&packet); }
-    void open(std::span<const uint8_t> data, std::stop_token stop, AVMediaType type, std::chrono::milliseconds timeout) {
+    void open(std::span<const uint8_t> data, std::stop_token stop, AVMediaType type, std::chrono::milliseconds timeout, ByteStream* source = nullptr) {
         if (!frame || !packet) throw std::bad_alloc();
-        input.open(data, stop, timeout);
+        input.open(data, stop, timeout, source);
         // Match probe and the established ffmpeg -map a:0 / v:0 contract.
         for (unsigned i = 0; i < input.format->nb_streams; ++i) {
             if (input.format->streams[i]->codecpar->codec_type == type) { index = static_cast<int>(i); break; }
@@ -227,14 +247,21 @@ struct Audio {
     uint64_t leading_silence = 0;
     uint64_t trim_samples = 0;
     ~Audio() { swr_free(&swr); }
-    void open(std::span<const uint8_t> data, std::stop_token stop, std::chrono::milliseconds timeout) {
-        track.open(data, stop, AVMEDIA_TYPE_AUDIO, timeout);
+    void open(std::span<const uint8_t> data, std::stop_token stop, std::chrono::milliseconds timeout, std::optional<uint32_t> channel = {}, ByteStream* source = nullptr) {
+        track.open(data, stop, AVMEDIA_TYPE_AUDIO, timeout, source);
         origin_us = media_origin_us(track.input.format);
         AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
         auto* c = track.codec;
         if (c->sample_rate <= 0) throw DecodeError("invalid native sample rate");
         check(swr_alloc_set_opts2(&swr, &mono, AV_SAMPLE_FMT_FLT, 16000,
             &c->ch_layout, c->sample_fmt, c->sample_rate, 0, nullptr), "native resampler allocation failed");
+        if (channel) {
+            if (*channel >= static_cast<uint32_t>(c->ch_layout.nb_channels))
+                throw DecodeError("native audio channel out of range");
+            std::vector<double> matrix(static_cast<size_t>(c->ch_layout.nb_channels), 0.0);
+            matrix[*channel] = 1.0;
+            check(swr_set_matrix(swr, matrix.data(), c->ch_layout.nb_channels), "native channel selection failed");
+        }
         check(swr_init(swr), "native resampler initialization failed");
     }
     bool fill() {
@@ -279,19 +306,63 @@ struct Audio {
 
 struct VideoDemux::Impl {
     std::vector<uint8_t> bytes;
+    std::span<const uint8_t> data;
+    void* mapping = MAP_FAILED;
     std::unique_ptr<Audio> audio;
     std::chrono::milliseconds timeout;
+    std::mutex mutex;
+    std::condition_variable_any ready;
+    std::deque<std::vector<float>> queue;
+    size_t queue_offset = 0;
+    bool finished = false;
+    std::exception_ptr error;
+    std::jthread worker;
+    ~Impl() {
+        worker.request_stop(); ready.notify_all();
+        if (worker.joinable()) worker.join();
+        if (mapping != MAP_FAILED) ::munmap(mapping, data.size());
+    }
 };
 VideoDemux::VideoDemux(const uint8_t* data, size_t size, std::string, std::string,
                      std::chrono::milliseconds timeout) : impl_(std::make_unique<Impl>()) {
     if (!data || !size || size > static_cast<size_t>(INT64_MAX)) throw DecodeError("invalid media bytes");
     impl_->bytes.assign(data, data + size);
+    impl_->data = impl_->bytes;
     if (timeout.count() <= 0) throw ToolError("native media timeout must be positive");
     impl_->timeout = timeout;
 }
+VideoDemux::VideoDemux(std::string, std::string, std::chrono::milliseconds timeout)
+    : impl_(std::make_unique<Impl>()) {
+    if (timeout.count() <= 0) throw ToolError("native media timeout must be positive");
+    impl_->timeout = timeout;
+}
+VideoDemux::VideoDemux(int fd, std::string ffmpeg, std::string ffprobe,
+                       std::chrono::milliseconds timeout)
+    : VideoDemux(std::move(ffmpeg), std::move(ffprobe), timeout) {
+    struct stat st{};
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0)
+        throw DecodeError("invalid completed media descriptor");
+    impl_->mapping = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_PRIVATE, fd, 0);
+    if (impl_->mapping == MAP_FAILED) throw ToolError("mapping media failed");
+    impl_->data = {static_cast<const uint8_t*>(impl_->mapping), static_cast<size_t>(st.st_size)};
+}
+VideoDemux::VideoDemux(ByteStream& stream, std::string ffmpeg, std::string ffprobe,
+                       std::chrono::milliseconds timeout)
+    : VideoDemux(std::move(ffmpeg), std::move(ffprobe), timeout) {
+    if (!stream.is_complete() || stream.is_aborted()) throw DecodeError("media upload is incomplete");
+    if (stream.is_memfd_backed()) {
+        VideoDemux mapped(stream.memfd(), "", "", timeout);
+        impl_.swap(mapped.impl_);
+    } else {
+        const auto& bytes = stream.completed_bytes();
+        impl_->data = {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()};
+    }
+}
+VideoDemux::VideoDemux(VideoDemux&&) noexcept = default;
+VideoDemux& VideoDemux::operator=(VideoDemux&&) noexcept = default;
 VideoDemux::~VideoDemux() = default;
 ProbeInfo VideoDemux::probe(std::stop_token stop) {
-    Input input; input.open(impl_->bytes, stop, impl_->timeout);
+    Input input; input.open(impl_->data, stop, impl_->timeout);
     ProbeInfo info;
     if (input.format->duration > 0) info.duration_ms = static_cast<uint64_t>(input.format->duration / 1000);
     for (unsigned i = 0; i < input.format->nb_streams; ++i) {
@@ -309,10 +380,71 @@ ProbeInfo VideoDemux::probe(std::stop_token stop) {
         measure_relative_duration(input, origin, info);
     return info;
 }
-void VideoDemux::open_audio(std::stop_token stop) {
-    auto audio = std::make_unique<Audio>(); audio->open(impl_->bytes, stop, impl_->timeout); impl_->audio = std::move(audio);
+void VideoDemux::open_audio(std::stop_token stop, std::optional<uint32_t> channel) {
+    cancel_audio();
+    auto audio = std::make_unique<Audio>();
+    audio->open(impl_->data, stop, impl_->timeout, channel); impl_->audio = std::move(audio);
+}
+void VideoDemux::open_audio_from_pipe(ByteStream& stream, std::stop_token stop,
+                                      std::optional<uint32_t> channel) {
+    cancel_audio();
+    impl_->finished = false; impl_->error = nullptr;
+    auto* p = impl_.get();
+    p->worker = std::jthread([p, &stream, stop, channel](std::stop_token worker_stop) {
+        std::stop_source combined;
+        std::stop_callback caller(stop, [&] { combined.request_stop(); p->ready.notify_all(); });
+        std::stop_callback owner(worker_stop, [&] { combined.request_stop(); p->ready.notify_all(); });
+        try {
+            Audio audio;
+            audio.open({}, combined.get_token(), p->timeout, channel, &stream);
+            while (true) {
+                audio.track.input.begin_operation();
+                while (!audio.leading_silence && audio.offset == audio.pending.size())
+                    if (!audio.fill()) break;
+                if (audio.done && !audio.leading_silence && audio.offset == audio.pending.size()) break;
+                std::vector<float> block;
+                if (audio.leading_silence) {
+                    const auto count = std::min<uint64_t>(4096, audio.leading_silence);
+                    block.assign(static_cast<size_t>(count), 0.0f); audio.leading_silence -= count;
+                } else {
+                    const auto count = std::min<size_t>(4096, audio.pending.size() - audio.offset);
+                    block.assign(audio.pending.begin() + audio.offset, audio.pending.begin() + audio.offset + count);
+                    audio.offset += count;
+                }
+                std::unique_lock lock(p->mutex);
+                if (!p->ready.wait(lock, combined.get_token(), [&] { return p->queue.size() < 16; }))
+                    throw Cancelled("native audio cancelled");
+                p->queue.push_back(std::move(block)); p->ready.notify_all();
+            }
+        } catch (...) {
+            std::lock_guard lock(p->mutex); p->error = std::current_exception();
+        }
+        std::lock_guard lock(p->mutex); p->finished = true; p->ready.notify_all();
+    });
+}
+bool VideoDemux::has_buffered_audio() const {
+    std::lock_guard lock(impl_->mutex);
+    return !impl_->worker.joinable() || !impl_->queue.empty() || impl_->finished;
+}
+bool VideoDemux::wait_for_audio(std::chrono::milliseconds timeout, std::stop_token stop) const {
+    std::unique_lock lock(impl_->mutex);
+    return impl_->ready.wait_for(lock, stop, timeout, [&] {
+        return !impl_->worker.joinable() || !impl_->queue.empty() || impl_->finished;
+    });
 }
 size_t VideoDemux::read_audio(float* out, size_t size) {
+    if (impl_->worker.joinable()) {
+        std::unique_lock lock(impl_->mutex);
+        impl_->ready.wait(lock, [&] { return !impl_->queue.empty() || impl_->finished; });
+        if (impl_->error) std::rethrow_exception(impl_->error);
+        if (impl_->queue.empty()) return 0;
+        auto& block = impl_->queue.front();
+        const auto count = std::min(size, block.size() - impl_->queue_offset);
+        std::copy_n(block.data() + impl_->queue_offset, count, out);
+        impl_->queue_offset += count;
+        if (impl_->queue_offset == block.size()) { impl_->queue.pop_front(); impl_->queue_offset = 0; }
+        impl_->ready.notify_all(); return count;
+    }
     if (!impl_->audio) throw ToolError("native audio is not open");
     auto& a = *impl_->audio;
     a.track.input.begin_operation();
@@ -328,8 +460,19 @@ size_t VideoDemux::read_audio(float* out, size_t size) {
     const size_t count = std::min(size, a.pending.size() - a.offset);
     std::copy_n(a.pending.data() + a.offset, count, out); a.offset += count; return count;
 }
-void VideoDemux::close_audio() { impl_->audio.reset(); }
-void VideoDemux::cancel_audio() { impl_->audio.reset(); }
+void VideoDemux::close_audio() {
+    if (impl_->worker.joinable()) {
+        // Like the subprocess backend, close is used after PCM EOF.
+        impl_->worker.request_stop(); impl_->ready.notify_all(); impl_->worker.join();
+        if (impl_->error) std::rethrow_exception(impl_->error);
+    }
+    impl_->audio.reset();
+}
+void VideoDemux::cancel_audio() {
+    impl_->worker.request_stop(); impl_->ready.notify_all();
+    if (impl_->worker.joinable()) impl_->worker.join();
+    impl_->audio.reset(); impl_->queue.clear(); impl_->queue_offset = 0;
+}
 
 void png_dimensions(const std::string& png, uint32_t* width, uint32_t* height) {
     if (png.size() < 24 || png.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) != 0 || png.compare(12, 4, "IHDR") != 0)
@@ -343,7 +486,7 @@ void png_dimensions(const std::string& png, uint32_t* width, uint32_t* height) {
 void VideoDemux::extract_keyframes(uint32_t interval,
     const std::function<bool(uint64_t, uint32_t, uint32_t, std::string)>& sink, std::stop_token stop) {
     if (!interval) throw DecodeError("keyframe interval must be positive");
-    Track track; track.open(impl_->bytes, stop, AVMEDIA_TYPE_VIDEO, impl_->timeout);
+    Track track; track.open(impl_->data, stop, AVMEDIA_TYPE_VIDEO, impl_->timeout);
     const int64_t origin_us = media_origin_us(track.input.format);
     uint64_t next_ms = 0;
     while (track.next()) {

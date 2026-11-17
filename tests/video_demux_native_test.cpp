@@ -1,4 +1,5 @@
 #include "media/video_demux.h"
+#include "media/byte_stream.h"
 #include "media/audio_decoder.h"
 #include "cancellation.h"
 #include "fixture.h"
@@ -147,6 +148,59 @@ void verify_unknown_duration_lower_bound() {
                      origin, absolute, info.duration_lower_bound_ms);
     }
 }
+void verify_native_streaming_api() {
+    for (const auto* encoding : {"-c:a libopus -f ogg", "-c:a pcm_s16le -f matroska"}) {
+        const auto bytes = pipe_fixture(std::string("-f lavfi -i sine=frequency=440:sample_rate=16000:duration=20 ") +
+                                        encoding + " pipe:1");
+        require(bytes.size() > 8192, "live fixture has a withheld tail");
+        asr::media::ByteStream stream;
+        stream.append(bytes.data(), bytes.size() - 4096);
+        VideoDemux media("/nonexistent/ffmpeg", "/nonexistent/ffprobe", std::chrono::seconds(5));
+        media.open_audio_from_pipe(stream);
+        require(media.wait_for_audio(std::chrono::seconds(4)), "native live PCM ready before EOF");
+        std::array<float, 4096> pcm;
+        size_t total = media.read_audio(pcm.data(), pcm.size());
+        require(total > 0 && !stream.is_complete(), "native audio emitted during upload");
+        stream.append(bytes.data() + bytes.size() - 4096, 4096); stream.complete();
+        while (const auto count = media.read_audio(pcm.data(), pcm.size())) total += count;
+        media.close_audio();
+        require(total >= 319000 && total <= 321000, "complete native live audio duration");
+    }
+    asr::media::ByteStream stalled;
+    VideoDemux waiting("", "", std::chrono::seconds(5));
+    std::stop_source stop;
+    waiting.open_audio_from_pipe(stalled, stop.get_token());
+    require(!waiting.wait_for_audio(std::chrono::milliseconds(30)), "empty input waits without false EOF");
+    const auto begin = std::chrono::steady_clock::now();
+    stop.request_stop();
+    require(waiting.wait_for_audio(std::chrono::seconds(1)), "cancel wakes stalled native input");
+    float value;
+    bool cancelled = false;
+    try { waiting.read_audio(&value, 1); } catch (const asr::Cancelled&) { cancelled = true; }
+    require(cancelled, "stalled native input reports cancellation");
+    waiting.cancel_audio();
+    require(std::chrono::steady_clock::now() - begin < std::chrono::seconds(1), "cancel joins promptly");
+
+    const auto stereo = pipe_fixture("-f lavfi -i 'aevalsrc=0.25|0.75:s=16000:d=1' -c:a pcm_f32le -f wav pipe:1");
+    asr::media::ByteStream completed;
+    completed.append(stereo.data(), stereo.size()); completed.switch_to_memfd(); completed.complete();
+    VideoDemux channels(completed, "", "", std::chrono::seconds(5));
+    require(channels.probe().channels == 2, "completed upload preserves channel count");
+    for (uint32_t channel = 0; channel < 2; ++channel) {
+        channels.open_audio({}, channel);
+        std::array<float, 1000> pcm;
+        size_t count = 0;
+        while (const auto n = channels.read_audio(pcm.data(), pcm.size())) {
+            for (size_t i = 0; i < n; ++i)
+                require(std::abs(pcm[i] - (channel == 0 ? 0.25f : 0.75f)) < 0.001f,
+                        "native per-channel samples remain isolated");
+            count += n;
+        }
+        channels.close_audio(); require(count == 16000, "channel duration preserved");
+    }
+    std::println("native streaming, cancellation, completed upload and per-channel checks passed");
+}
+
 int main(int argc, char**) {
     try {
         verify_timeline_origins();
@@ -248,6 +302,7 @@ int main(int argc, char**) {
             previous = block[i];
         }
         require(crossings > 400 && crossings < 480, "decoded source is first 220Hz track, not default 880Hz track");
+        verify_native_streaming_api();
         std::println("native-video-demux-test passed");
         return 0;
     } catch (const std::exception& error) {
