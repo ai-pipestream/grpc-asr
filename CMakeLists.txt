@@ -18,7 +18,7 @@ set(BUILD_SHARED_LIBS OFF)
 
 option(GRPC_ASR_WERROR "Treat warnings as errors for first-party targets" OFF)
 option(GRPC_ASR_CUDA "Build whisper.cpp with the CUDA (GGML) backend" OFF)
-option(GRPC_ASR_OPENVINO "Build whisper.cpp with the OpenVINO encoder" OFF)
+option(GRPC_ASR_OPENVINO "Build whisper.cpp with ggml's OpenVINO backend and the OpenVINO encoder" OFF)
 set(GRPC_ASR_SANITIZE "" CACHE STRING "Comma list for -fsanitize on first-party targets")
 
 # Warnings apply to first-party targets only; fetched dependencies use -I
@@ -72,6 +72,7 @@ endif()
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA ${GRPC_ASR_CUDA} CACHE BOOL "" FORCE)
 set(WHISPER_OPENVINO ${GRPC_ASR_OPENVINO} CACHE BOOL "" FORCE)
+set(GGML_OPENVINO ${GRPC_ASR_OPENVINO} CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
@@ -87,7 +88,16 @@ if(GRPC_ASR_CUDA)
     PATHS /usr/lib/x86_64-linux-gnu /usr/lib64 /lib64 /usr/lib/wsl/lib)
 endif()
 if(GRPC_ASR_OPENVINO)
+  # Two OpenVINO paths, one per GRPC_ASR_OPENVINO_MODE: ggml's OpenVINO
+  # backend runs the whole Whisper graph (full, the default), whisper.cpp's
+  # own OpenVINO encoder runs a converted encoder IR (encoder). ggml's
+  # backend needs OpenVINO 2026 or newer, the OpenCL headers and ICD loader,
+  # and the TBB that ships with OpenVINO.
   set(WHISPER_OPENVINO ON CACHE BOOL "" FORCE)
+  set(GGML_OPENVINO ON CACHE BOOL "" FORCE)
+  # For src/engine/openvino_devices.cpp, which asks the runtime what it can
+  # open before ggml is told to use it.
+  find_package(OpenVINO REQUIRED COMPONENTS Runtime)
   # The OpenVINO-linked tests need the OpenVINO runtime (libopenvino.so)
   # at load time: they reference whisper symbols, so the linker pulls the
   # OpenVINO encoder objects and the loader resolves libopenvino before
@@ -105,6 +115,8 @@ FetchContent_Declare(whisper
   URL_HASH SHA256=645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4)
 FetchContent_MakeAvailable(whisper)
 include(streaming/cmake/PatchWhisperVad.cmake)
+include(cmake/PatchWhisperPlacement.cmake)
+include(cmake/PatchGgmlOpenvino.cmake)
 include(streaming/cmake/PatchGgmlDepthwise.cmake)
 include(streaming/cmake/PatchParakeetContext.cmake)
 option(GRPC_ASR_QUALIFY_MODELS "Require the full speech qualification model set" OFF)
@@ -189,6 +201,8 @@ add_library(asr_core STATIC
   src/media/audio_decoder.cpp
   src/media/video_demux.cpp
   src/engine/model_pool.cpp
+  src/engine/openvino_devices.cpp
+  src/engine/placement.cpp
   src/engine/transcriber.cpp
   src/engine/remote_options.cpp
   src/engine/remote_engine.cpp
@@ -201,6 +215,10 @@ target_compile_definitions(asr_core PRIVATE GRPC_ASR_VERSION="${PROJECT_VERSION}
 target_link_libraries(asr_core
   PUBLIC asr_proto whisper Threads::Threads OpenSSL::Crypto CURL::libcurl
   PRIVATE asr_flags)
+if(GRPC_ASR_OPENVINO)
+  target_compile_definitions(asr_core PRIVATE GRPC_ASR_OPENVINO_BUILD)
+  target_link_libraries(asr_core PRIVATE openvino::runtime)
+endif()
 
 add_library(asr_streaming STATIC src/engine/stream_backend.cpp src/service/streaming_runtime.cpp)
 target_link_libraries(asr_streaming PUBLIC asr_core media_processing PRIVATE asr_flags)
@@ -226,6 +244,9 @@ if(BUILD_TESTING)
     audio-decoder-test
     document-fold-test
     model-discovery-test
+    placement-test
+    openvino-q5-0-test
+    openvino-full-test
     window-cut-test
     transcriber-test
     video-demux-test
@@ -236,6 +257,12 @@ if(BUILD_TESTING)
     target_link_libraries(${test_name} PRIVATE asr_core asr_flags)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  # openvino-full-test writes a q5_0 copy of the test model with whisper.cpp's
+  # own quantizer, which lives in its examples and is not part of the library.
+  add_library(whisper_quantize_fixture STATIC "${whisper_SOURCE_DIR}/examples/common-ggml.cpp")
+  target_include_directories(whisper_quantize_fixture PUBLIC "${whisper_SOURCE_DIR}/examples")
+  target_link_libraries(whisper_quantize_fixture PUBLIC ggml)
+  target_link_libraries(openvino-full-test PRIVATE whisper_quantize_fixture)
   if(NOT GRPC_ASR_SYSTEM_GRPC)
     add_executable(grpc-openssl-test tests/grpc_openssl_test.cpp)
     target_include_directories(grpc-openssl-test SYSTEM PRIVATE
@@ -252,7 +279,8 @@ if(BUILD_TESTING)
     "Per-test ctest timeout in seconds for the asr suite")
   set_tests_properties(${GRPC_ASR_TESTS} PROPERTIES
     TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr)
-  set_tests_properties(transcriber-test video-demux-test asr-service-test PROPERTIES
+  set_tests_properties(transcriber-test video-demux-test asr-service-test
+    placement-test openvino-q5-0-test openvino-full-test PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_MULTILINGUAL_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-base.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_TEST_ES_SAMPLE=${CMAKE_CURRENT_SOURCE_DIR}/streaming/tests/fixtures/minds14-es-0.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
   # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
@@ -263,20 +291,27 @@ if(BUILD_TESTING)
   # remote-engine-test links remote_engine.o, which calls whisper for
   # language ids; from CUDA 13 the ggml CUDA backend links the driver
   # library directly, so it is gated with the others.
+  # placement-test, openvino-q5-0-test and openvino-full-test link the same
+  # objects and are gated with them.
   if(GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER)
     set_tests_properties(transcriber-test asr-service-test model-discovery-test remote-engine-test
+      placement-test openvino-q5-0-test openvino-full-test
       PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
-      "disabling transcriber-test, asr-service-test, model-discovery-test and remote-engine-test. "
+      "disabling transcriber-test, asr-service-test, model-discovery-test, remote-engine-test, "
+      "placement-test, openvino-q5-0-test and openvino-full-test. "
       "GPU hosts with the driver installed still run them.")
   endif()
   # Same shape for OpenVINO: the whisper-linked tests carry a load-time
   # dependency on libopenvino.so through the encoder objects. Hosts with the
   # OpenVINO runtime installed run them exactly as before.
   if(GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME)
-    set_tests_properties(transcriber-test asr-service-test model-discovery-test PROPERTIES DISABLED TRUE)
+    set_tests_properties(transcriber-test asr-service-test model-discovery-test
+      placement-test openvino-q5-0-test openvino-full-test PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: OpenVINO runtime library (libopenvino.so) not found; "
-      "disabling transcriber-test, asr-service-test, and model-discovery-test. Hosts with the OpenVINO runtime installed still run them.")
+      "disabling transcriber-test, asr-service-test, model-discovery-test, placement-test, "
+      "openvino-q5-0-test and openvino-full-test. Hosts with the OpenVINO runtime installed "
+      "still run them.")
   endif()
 endif()
 

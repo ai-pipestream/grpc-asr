@@ -98,6 +98,7 @@ struct GlobalTelemetry {
     std::atomic<uint64_t> window_redecodes_total{0};
     std::atomic<uint64_t> keyframes_total{0};
     std::atomic<uint64_t> warmup_ms{0};
+    std::atomic<uint64_t> off_device_nodes{0};
     std::atomic<uint32_t> last_window_seconds{0};
 
     std::array<std::atomic<uint64_t>, static_cast<size_t>(StreamEndResult::kCount)> stream_ends{};
@@ -294,6 +295,10 @@ void metrics_observe_queue_wait(std::string_view model, uint64_t duration_ns) {
 
 void metrics_record_warmup_ms(uint64_t warmup_ms) {
     telemetry().warmup_ms.store(warmup_ms, std::memory_order_relaxed);
+}
+
+void metrics_add_off_device_nodes(uint64_t count) {
+    telemetry().off_device_nodes.fetch_add(count, std::memory_order_relaxed);
 }
 
 void metrics_inc_streams_active() {
@@ -514,6 +519,12 @@ std::string render_prometheus_metrics() {
            "# TYPE grpc_asr_warmup_seconds gauge\n"
         << "grpc_asr_warmup_seconds "
         << (static_cast<double>(t.warmup_ms.load(std::memory_order_relaxed)) / 1000.0) << '\n';
+
+    out << "# HELP grpc_asr_whisper_off_device_nodes_total Whisper compute nodes run outside the "
+           "selected OpenVINO device after startup; 0 unless ggml moved work to CPU.\n"
+           "# TYPE grpc_asr_whisper_off_device_nodes_total counter\n"
+        << "grpc_asr_whisper_off_device_nodes_total "
+        << t.off_device_nodes.load(std::memory_order_relaxed) << '\n';
 
     out << "# HELP grpc_asr_window_seconds_last Effective PCM window seconds used by the last stream.\n"
            "# TYPE grpc_asr_window_seconds_last gauge\n"

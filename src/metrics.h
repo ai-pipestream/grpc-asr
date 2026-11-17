@@ -107,6 +107,10 @@ void metrics_inc_queue_depth(std::string_view model);
 void metrics_dec_queue_depth(std::string_view model);
 void metrics_observe_queue_wait(std::string_view model, uint64_t duration_ns);
 void metrics_record_warmup_ms(uint64_t warmup_ms);
+// Whisper compute nodes the scheduler ran outside the selected OpenVINO
+// device after startup (full mode). Anything above 0 is CPU work nobody
+// asked for.
+void metrics_add_off_device_nodes(uint64_t count);
 
 // Stream, resident-memory, latency, RTF, and child-process hooks.
 void metrics_inc_streams_active();

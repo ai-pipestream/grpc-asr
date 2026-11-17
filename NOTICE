@@ -47,6 +47,19 @@ The build stage also installs Ubuntu's ffmpeg package (an --enable-gpl
 build) so the tests can author their media fixtures with its encoders.
 It stays in the build stage: no published image contains it.
 
+OpenVINO in the OpenVINO image (Apache-2.0)
+-------------------------------------------
+
+The OpenVINO image (Dockerfile.openvino) contains, under /opt/openvino/lib,
+the OpenVINO 2026.4.1 runtime library, its Intel GPU plugin and IR frontend,
+and the oneTBB library OpenVINO ships with, all copied unmodified from
+Intel's release archive (checked against a pinned sha256 at build time).
+OpenVINO and oneTBB are licensed under the Apache License 2.0; the license
+and third-party notices from that archive are at
+/usr/share/doc/grpc-asr/openvino-licensing. grpc-asr-server links the
+runtime through whisper.cpp's OpenVINO encoder and ggml's OpenVINO backend
+(both part of whisper.cpp, MIT License).
+
 Every image states the license in its ai.pipestream.ffmpeg.license label
 and carries this file at /usr/share/doc/grpc-asr/NOTICE. Like any
 Ubuntu-based image, the images also contain the base system's own packages

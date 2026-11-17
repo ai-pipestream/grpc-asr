@@ -19,7 +19,7 @@ namespace {
 void clear_env() {
     for (const char* name :
          {"GRPC_ASR_LISTEN_ADDRESS", "GRPC_ASR_BACKEND", "GRPC_ASR_CUDA_DEVICE",
-          "GRPC_ASR_OPENVINO_DEVICE", "GRPC_ASR_OPENVINO_CACHE_DIR",
+          "GRPC_ASR_OPENVINO_MODE", "GRPC_ASR_OPENVINO_DEVICE", "GRPC_ASR_OPENVINO_CACHE_DIR",
           "GRPC_ASR_MODELS_DIR", "GRPC_ASR_MODELS", "GRPC_ASR_CONCURRENCY",
           "GRPC_ASR_WARMUP", "GRPC_ASR_QUEUE_TIMEOUT_SECONDS",
           "GRPC_ASR_MAX_MEDIA_BYTES", "GRPC_ASR_MAX_DURATION_SECONDS",
@@ -51,7 +51,9 @@ void verify_defaults() {
     const Config config = load_config_from_env();
     require(config.listen_address == "0.0.0.0:50055", "default listen address");
     require(config.backend == "cuda", "cuda is the default backend");
-    require(config.openvino_device == "GPU", "the OpenVINO encoder targets the GPU by default");
+    require(config.openvino_mode == "full",
+            "the openvino backend runs the whole Whisper graph on the device by default");
+    require(config.openvino_device == "GPU", "OpenVINO targets the GPU by default");
     require(config.openvino_cache_dir == "/tmp/grpc-asr-openvino-cache",
             "default OpenVINO compile cache dir");
     require(config.models_dir == "/models", "default models dir");
@@ -120,6 +122,48 @@ void verify_rejects() {
     require(rejects("GRPC_ASR_CONCURRENCY", "2x"), "trailing junk fails loud");
     require(rejects("GRPC_ASR_WINDOW_SECONDS", "5"), "sub-minimum window fails loud");
     require(rejects("GRPC_ASR_MAX_MEDIA_BYTES", "512"), "sub-minimum media cap fails loud");
+    for (const char* device : {"AUTO:GPU,CPU", "AUTO", "HETERO:GPU,CPU", "MULTI:GPU,CPU",
+                               "BATCH:GPU", "GPU.", "GPU.x", "GPUX", "gpu"}) {
+        require(rejects("GRPC_ASR_OPENVINO_DEVICE", device),
+                std::string("an OpenVINO device list or malformed device fails loud: ") + device);
+    }
+    for (const char* device : {"GPU", "GPU.1", "NPU", "NPU.0", "CPU"}) {
+        clear_env();
+        ::setenv("GRPC_ASR_OPENVINO_DEVICE", device, 1);
+        require(load_config_from_env().openvino_device == device,
+                std::string("a single OpenVINO device is accepted: ") + device);
+    }
+}
+
+// The mode is a closed choice between two named placements; nothing else is
+// accepted, and neither is reached by default from the other.
+void verify_openvino_mode() {
+    for (const char* mode : {"full", "encoder"}) {
+        clear_env();
+        ::setenv("GRPC_ASR_OPENVINO_MODE", mode, 1);
+        require(load_config_from_env().openvino_mode == mode,
+                std::string("OpenVINO mode is accepted: ") + mode);
+    }
+    clear_env();
+    ::setenv("GRPC_ASR_OPENVINO_MODE", "", 1);
+    require(load_config_from_env().openvino_mode == "full",
+            "an empty mode is the default, the full graph");
+    for (const char* mode : {"FULL", "Encoder", "decoder", "auto", "encoder,full", "cpu", " full"}) {
+        require(rejects("GRPC_ASR_OPENVINO_MODE", mode),
+                std::string("an unknown OpenVINO mode fails loud: ") + mode);
+    }
+    // The mode is validated whatever the backend, so a typo cannot wait for
+    // the day the backend is switched.
+    clear_env();
+    ::setenv("GRPC_ASR_BACKEND", "cpu", 1);
+    ::setenv("GRPC_ASR_OPENVINO_MODE", "gpu", 1);
+    bool threw = false;
+    try {
+        (void)load_config_from_env();
+    } catch (const std::invalid_argument& error) {
+        threw = std::string(error.what()).contains("GRPC_ASR_OPENVINO_MODE must be full or encoder");
+    }
+    require(threw, "the mode is checked under every backend and the message lists the choices");
 }
 
 void verify_queue_timeout() {
@@ -220,6 +264,7 @@ int main() {
         verify_overrides();
         verify_models_list();
         verify_rejects();
+        verify_openvino_mode();
         verify_word_provenance_switch();
         verify_queue_timeout();
         verify_metrics_can_be_disabled();
