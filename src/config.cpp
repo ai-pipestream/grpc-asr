@@ -32,7 +32,7 @@ size_t configured_size(const char* name, size_t fallback, size_t minimum, size_t
 }
 
 // One OpenVINO device by name. Lists (AUTO:, HETERO:, MULTI:, BATCH:) are
-// refused because they let OpenVINO pick CPU for the encoder without a word.
+// refused because they let OpenVINO pick CPU without a word.
 bool single_openvino_device(std::string_view device) {
     if (device == "CPU") return true;
     for (const std::string_view family : {"GPU", "NPU"}) {
@@ -203,13 +203,17 @@ Config load_config_from_env() {
     }
     config.cuda_device =
         static_cast<int>(configured_size("GRPC_ASR_CUDA_DEVICE", 0, 0, 63));
+    config.openvino_mode = configured_string("GRPC_ASR_OPENVINO_MODE", config.openvino_mode);
+    if (config.openvino_mode != "full" && config.openvino_mode != "encoder") {
+        throw std::invalid_argument("GRPC_ASR_OPENVINO_MODE must be full or encoder (got " +
+                                    config.openvino_mode + ")");
+    }
     config.openvino_device = configured_string("GRPC_ASR_OPENVINO_DEVICE", config.openvino_device);
     if (!single_openvino_device(config.openvino_device)) {
         throw std::invalid_argument(
             "GRPC_ASR_OPENVINO_DEVICE must be GPU, GPU.<n>, NPU, NPU.<n> or CPU (got " +
             config.openvino_device +
-            "); AUTO, HETERO, MULTI and BATCH device lists can move the encoder to CPU on "
-            "their own");
+            "); AUTO, HETERO, MULTI and BATCH device lists can move work to CPU on their own");
     }
     config.openvino_cache_dir =
         configured_string("GRPC_ASR_OPENVINO_CACHE_DIR", config.openvino_cache_dir);

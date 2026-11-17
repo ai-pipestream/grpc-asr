@@ -1,6 +1,7 @@
 #include "engine/model_pool.h"
 
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -12,9 +13,14 @@
 #include <string_view>
 
 #include "cancellation.h"
+#include "engine/openvino_devices.h"
+#include "engine/placement.h"
 #include "ggml-backend.h"
 #include "metrics.h"
 #include "whisper.h"
+
+// Defined in the pinned whisper.cpp by cmake/PatchWhisperPlacement.cmake.
+extern "C" bool asr_whisper_state_has_device(whisper_state* state, ggml_backend_dev_t device);
 
 namespace asr::engine {
 
@@ -39,6 +45,46 @@ std::filesystem::path model_path(const std::string& models_dir, const std::strin
 // Suffix of the OpenVINO encoder IR payload that sits next to converted
 // weights (ggml-<name>-encoder-openvino.bin plus its .xml). Not a model.
 constexpr std::string_view kOpenvinoEncoderSuffix = "-encoder-openvino.bin";
+
+// Asks OpenVINO itself whether it can open the configured device, before
+// anything asks ggml or whisper.cpp: ggml's OpenVINO backend aborts the
+// process on a missing device and whisper's encoder only reports "init
+// failed". Must not call into ggml, which would start its OpenVINO backend
+// before the pool has told it which device to use.
+OpenvinoDevice require_openvino_device(const Config& config) {
+    std::string seen;
+    for (OpenvinoDevice& device : openvino_devices()) {
+        if (device.id == config.openvino_device) {
+            return std::move(device);
+        }
+        seen += (seen.empty() ? "" : ", ") + device.id + " (" + device.full_name + ")";
+    }
+    throw std::invalid_argument(
+        "GRPC_ASR_BACKEND=openvino: OpenVINO device '" + config.openvino_device +
+        "' (GRPC_ASR_OPENVINO_DEVICE) is not available; OpenVINO sees " +
+        (seen.empty() ? std::string("no device at all") : seen) +
+        ". An Intel GPU needs its render node in the container (--device /dev/dri and the "
+        "render group); nothing runs on another device instead");
+}
+
+// Starts ggml's OpenVINO backend on the configured device and returns the
+// ggml device whisper.cpp must use. The backend reads its device once, from
+// the environment, the first time ggml is used in the process.
+OpenvinoGgmlDevice start_openvino_ggml(const Config& config) {
+    ::setenv("GGML_OPENVINO_DEVICE", config.openvino_device.c_str(), 1);
+    if (!config.openvino_cache_dir.empty()) {
+        ::setenv("GGML_OPENVINO_CACHE_DIR", config.openvino_cache_dir.c_str(), 1);
+    }
+    return find_openvino_ggml_device(config.openvino_device);
+}
+
+std::string joined(const std::vector<std::string>& lines) {
+    std::string text;
+    for (const std::string& line : lines) {
+        text += (text.empty() ? "" : "; ") + line;
+    }
+    return text;
+}
 
 }  // namespace
 
@@ -93,6 +139,9 @@ struct ModelPool::Entry {
 
 ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up_(config.warmup) {
     whisper_context_params cparams = whisper_context_default_params();
+    const bool openvino_full = backend_ == "openvino" && config.openvino_mode == "full";
+    OpenvinoDevice openvino_device;
+    OpenvinoGgmlDevice openvino_ggml;
     if (backend_ == "cuda") {
         if (ggml_backend_reg_by_name("CUDA") == nullptr) {
             throw std::invalid_argument(
@@ -101,11 +150,50 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
         }
         cparams.use_gpu = true;
         cparams.gpu_device = config.cuda_device;
+    } else if (backend_ == "openvino") {
+        if (!openvino_built()) {
+            throw std::invalid_argument(
+                "GRPC_ASR_BACKEND=openvino: this build has no OpenVINO support (available: " +
+                available_backends() + "); build with -DGRPC_ASR_OPENVINO=ON");
+        }
+        if (config.openvino_mode != "full" && config.openvino_mode != "encoder") {
+            throw std::invalid_argument("GRPC_ASR_OPENVINO_MODE must be full or encoder (got " +
+                                        config.openvino_mode + ")");
+        }
+        if (openvino_full && !config.warmup) {
+            throw std::invalid_argument(
+                "GRPC_ASR_WARMUP=0 cannot be combined with GRPC_ASR_OPENVINO_MODE=full: the "
+                "warmup pass is where every Whisper graph is checked to run on the OpenVINO "
+                "device");
+        }
+        openvino_device = require_openvino_device(config);
+        if (openvino_full) {
+            openvino_ggml = start_openvino_ggml(config);
+            recorder_ = std::make_unique<PlacementRecorder>(openvino_ggml.device);
+            cparams.use_gpu = true;
+            cparams.gpu_device = openvino_ggml.gpu_index;
+            // The backend translates the flash-attention form of Whisper's
+            // attention; the plain form leaves copies it cannot place.
+            cparams.flash_attn = true;
+        } else {
+            // The encoder runs from its OpenVINO IR (set up per state
+            // below); the ggml graph, decoder included, stays on CPU.
+            cparams.use_gpu = false;
+        }
+        placement_ = openvino_full
+                         ? "full graph on OpenVINO " + openvino_device.id + " (" +
+                               openvino_device.full_name + ")"
+                         : "encoder on OpenVINO " + openvino_device.id + " (" +
+                               openvino_device.full_name + "), decoder on CPU";
+        std::println("grpc-asr openvino: mode {} (GRPC_ASR_OPENVINO_MODE), device {} ({})",
+                     config.openvino_mode, openvino_device.id, openvino_device.full_name);
+        if (openvino_full) {
+            std::println("grpc-asr openvino: ggml device {}: {}",
+                         ggml_backend_dev_name(openvino_ggml.device), openvino_ggml.description);
+        }
     } else {
-        // cpu and openvino both run the ggml graph on CPU; openvino
-        // additionally offloads the encoder and is verified per model
-        // below.
         cparams.use_gpu = false;
+        placement_ = "full graph on CPU";
     }
 
     std::vector<std::string> names = config.models;
@@ -142,6 +230,18 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
             throw std::runtime_error("loading model '" + name + "' from " + path.string() +
                                      " failed");
         }
+        if (openvino_full) {
+            // Checked before the first state exists: ggml aborts the process
+            // when a state is built over weights its backend cannot run.
+            const int ftype = whisper_model_ftype(entry->ctx);
+            if (!openvino_supports_ftype(ftype)) {
+                throw std::invalid_argument(
+                    "GRPC_ASR_OPENVINO_MODE=full: model '" + name + "' stores its weights as " +
+                    ftype_name(ftype) +
+                    ", which ggml's OpenVINO backend cannot run; use the f16 file or a q8_0, "
+                    "q5_1, q4_0, q4_1, q4_k, q5_k or q6_k quantization of it");
+            }
+        }
         for (size_t i = 0; i < config.concurrency; i++) {
             whisper_state* state = whisper_init_state(entry->ctx);
             if (state == nullptr) {
@@ -150,7 +250,15 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
             }
             // Push before OpenVINO/warmup so ~Entry frees the state on throw.
             entry->all_states.push_back(state);
-            if (backend_ == "openvino") {
+            if (openvino_full && !asr_whisper_state_has_device(state, openvino_ggml.device)) {
+                // whisper.cpp carries on with CPU alone when the selected
+                // device fails to initialize.
+                throw std::runtime_error(
+                    "GRPC_ASR_BACKEND=openvino: state " + std::to_string(i) + " of model '" +
+                    name + "' did not open OpenVINO device " + config.openvino_device +
+                    "; whisper.cpp fell back to CPU");
+            }
+            if (backend_ == "openvino" && !openvino_full) {
                 // Buffer-loaded weights do not retain a filesystem path. Pass
                 // the matching encoder XML explicitly; cache directory comes
                 // from GRPC_ASR_OPENVINO_CACHE_DIR.
@@ -164,11 +272,11 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
                             .c_str(),
                         config.openvino_device.c_str(), config.openvino_cache_dir.c_str()) != 0) {
                     throw std::runtime_error(
-                        "GRPC_ASR_BACKEND=openvino: OpenVINO encoder init failed for model '" +
+                        "GRPC_ASR_OPENVINO_MODE=encoder: OpenVINO encoder init failed for model '" +
                         name + "' on device '" + config.openvino_device +
-                        "' (GRPC_ASR_OPENVINO_DEVICE); use an image built with "
-                        "-DGRPC_ASR_OPENVINO=ON, a converted encoder model next to the "
-                        "weights, and a device this host has");
+                        "' (GRPC_ASR_OPENVINO_DEVICE); this mode needs a converted encoder "
+                        "model (ggml-" + name + "-encoder-openvino.xml and .bin) next to the "
+                        "weights");
                 }
             }
             if (config.warmup) {
@@ -200,26 +308,45 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
             }
             entry->free_states.push_back(state);
         }
+        if (openvino_full) {
+            // Every state of this model ran its warmup under the recorder.
+            // ggml's scheduler moves an op the device cannot run to the CPU
+            // backend on its own; that is a startup failure here (#30).
+            const std::vector<std::string> strays = recorder_->violations();
+            if (!strays.empty()) {
+                throw std::runtime_error(
+                    "GRPC_ASR_OPENVINO_MODE=full: model '" + name +
+                    "' does not run completely on OpenVINO " + config.openvino_device + ": " +
+                    joined(strays) + " (compute nodes on the device: " + recorder_->summary() +
+                    ")");
+            }
+            std::println("grpc-asr placement: {} {}; compute nodes on the device: {}", name,
+                         placement_, recorder_->summary());
+            recorder_->take();
+        } else if (!placement_.empty()) {
+            std::println("grpc-asr placement: {} {}", name, placement_);
+        }
         metrics_add_model_states(name, config.concurrency);
         entry->registered_states = config.concurrency;
         entries_[name] = std::move(entry);
         std::println("grpc-asr model loaded: {} ({} state(s), backend {})", name,
                      config.concurrency, backend_);
-        if (backend_ == "openvino") {
-            // Say where each half runs: whisper.cpp's OpenVINO support
-            // compiles only the encoder; the decoder stays on the ggml CPU
-            // graph (#30).
-            std::println("grpc-asr placement: {} encoder on OpenVINO {}, decoder on CPU", name,
-                         config.openvino_device);
-        }
     }
     if (config.warmup) {
         metrics_record_warmup_ms(warmup_ms_);
+    }
+    if (recorder_) {
+        // Startup is over; from here a node off the device is counted.
+        recorder_->arm();
     }
     std::println("grpc-asr backend: {} (GRPC_ASR_BACKEND={})", backend_, backend_);
 }
 
 ModelPool::~ModelPool() = default;
+
+uint64_t ModelPool::off_device_nodes() const {
+    return recorder_ ? recorder_->off_device_nodes() : 0;
+}
 
 std::string ModelPool::model_hash(const std::string& model) const {
     return entries_.at(model)->hash;

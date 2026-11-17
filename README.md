@@ -233,8 +233,10 @@ a test failure instead of a skip; CI does, after fetching the model at a
 pinned revision and checking its sha256.
 
 Backend variants: `-DGRPC_ASR_CUDA=ON` (GGML CUDA) and
-`-DGRPC_ASR_OPENVINO=ON` (whisper OpenVINO encoder; needs the OpenVINO SDK
-at build time and ships as `Dockerfile.openvino`).
+`-DGRPC_ASR_OPENVINO=ON` (ggml's OpenVINO backend for the whole Whisper
+graph, plus the whisper OpenVINO encoder; needs OpenVINO 2026 or newer, its
+TBB, and the OpenCL headers and ICD loader at build time, and ships as
+`Dockerfile.openvino`).
 
 ## Run
 
@@ -252,12 +254,13 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_LISTEN_ADDRESS` | `0.0.0.0:50055` | listen address |
 | `GRPC_ASR_BACKEND` | `cuda` | `cuda` \| `openvino` \| `cpu`; never silently substituted |
 | `GRPC_ASR_CUDA_DEVICE` | `0` | CUDA device index |
-| `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the whisper encoder, e.g. `GPU.1` on a multi-GPU host; the OpenVINO image ships only the GPU plugin, an unavailable device stops the boot, and device lists (`AUTO:`, `HETERO:`, `MULTI:`, `BATCH:`) are refused because OpenVINO could move the encoder to CPU through them |
+| `GRPC_ASR_OPENVINO_MODE` | `full` | how the `openvino` backend runs Whisper: `full` puts the whole graph (conv, encoder, cross-attention and decoder) on the device and fails startup unless a warmup pass shows every compute node there; `encoder` runs only the encoder on the device from a converted IR and decodes on CPU. Never switched for you; see [Whisper on an Intel GPU](#whisper-on-an-intel-gpu) |
+| `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the `openvino` backend, e.g. `GPU.1` on a multi-GPU host (OpenVINO names a lone GPU `GPU` and several `GPU.0`, `GPU.1`, ...); the OpenVINO image ships only the GPU plugin, a device OpenVINO cannot open stops the boot, and device lists (`AUTO:`, `HETERO:`, `MULTI:`, `BATCH:`) are refused because OpenVINO could move work to CPU through them |
 | `GRPC_ASR_OPENVINO_CACHE_DIR` | `/tmp/grpc-asr-openvino-cache` | OpenVINO compiled-kernel cache directory; mount a persistent volume here to skip first-boot shader compilation across container restarts |
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
 | `GRPC_ASR_CONCURRENCY` | `2` | whisper states per model (concurrent transcriptions) |
-| `GRPC_ASR_WARMUP` | `1` | run a 1 s digital-silence inference pass on every pooled whisper state before listening (`0` disables); warmup failures exit non-zero at startup |
+| `GRPC_ASR_WARMUP` | `1` | run a 1 s digital-silence inference pass on every pooled whisper state before listening (`0` disables); warmup failures exit non-zero at startup. `0` is refused with `GRPC_ASR_OPENVINO_MODE=full`, whose placement check runs on this pass |
 | `GRPC_ASR_QUEUE_TIMEOUT_SECONDS` | `1800` | how long a stream waits for a free whisper state before `RESOURCE_EXHAUSTED`; `0` waits as long as the client does |
 | `GRPC_ASR_MAX_MEDIA_BYTES` | `268435456` | upload cap, overrun is `RESOURCE_EXHAUSTED` |
 | `GRPC_ASR_MAX_DURATION_SECONDS` | `14400` | media duration cap, overrun is `RESOURCE_EXHAUSTED` |
@@ -282,6 +285,10 @@ HTTP/1.1 listener serving Prometheus text exposition at `GET /metrics`:
 - **Pool & queue:** `grpc_asr_states_total{model}`, `grpc_asr_states_busy{model}`,
   `grpc_asr_queue_depth{model}`, `grpc_asr_queue_depth_max{model}`,
   `grpc_asr_queue_wait_seconds{model}` (histogram), `grpc_asr_warmup_seconds`.
+- **Placement:** `grpc_asr_whisper_off_device_nodes_total`, the Whisper
+  compute nodes that ran outside the selected OpenVINO device after startup
+  (`GRPC_ASR_OPENVINO_MODE=full`). Startup fails on any; this counts what a
+  later request shape might still move. Alert on anything above 0.
 - **Active streams & resident media bytes:** `grpc_asr_streams_active`,
   `grpc_asr_upload_bytes_resident`, `grpc_asr_memfd_bytes_resident`.
 - **Latency, throughput & windowing:** `grpc_asr_first_segment_seconds{model,path}`
@@ -312,15 +319,12 @@ docker run --rm --read-only --tmpfs /tmp --gpus all \
 The hot path is diskless: media lives in memory and memfds, so run the
 container `--read-only`.
 
-The OpenVINO image carries OpenVINO 2025.4.1 (Intel APT repo, ubuntu24
-distribution, on an ubuntu:26.04 base), the Intel GPU plugin, and the NEO
+The OpenVINO image carries OpenVINO 2026.4.1 (Intel's release archive,
+sha256-pinned, on an ubuntu:26.04 base), the Intel GPU plugin, and the NEO
 compute runtime (`intel-opencl-icd` 26.05 from Ubuntu's 26.04 archive,
-Battlemage-capable); it defaults to `GRPC_ASR_BACKEND=openvino`. The
-whisper OpenVINO encoder targets an Intel GPU (`GRPC_ASR_OPENVINO_DEVICE`,
-default `GPU`), so the container needs the render device, and the models
-mount needs the converted encoder IR
-(`ggml-<name>-encoder-openvino.xml` / `.bin`, produced by whisper.cpp's
-`convert-whisper-to-openvino` tooling) next to the ggml weights:
+Battlemage-capable); it defaults to `GRPC_ASR_BACKEND=openvino`. Whisper runs
+on an Intel GPU (`GRPC_ASR_OPENVINO_DEVICE`, default `GPU`), so the container
+needs the render device:
 
 ```bash
 docker run --rm --read-only --tmpfs /tmp --device /dev/dri \
@@ -335,8 +339,63 @@ mount is read-only; mount a dedicated persistent volume at that directory (or on
 CUDA, mount `CUDA_CACHE_PATH` with `CUDA_CACHE_DISABLE=0`) to persist compiled
 device kernels across restarts, while startup warmup (`GRPC_ASR_WARMUP=1`)
 pre-populates per-state scratch buffers and kernels before the gRPC port opens.
-Without `/dev/dri` or without the converted encoder files the server refuses
-to boot: OpenVINO encoder init fails loud at startup, never on the first RPC.
+Without `/dev/dri` the server refuses to boot: it asks OpenVINO for the
+device first and stops with the list of what OpenVINO does see, never on
+the first RPC and never on another device.
+
+### Whisper on an Intel GPU
+
+`GRPC_ASR_OPENVINO_MODE` picks one of two placements. The startup log states
+the one in force, with the card's own name, and one line per model:
+
+```
+grpc-asr openvino: mode full (GRPC_ASR_OPENVINO_MODE), device GPU (Intel(R) Arc(TM) ... Graphics (dGPU))
+grpc-asr placement: large-v3 full graph on OpenVINO GPU (Intel(R) Arc(TM) ... Graphics (dGPU)); compute nodes on the device: conv 6/6, encoder .../..., cross .../..., decoder .../...
+```
+
+| Mode | On the device | On CPU | Needs in the models mount |
+|---|---|---|---|
+| `full` (default) | conv, encoder, cross-attention, decoder | mel spectrogram, token sampling, Silero VAD | `ggml-<name>.bin` only |
+| `encoder` | encoder | everything else, the decoder included | `ggml-<name>.bin` plus `ggml-<name>-encoder-openvino.xml` / `.bin` from whisper.cpp's `convert-whisper-to-openvino` tooling |
+
+`full` runs the plain ggml weights through ggml's OpenVINO backend, which
+translates each Whisper graph to an OpenVINO model and compiles it for the
+device. It is strict about where the work lands:
+
+- The device must exist. The server asks OpenVINO what it can open before
+  it loads anything; a missing render node is a startup failure that lists
+  the devices OpenVINO sees.
+- Every state must hold the device. whisper.cpp carries on with CPU when a
+  GPU backend fails to start; that is a startup failure here.
+- Every compute node must run on it. ggml's scheduler hands an op the
+  device cannot run to the CPU backend without a word. The warmup pass
+  records the scheduler's real choice for each node of all four graphs, and
+  any node elsewhere stops startup with the graph, the op and the backend
+  that took it (`decoder: 4 x MUL_MAT on CPU`). After startup the same
+  check keeps counting into `grpc_asr_whisper_off_device_nodes_total`.
+
+Model format for `full`: the weights must be a type the backend runs. The
+unquantized `f16` files (`ggml-large-v3.bin`, `ggml-base.en.bin`, ...) and
+`q8_0`, `q5_1`, `q4_0`, `q4_1`, `q4_k`, `q5_k` and `q6_k` quantizations are
+accepted. **`q5_0` is not**, and it is the quantization most published
+whisper.cpp files use (`ggml-large-v3-turbo-q5_0.bin`): the server refuses
+such a model by name at startup. Requantize from the f16 file with
+whisper.cpp's `quantize` tool (`quantize ggml-x.bin ggml-x-q8_0.bin q8_0`)
+or serve the f16 file. `f16`, `q8_0`, `q5_1` and `q4_0` are the ones this
+repository has run end to end.
+
+`full` uses whisper.cpp's flash-attention graphs, the only form the backend
+translates completely. The Whisper models of the pool are what moves to the
+device; the Parakeet streaming backend and Silero VAD are separate models
+that whisper.cpp runs on CPU in every image. Graphs compile on first use, so the first boot of a
+model is slow; `GRPC_ASR_OPENVINO_CACHE_DIR` on a volume keeps the compiled
+kernels.
+
+`scripts/test/gpu-placement-test.sh <image> <models-dir>` is the receipt on a
+host with the card: it fails (never skips) without a render node, requires
+startup to fail with no `/dev/dri`, with a device list and with warmup off,
+then boots twice and requires the whole-graph placement line for every model,
+a zero off-device counter, and compute-engine cycles on the card.
 
 Published tags: the CPU image (`:latest-cpu` and versioned `-cpu` tags) is a
 multi-arch manifest list, linux/amd64 plus linux/arm64 (each leg builds and
