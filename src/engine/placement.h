@@ -108,8 +108,8 @@ struct OpenvinoGgmlDevice {
 OpenvinoGgmlDevice find_openvino_ggml_device(const std::string& requested);
 
 // True when ggml's OpenVINO backend can run whisper weights of this
-// whisper_model_ftype value. Q5_0, the usual whisper.cpp quantization, is not
-// among them.
+// whisper_model_ftype value. Q5_0, the usual whisper.cpp quantization, is
+// among them; Q2_K and Q3_K are not.
 bool openvino_supports_ftype(int ftype);
 
 // "f16", "q5_0", ... for messages.

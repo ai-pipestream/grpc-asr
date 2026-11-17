@@ -7,8 +7,8 @@
 #   scripts/test/gpu-placement-test.sh <openvino-image> <models-dir>
 #
 # <models-dir> holds the ggml-<name>.bin weights to serve, in a format the
-# full mode runs (f16, or a q8_0/q5_1/q4_x/q4_k/q5_k/q6_k quantization; not
-# q5_0). The server loads every ggml-*.bin it finds there; set
+# full mode runs (f16, or a q8_0/q5_0/q5_1/q4_x/q4_k/q5_k/q6_k
+# quantization). The server loads every ggml-*.bin it finds there; set
 # GRPC_ASR_MODELS (e.g. "tiny.en,base") when the directory also holds files
 # that are not Whisper weights, such as a VAD or Parakeet model.
 # Needs a host with an Intel GPU render node (/dev/dri/renderD*);
@@ -24,7 +24,9 @@
 #      let OpenVINO move work to CPU on its own);
 #   3. GRPC_ASR_OPENVINO_MODE=full with GRPC_ASR_WARMUP=0: startup must fail
 #      (the warmup pass carries the placement check);
-#   4. with the GPU, two boots in a row: every loaded model must log
+#   4. with the GPU, two boots in a row over one kernel cache volume that
+#      starts empty, so the first boot compiles every graph and the second
+#      loads what the first left: every loaded model must log
 #      "full graph on OpenVINO GPU (<the card's name>)" with all compute
 #      nodes of all four Whisper graphs on the device, no line may say
 #      "decoder on CPU", the two boots must agree, the off-device counter
@@ -38,12 +40,17 @@ models=${2:?models dir}
 models=$(cd "$models" && pwd)
 work=$(mktemp -d)
 server=grpc-asr-gpu-placement-$$
+# A cache volume of this run's own: one left by an earlier run would make the
+# first boot a warm one too, and the cold boot would never be compared with
+# the boot that loads its kernels.
+cache=grpc-asr-gpu-placement-cache-$$
 cleanup() {
   if docker inspect "$server" >/dev/null 2>&1; then
     echo "== server log (tail)"
     docker logs "$server" 2>&1 | tail -40 || true
     docker rm -f "$server" >/dev/null 2>&1 || true
   fi
+  docker volume rm "$cache" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -58,7 +65,6 @@ base_env=(-e GRPC_ASR_BACKEND=openvino -e GRPC_ASR_OPENVINO_MODE=full
           -e GRPC_ASR_OPENVINO_DEVICE=GPU -e GRPC_ASR_METRICS_ADDRESS=0.0.0.0:9464
           -e GRPC_ASR_OPENVINO_CACHE_DIR=/var/cache/openvino)
 [ -z "${GRPC_ASR_MODELS:-}" ] || base_env+=(-e "GRPC_ASR_MODELS=$GRPC_ASR_MODELS")
-cache=grpc-asr-gpu-placement-cache
 docker volume create "$cache" >/dev/null
 run_args=(--read-only --tmpfs /tmp -v "$models:/models:ro" -v "$cache:/var/cache/openvino")
 

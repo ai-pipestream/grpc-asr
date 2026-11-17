@@ -239,7 +239,7 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
                     "GRPC_ASR_OPENVINO_MODE=full: model '" + name + "' stores its weights as " +
                     ftype_name(ftype) +
                     ", which ggml's OpenVINO backend cannot run; use the f16 file or a q8_0, "
-                    "q5_1, q4_0, q4_1, q4_k, q5_k or q6_k quantization of it");
+                    "q5_0, q5_1, q4_0, q4_1, q4_k, q5_k or q6_k quantization of it");
             }
         }
         for (size_t i = 0; i < config.concurrency; i++) {

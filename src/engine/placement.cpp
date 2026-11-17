@@ -197,13 +197,15 @@ OpenvinoGgmlDevice find_openvino_ggml_device(const std::string& requested) {
 
 bool openvino_supports_ftype(int ftype) {
     // The weight types ggml's OpenVINO backend accepts
-    // (ggml-openvino.cpp, supported_types), as whisper file types.
+    // (ggml-openvino.cpp, supported_types), as whisper file types. Q5_0 is
+    // there through cmake/PatchGgmlOpenvino.cmake.
     switch (ftype) {
         case GGML_FTYPE_ALL_F32:
         case GGML_FTYPE_MOSTLY_F16:
         case GGML_FTYPE_MOSTLY_Q4_0:
         case GGML_FTYPE_MOSTLY_Q4_1:
         case GGML_FTYPE_MOSTLY_Q8_0:
+        case GGML_FTYPE_MOSTLY_Q5_0:
         case GGML_FTYPE_MOSTLY_Q5_1:
         case GGML_FTYPE_MOSTLY_Q4_K:
         case GGML_FTYPE_MOSTLY_Q5_K:

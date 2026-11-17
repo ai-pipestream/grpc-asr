@@ -116,6 +116,7 @@ FetchContent_Declare(whisper
 FetchContent_MakeAvailable(whisper)
 include(streaming/cmake/PatchWhisperVad.cmake)
 include(cmake/PatchWhisperPlacement.cmake)
+include(cmake/PatchGgmlOpenvino.cmake)
 include(streaming/cmake/PatchGgmlDepthwise.cmake)
 include(streaming/cmake/PatchParakeetContext.cmake)
 option(GRPC_ASR_QUALIFY_MODELS "Require the full speech qualification model set" OFF)
@@ -244,6 +245,7 @@ if(BUILD_TESTING)
     document-fold-test
     model-discovery-test
     placement-test
+    openvino-q5-0-test
     openvino-full-test
     window-cut-test
     transcriber-test
@@ -255,6 +257,12 @@ if(BUILD_TESTING)
     target_link_libraries(${test_name} PRIVATE asr_core asr_flags)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  # openvino-full-test writes a q5_0 copy of the test model with whisper.cpp's
+  # own quantizer, which lives in its examples and is not part of the library.
+  add_library(whisper_quantize_fixture STATIC "${whisper_SOURCE_DIR}/examples/common-ggml.cpp")
+  target_include_directories(whisper_quantize_fixture PUBLIC "${whisper_SOURCE_DIR}/examples")
+  target_link_libraries(whisper_quantize_fixture PUBLIC ggml)
+  target_link_libraries(openvino-full-test PRIVATE whisper_quantize_fixture)
   if(NOT GRPC_ASR_SYSTEM_GRPC)
     add_executable(grpc-openssl-test tests/grpc_openssl_test.cpp)
     target_include_directories(grpc-openssl-test SYSTEM PRIVATE
@@ -272,7 +280,7 @@ if(BUILD_TESTING)
   set_tests_properties(${GRPC_ASR_TESTS} PROPERTIES
     TIMEOUT ${GRPC_ASR_TEST_TIMEOUT} LABELS asr)
   set_tests_properties(transcriber-test video-demux-test asr-service-test
-    placement-test openvino-full-test PROPERTIES
+    placement-test openvino-q5-0-test openvino-full-test PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "GRPC_ASR_TEST_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-tiny.en.bin;GRPC_ASR_TEST_MULTILINGUAL_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/models/ggml-base.bin;GRPC_ASR_TEST_SAMPLE=${whisper_SOURCE_DIR}/samples/jfk.wav;GRPC_ASR_TEST_ES_SAMPLE=${CMAKE_CURRENT_SOURCE_DIR}/streaming/tests/fixtures/minds14-es-0.wav;GRPC_ASR_SERVER_BINARY=$<TARGET_FILE:grpc-asr-server>")
   # transcriber-test and asr-service-test pull in the ggml CUDA backend, so
@@ -283,15 +291,15 @@ if(BUILD_TESTING)
   # remote-engine-test links remote_engine.o, which calls whisper for
   # language ids; from CUDA 13 the ggml CUDA backend links the driver
   # library directly, so it is gated with the others.
-  # placement-test and openvino-full-test link the same objects and are gated
-  # with them.
+  # placement-test, openvino-q5-0-test and openvino-full-test link the same
+  # objects and are gated with them.
   if(GRPC_ASR_CUDA AND NOT GRPC_ASR_CUDA_DRIVER)
     set_tests_properties(transcriber-test asr-service-test model-discovery-test remote-engine-test
-      placement-test openvino-full-test
+      placement-test openvino-q5-0-test openvino-full-test
       PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: CUDA driver library (libcuda.so.1) not found; "
       "disabling transcriber-test, asr-service-test, model-discovery-test, remote-engine-test, "
-      "placement-test and openvino-full-test. "
+      "placement-test, openvino-q5-0-test and openvino-full-test. "
       "GPU hosts with the driver installed still run them.")
   endif()
   # Same shape for OpenVINO: the whisper-linked tests carry a load-time
@@ -299,10 +307,11 @@ if(BUILD_TESTING)
   # OpenVINO runtime installed run them exactly as before.
   if(GRPC_ASR_OPENVINO AND NOT GRPC_ASR_OPENVINO_RUNTIME)
     set_tests_properties(transcriber-test asr-service-test model-discovery-test
-      placement-test openvino-full-test PROPERTIES DISABLED TRUE)
+      placement-test openvino-q5-0-test openvino-full-test PROPERTIES DISABLED TRUE)
     message(STATUS "grpc-asr: OpenVINO runtime library (libopenvino.so) not found; "
-      "disabling transcriber-test, asr-service-test, model-discovery-test, placement-test and "
-      "openvino-full-test. Hosts with the OpenVINO runtime installed still run them.")
+      "disabling transcriber-test, asr-service-test, model-discovery-test, placement-test, "
+      "openvino-q5-0-test and openvino-full-test. Hosts with the OpenVINO runtime installed "
+      "still run them.")
   endif()
 endif()
 

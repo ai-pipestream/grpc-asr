@@ -256,7 +256,7 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_CUDA_DEVICE` | `0` | CUDA device index |
 | `GRPC_ASR_OPENVINO_MODE` | `full` | how the `openvino` backend runs Whisper: `full` puts the whole graph (conv, encoder, cross-attention and decoder) on the device and fails startup unless a warmup pass shows every compute node there; `encoder` runs only the encoder on the device from a converted IR and decodes on CPU. Never switched for you; see [Whisper on an Intel GPU](#whisper-on-an-intel-gpu) |
 | `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the `openvino` backend, e.g. `GPU.1` on a multi-GPU host (OpenVINO names a lone GPU `GPU` and several `GPU.0`, `GPU.1`, ...); the OpenVINO image ships only the GPU plugin, a device OpenVINO cannot open stops the boot, and device lists (`AUTO:`, `HETERO:`, `MULTI:`, `BATCH:`) are refused because OpenVINO could move work to CPU through them |
-| `GRPC_ASR_OPENVINO_CACHE_DIR` | `/tmp/grpc-asr-openvino-cache` | OpenVINO compiled-kernel cache directory; mount a persistent volume here to skip first-boot shader compilation across container restarts |
+| `GRPC_ASR_OPENVINO_CACHE_DIR` | `/tmp/grpc-asr-openvino-cache` | OpenVINO compiled-kernel cache directory; mount a persistent volume here to skip first-boot shader compilation across container restarts. In `full` mode the cached graphs include their weights: size the volume at twice the model files |
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
 | `GRPC_ASR_CONCURRENCY` | `2` | whisper states per model (concurrent transcriptions) |
@@ -376,20 +376,39 @@ device. It is strict about where the work lands:
 
 Model format for `full`: the weights must be a type the backend runs. The
 unquantized `f16` files (`ggml-large-v3.bin`, `ggml-base.en.bin`, ...) and
-`q8_0`, `q5_1`, `q4_0`, `q4_1`, `q4_k`, `q5_k` and `q6_k` quantizations are
-accepted. **`q5_0` is not**, and it is the quantization most published
-whisper.cpp files use (`ggml-large-v3-turbo-q5_0.bin`): the server refuses
-such a model by name at startup. Requantize from the f16 file with
-whisper.cpp's `quantize` tool (`quantize ggml-x.bin ggml-x-q8_0.bin q8_0`)
-or serve the f16 file. `f16`, `q8_0`, `q5_1` and `q4_0` are the ones this
-repository has run end to end.
+`q8_0`, `q5_0`, `q5_1`, `q4_0`, `q4_1`, `q4_k`, `q5_k` and `q6_k`
+quantizations are accepted. `q5_0` is the quantization most published
+whisper.cpp files use (`ggml-large-v3-turbo-q5_0.bin`); upstream ggml's
+OpenVINO backend has no path for it, and this build adds one
+(`cmake/PatchGgmlOpenvino.cmake`, written up for upstream in
+`docs/upstream/ggml-openvino-q5_0.md`): the 5-bit values run on the device
+as 8-bit weights with one scale per 32, the layout `q8_0` already uses.
+Any other type (`q2_k`, `q3_k`) is refused by name at startup; requantize
+from the f16 file with whisper.cpp's `quantize` tool
+(`quantize ggml-x.bin ggml-x-q5_0.bin q5_0`) or serve the f16 file. `f16`,
+`q8_0`, `q5_0`, `q5_1` and `q4_0` are the ones this repository has run end
+to end.
 
 `full` uses whisper.cpp's flash-attention graphs, the only form the backend
 translates completely. The Whisper models of the pool are what moves to the
 device; the Parakeet streaming backend and Silero VAD are separate models
 that whisper.cpp runs on CPU in every image. Graphs compile on first use, so the first boot of a
 model is slow; `GRPC_ASR_OPENVINO_CACHE_DIR` on a volume keeps the compiled
-kernels.
+graphs. In `full` mode a cached graph is stored with its weights (OpenVINO's
+`OPTIMIZE_SPEED` cache), so the directory grows to about the size of the
+model files, more once beam search or a temperature fallback has compiled a
+second decoder graph: give it a volume with twice the models' size, and do
+not leave it on a `tmpfs` for a large model, where it is held in RAM. The
+weightless cache upstream ggml asks for is not used: on the Arc B70 a boot
+from it decoded differently from the boot that wrote it and could crash in
+the GPU plugin (`docs/upstream/ggml-openvino-cache-mode.md`).
+
+The pinned ggml is built with three edits to its OpenVINO backend
+(`cmake/PatchGgmlOpenvino.cmake`), each kept as a patch with a write-up for
+the backend's maintainers under `docs/upstream/`: `q5_0` weights, a compiled
+decoder graph that was reused after whisper.cpp replaced its self-attention
+cache with a larger one (a greedy decode that fell back to a higher
+temperature failed with "failed to decode"), and the cache mode above.
 
 The OpenVINO in the image is Intel's own release build (runtime and GPU
 plugin from the release archive), not a copy bundled inside another
@@ -398,11 +417,17 @@ package: bundled copies can carry a reduced GPU plugin.
 `scripts/test/gpu-placement-test.sh <image> <models-dir>` is the receipt on a
 host with the card: it fails (never skips) without a render node, requires
 startup to fail with no `/dev/dri`, with a device list and with warmup off,
-then boots twice and requires the whole-graph placement line for every model,
+then boots twice over one cache volume that starts empty (a compiling boot,
+then one that loads what it left) and requires the whole-graph placement line
+for every model, the same line from both boots,
 a zero off-device counter, and compute-engine cycles on the card; it also
 prints the GPU memory the server holds after warmup. `openvino-full-test`
 runs the same full-graph case in process on any OpenVINO device named by
-`GRPC_ASR_TEST_OPENVINO_DEVICE` (the image builds use `CPU`).
+`GRPC_ASR_TEST_OPENVINO_DEVICE` (the image builds use `CPU`), for the f16
+file and for a `q5_0` quantization it writes, with two boots of a two-model
+pool in child processes and a decode that is made to fall back;
+`openvino-q5-0-test` compares `q5_0` weights read back from the device with
+ggml's CPU dequantizer.
 
 Published tags: the CPU image (`:latest-cpu` and versioned `-cpu` tags) is a
 multi-arch manifest list, linux/amd64 plus linux/arm64 (each leg builds and
