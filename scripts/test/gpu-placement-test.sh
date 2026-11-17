@@ -94,6 +94,20 @@ ccs_cycles() {
      done; echo $total'
 }
 
+# What the server process holds on the card, from the xe driver's per-client
+# accounting: one "<key>: <value> <unit>" line per memory region, counted
+# once per DRM client. Printed for the record; the amount depends on the
+# models served and is not asserted.
+gpu_memory() {
+  docker exec "$server" sh -c \
+    'seen=""; for f in /proc/1/fdinfo/*; do
+       id=$(grep -s "^drm-client-id:" "$f" | awk "{print \$2}"); [ -n "$id" ] || continue
+       case " $seen " in *" $id "*) continue;; esac; seen="$seen $id"
+       grep -s -E "^drm-(total|resident)-" "$f"
+     done' | awk '{ sum[$1] += $2; unit[$1] = $3 }
+       END { for (k in sum) printf "%s %d %s\n", k, sum[k], unit[k] }' | sort
+}
+
 boot_and_check() {
   local pass=$1
   echo "== boot $pass with the GPU"
@@ -146,6 +160,8 @@ boot_and_check() {
   cycles=$(ccs_cycles)
   echo "boot $pass: compute-engine cycles after warmup: $cycles"
   [ "$cycles" -gt 0 ] || fail "boot $pass: the GPU compute engine did no work for this server"
+  echo "boot $pass: GPU memory held by the server after warmup:"
+  gpu_memory | sed 's/^/  /'
   docker rm -f "$server" >/dev/null
 }
 

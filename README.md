@@ -391,11 +391,18 @@ that whisper.cpp runs on CPU in every image. Graphs compile on first use, so the
 model is slow; `GRPC_ASR_OPENVINO_CACHE_DIR` on a volume keeps the compiled
 kernels.
 
+The OpenVINO in the image is Intel's own release build (runtime and GPU
+plugin from the release archive), not a copy bundled inside another
+package: bundled copies can carry a reduced GPU plugin.
+
 `scripts/test/gpu-placement-test.sh <image> <models-dir>` is the receipt on a
 host with the card: it fails (never skips) without a render node, requires
 startup to fail with no `/dev/dri`, with a device list and with warmup off,
 then boots twice and requires the whole-graph placement line for every model,
-a zero off-device counter, and compute-engine cycles on the card.
+a zero off-device counter, and compute-engine cycles on the card; it also
+prints the GPU memory the server holds after warmup. `openvino-full-test`
+runs the same full-graph case in process on any OpenVINO device named by
+`GRPC_ASR_TEST_OPENVINO_DEVICE` (the image builds use `CPU`).
 
 Published tags: the CPU image (`:latest-cpu` and versioned `-cpu` tags) is a
 multi-arch manifest list, linux/amd64 plus linux/arm64 (each leg builds and

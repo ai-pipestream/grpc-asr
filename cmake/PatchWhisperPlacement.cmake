@@ -1,5 +1,6 @@
-# Two edits to the pinned whisper.cpp, both needed to run the whole Whisper
-# graph on one explicitly selected ggml device and prove that it did (#30).
+# Three edits to the pinned whisper.cpp, all needed to run the whole Whisper
+# graph on one explicitly selected ggml device and prove that it did (#30),
+# without breaking the graphs that run on CPU in the same binary.
 # Applied in place like the streaming/cmake patches: idempotent, and a
 # changed upstream source stops the configure instead of building unpatched.
 #
@@ -22,6 +23,15 @@
 #    asr_whisper_state_has_device reports whether a state really opened the
 #    selected device, since whisper.cpp falls back to CPU when a GPU backend
 #    fails to initialize.
+#
+# 3. Cross-attention key scale. Upstream removes the scale of the
+#    cross-attention keys with #ifndef GGML_USE_OPENVINO, because the
+#    OpenVINO backend applies it itself. That is a build-time switch: a
+#    binary that merely contains the backend also loses the scale in every
+#    graph it runs on CPU (GRPC_ASR_BACKEND=cpu, and the decoder of
+#    GRPC_ASR_OPENVINO_MODE=encoder), and those transcripts degrade. The
+#    scale is decided per state instead: dropped only when the state's first
+#    backend is the OpenVINO one.
 set(placement_source "${whisper_SOURCE_DIR}/src/whisper.cpp")
 file(READ "${placement_source}" placement_text)
 set(placement_marker "grpc-asr placement patch v1")
@@ -137,4 +147,31 @@ extern "C" bool asr_whisper_state_has_device(struct whisper_state * state, ggml_
 }
 ]=])
   file(WRITE "${placement_source}" "${placement_text}")
+endif()
+
+# --- 3. cross-attention key scale ------------------------------------------
+# Separate from the block above so a source tree that already has edits 1
+# and 2 picks this one up.
+set(scale_old [=[#ifndef GGML_USE_OPENVINO // scaling is handled internally in OpenVINO backend
+        Kcross = ggml_scale(ctx0, Kcross, Kscale);
+#endif]=])
+set(scale_new [=[        // grpc-asr: per state, not per build (cmake/PatchWhisperPlacement.cmake).
+        // ggml's OpenVINO backend applies this scale itself; every other backend needs it.
+        if (wstate.backends.empty() || strcmp(ggml_backend_name(wstate.backends[0]), "OPENVINO") != 0) {
+            Kcross = ggml_scale(ctx0, Kcross, Kscale);
+        }]=])
+string(FIND "${placement_text}" "${scale_old}" scale_position)
+if(NOT scale_position EQUAL -1)
+  string(REPLACE "${scale_old}" "${scale_new}" placement_text "${placement_text}")
+  file(WRITE "${placement_source}" "${placement_text}")
+else()
+  string(FIND "${placement_text}" "${scale_new}" scale_position)
+  if(scale_position EQUAL -1)
+    message(FATAL_ERROR "Pinned Whisper placement patch no longer matches: cross-attention key scale")
+  endif()
+endif()
+string(FIND "${placement_text}" "GGML_USE_OPENVINO" scale_position)
+if(NOT scale_position EQUAL -1)
+  message(FATAL_ERROR "The pinned whisper.cpp has another GGML_USE_OPENVINO build-time switch; "
+    "review it: such a switch also changes graphs that run on CPU")
 endif()
