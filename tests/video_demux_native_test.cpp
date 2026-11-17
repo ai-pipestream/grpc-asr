@@ -154,14 +154,25 @@ void verify_native_streaming_api() {
                                         encoding + " pipe:1");
         require(bytes.size() > 8192, "live fixture has a withheld tail");
         asr::media::ByteStream stream;
-        stream.append(bytes.data(), bytes.size() - 4096);
         VideoDemux media("/nonexistent/ffmpeg", "/nonexistent/ffprobe", std::chrono::seconds(5));
         media.open_audio_from_pipe(stream);
-        require(media.wait_for_audio(std::chrono::seconds(4)), "native live PCM ready before EOF");
+        // Feed small chunks while the native worker is already reading. A
+        // decoder that waits for most of the upload cannot pass this gate.
+        size_t uploaded = 0;
+        bool ready = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (!ready && uploaded < bytes.size() / 2 &&
+               std::chrono::steady_clock::now() < deadline) {
+            const size_t chunk = std::min(size_t{1024}, bytes.size() / 2 - uploaded);
+            stream.append(bytes.data() + uploaded, chunk);
+            uploaded += chunk;
+            ready = media.wait_for_audio(std::chrono::milliseconds(20));
+        }
+        require(ready, "native live PCM ready with at least half the upload withheld");
         std::array<float, 4096> pcm;
         size_t total = media.read_audio(pcm.data(), pcm.size());
-        require(total > 0 && !stream.is_complete(), "native audio emitted during upload");
-        stream.append(bytes.data() + bytes.size() - 4096, 4096); stream.complete();
+        require(total > 0 && !stream.is_complete(), "native audio emitted during paced upload");
+        stream.append(bytes.data() + uploaded, bytes.size() - uploaded); stream.complete();
         while (const auto count = media.read_audio(pcm.data(), pcm.size())) total += count;
         media.close_audio();
         require(total >= 319000 && total <= 321000, "complete native live audio duration");
