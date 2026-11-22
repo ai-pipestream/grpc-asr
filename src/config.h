@@ -17,15 +17,23 @@ struct Config {
     // fallback.
     std::string backend = "cuda";
     int cuda_device = 0;
-    // OpenVINO device the whisper encoder compiles for under the openvino
-    // backend ("GPU", "GPU.1", ...; other devices need their OpenVINO
-    // plugin, and the OpenVINO image ships only the GPU one). One device
-    // only: GPU, GPU.<n>, NPU, NPU.<n> or CPU; AUTO/HETERO/MULTI/BATCH lists
-    // are refused. An unavailable device fails the boot, like every other
-    // backend choice.
+    // How the openvino backend runs Whisper:
+    //   full     the whole graph (conv, encoder, cross-attention and decoder)
+    //            on ggml's OpenVINO backend, from the plain ggml weights. A
+    //            warmup pass must show every compute node on the device or
+    //            startup fails. This is the default.
+    //   encoder  only the encoder, from a converted OpenVINO IR next to the
+    //            weights; the decoder runs on the ggml CPU graph.
+    // Nothing moves from one mode to the other on its own.
+    std::string openvino_mode = "full";
+    // OpenVINO device for the openvino backend ("GPU", "GPU.1", ...; other
+    // devices need their OpenVINO plugin, and the OpenVINO image ships only
+    // the GPU one). One device only: GPU, GPU.<n>, NPU, NPU.<n> or CPU;
+    // AUTO/HETERO/MULTI/BATCH lists are refused. A device OpenVINO cannot
+    // open fails the boot, like every other backend choice.
     std::string openvino_device = "GPU";
-    // Directory where OpenVINO caches compiled encoder blobs; mount a
-    // persistent volume here to skip recompiling on container restart.
+    // Directory where OpenVINO caches compiled kernels; mount a persistent
+    // volume here to skip recompiling on container restart.
     std::string openvino_cache_dir = "/tmp/grpc-asr-openvino-cache";
     std::string models_dir = "/models";
     // Model names to serve ("tiny.en", "large-v3", ...). Empty means

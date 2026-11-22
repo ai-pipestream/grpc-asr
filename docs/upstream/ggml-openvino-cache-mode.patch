@@ -1,0 +1,49 @@
+From a1c98c1c613c388f4157947953a9081b63d8a52d Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Tue, 17 Nov 2026 00:19:48 -0500
+Subject: [PATCH 3/3] openvino: store weights in the plugin cache on CPU and
+ GPU
+
+With GGML_OPENVINO_CACHE_DIR the backend requests
+CacheMode::OPTIMIZE_SIZE on CPU and GPU, OpenVINO's weightless cache: a
+blob stores the compiled kernels and the weights are read from the model
+again when the blob is loaded.
+
+On an Arc B70 (OpenVINO 2026.4.1), with whisper.cpp graphs and two
+models in one process, a process that starts from such a cache does not
+behave like the one that filled it. The first state of each model
+decodes one second of silence differently (190080 decoder compute nodes
+in place of 1296: the result fails whisper's quality check and runs
+through every fallback temperature), while the second state, on the
+same compiled models, decodes as before. And compile_model for the conv
+graph of the second model can die with SIGSEGV in memcpy under
+libigdrcl.so, called from the GPU plugin, reading a host buffer:
+seven boots of seven with one order of the two models, none with the
+other order. No boot that fills the cache does either.
+
+Without a cache directory, and with OPTIMIZE_SPEED, every boot decodes
+the same and none crashes, and the boot from the cache is faster
+(0.35 s of warmup for the first state, 1.6 s when compiling, 8.5 s from
+the weightless cache). The blobs then hold their weights, as the ones
+of GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR already do.
+
+NPU keeps its own cache settings.
+---
+ ggml/src/ggml-openvino/ggml-openvino-extra.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-openvino/ggml-openvino-extra.cpp b/ggml/src/ggml-openvino/ggml-openvino-extra.cpp
+index e485c45..62c9d0f 100644
+--- a/ggml/src/ggml-openvino/ggml-openvino-extra.cpp
++++ b/ggml/src/ggml-openvino/ggml-openvino-extra.cpp
+@@ -183,7 +183,9 @@ void ggml_openvino_device_config::init() {
+         }
+     } else if (cache_dir && strlen(cache_dir) > 0) {
+         compile_config.insert(ov::cache_dir(cache_dir));
+-        compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
++        // Not OPTIMIZE_SIZE: a GPU blob without its weights did not reproduce the model that wrote it
++        // (whisper graphs on Arc B70: different logits on first use, SIGSEGV in compile_model).
++        compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SPEED));
+     }
+ 
+     if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2) {

@@ -1,45 +1,60 @@
 # syntax=docker/dockerfile:1.28
 # grpc-asr — Intel OpenVINO image. Same layout as the CUDA Dockerfile and
-# Dockerfile.cpu: the build stage compiles whisper.cpp with the OpenVINO
-# encoder (WHISPER_OPENVINO) and runs the test suite, and the tests gate
-# the image. No CUDA anywhere in this image.
+# Dockerfile.cpu: the build stage compiles whisper.cpp with ggml's OpenVINO
+# backend (GGML_OPENVINO, the whole Whisper graph on the device) and with
+# the OpenVINO encoder (WHISPER_OPENVINO, the older encoder-only path), runs
+# the test suite, and the tests gate the image. No CUDA anywhere in this
+# image.
 #
-# OpenVINO 2025.4.1 comes from Intel's APT repo (the ubuntu24
-# distribution; the debs only require glibc >= 2.38, so they install fine
-# on newer bases). The base is ubuntu:26.04 because Ubuntu's own archive
-# there ships intel-opencl-icd 26.05 (NEO) with libigc2 2.28.4, the
-# Battlemage-capable compute runtime the OpenVINO GPU plugin needs for
-# Arc B-series cards; noble's intel-opencl-icd 23.43 predates Battlemage
-# and the GPU plugin finds no device with it. Same base and NEO source as
-# gRParse's OpenVINO image, so both images run the same driver stack.
+# OpenVINO 2026.4.1 comes from Intel's release archive, checked against a
+# pinned sha256: ggml's OpenVINO backend needs the 2026 API, and Intel's
+# APT repo stops at 2025.4.1. The archive is built for ubuntu24 and only
+# requires glibc >= 2.38, so it runs on newer bases. The base is
+# ubuntu:26.04 because Ubuntu's own archive there ships intel-opencl-icd
+# 26.05 (NEO) with libigc2 2.28.4, the Battlemage-capable compute runtime
+# the OpenVINO GPU plugin needs for Arc B-series cards; noble's
+# intel-opencl-icd 23.43 predates Battlemage and the GPU plugin finds no
+# device with it. Same base and NEO source as gRParse's OpenVINO image.
 #
 # The whisper-linked tests carry a load-time dependency on libopenvino.so,
 # which the toolkit in this stage provides, so the in-build ctest gate runs
 # them; CMake disables them at configure time on hosts that configure with
-# GRPC_ASR_OPENVINO=ON but lack the runtime library.
+# GRPC_ASR_OPENVINO=ON but lack the runtime library. The build stage keeps
+# OpenVINO's CPU plugin so openvino-full-test can run the whole graph, with
+# the placement check, on the OpenVINO CPU device; the runtime image ships
+# the GPU plugin only.
 #
-# The OpenVINO encoder targets an Intel GPU and needs the render device,
-# plus a converted encoder model (ggml-<name>-encoder-openvino.xml/.bin)
-# next to the ggml weights in the models mount:
+# Whisper runs on an Intel GPU and needs the render device. The default
+# mode (GRPC_ASR_OPENVINO_MODE=full) needs nothing but the ggml weights:
 #   docker run --rm --read-only --tmpfs /tmp --device /dev/dri \
 #     --group-add $(getent group render | cut -d: -f3) \
 #     -v ./models:/models:ro -p 50055:50055 grpc-asr:openvino
 # (--group-add render because the image runs as the unprivileged user.)
+# GRPC_ASR_OPENVINO_MODE=encoder also needs a converted encoder model
+# (ggml-<name>-encoder-openvino.xml/.bin) next to the weights.
 FROM ubuntu:26.04 AS build
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake curl g++ git gpg make nasm ninja-build pkg-config xz-utils zlib1g-dev ffmpeg libopencore-amrnb0 libssl-dev libcurl4-openssl-dev libopenh264-dev \
+        ocl-icd-opencl-dev opencl-headers opencl-clhpp-headers \
     && rm -rf /var/lib/apt/lists/*
 
-# Intel's OpenVINO APT repo, 2025 stream, ubuntu24 (noble) distribution.
-RUN curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-        | gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu24 main" \
-        > /etc/apt/sources.list.d/intel-openvino.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends libopenvino-dev-2025.4.1 \
-    && rm -rf /var/lib/apt/lists/*
+# OpenVINO 2026.4.1 runtime, headers, CMake package and its own TBB, from
+# Intel's release archive (Apache-2.0; license texts under docs/licensing).
+# The OpenCL packages above are what ggml's OpenVINO backend shares its GPU
+# buffers with the plugin through.
+RUN curl -fsSL --retry 5 -o /tmp/openvino.tgz \
+        https://storage.openvinotoolkit.org/repositories/openvino/packages/2026.4.1/linux/openvino_toolkit_ubuntu24_2026.4.1.22982.07f9c262b05_x86_64.tgz \
+    && echo "772ce52d9b0aa375c77d391fccea71450d889c98b9af197bb8f05167a9dabd87  /tmp/openvino.tgz" | sha256sum -c - \
+    && mkdir -p /opt/intel/openvino \
+    && tar -xzf /tmp/openvino.tgz -C /opt/intel/openvino --strip-components=1 \
+        --wildcards '*/runtime/*' '*/docs/licensing/*' \
+    && rm /tmp/openvino.tgz \
+    && printf '%s\n' /opt/intel/openvino/runtime/lib/intel64 /opt/intel/openvino/runtime/3rdparty/tbb/lib \
+        > /etc/ld.so.conf.d/openvino.conf \
+    && ldconfig
+ENV OpenVINO_DIR=/opt/intel/openvino/runtime/cmake
 
 # The ffmpeg and ffprobe the image ships: an LGPL-only build of a pinned,
 # sha256-checked upstream release with just the demuxers and decoders the
@@ -64,7 +79,7 @@ COPY . .
 # whisper.cpp, OpenVINO, or the toolchain moves. ${TARGETARCH} keeps
 # concurrent multi-platform builds from sharing one /build (see
 # Dockerfile.cpu for the failure mode that causes).
-RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-cxx23-grpc1.83.0-whisper1.9.5-${TARGETARCH},target=/build \
+RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2026.4.1-ggmlov1-cxx23-grpc1.83.0-whisper1.9.5-${TARGETARCH},target=/build \
     cmake -U 'GGML_*' -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
         -DGRPC_ASR_QUALIFY_MODELS=${GRPC_ASR_TEST_REQUIRE_MODELS} -DGRPC_ASR_WERROR=ON -DGRPC_ASR_OPENVINO=ON -DGRPC_ASR_TEST_TIMEOUT=3000 \
     && cmake --build /build --target grpc-asr-server grpc-asr-tests --parallel \
@@ -75,29 +90,34 @@ RUN --mount=type=cache,id=grpc-asr-ubuntu26-openvino2025.4.1-cxx23-grpc1.83.0-wh
     && cp -L /usr/lib/$(gcc -dumpmachine)/libopenh264.so.* /opt/ffmpeg/lib/ \
     && cp /usr/share/doc/libopenh264-dev/copyright /out/openh264-copyright
 
+# What the runtime image takes from OpenVINO: the runtime library, the GPU
+# plugin with its kernel selection cache, the IR frontend that
+# GRPC_ASR_OPENVINO_MODE=encoder reads converted encoders through, and TBB.
+# No CPU plugin: nothing in the shipped image can run Whisper on an
+# OpenVINO CPU device.
+RUN mkdir -p /out/openvino/lib \
+    && cp -a /opt/intel/openvino/runtime/lib/intel64/libopenvino.so.* \
+        /opt/intel/openvino/runtime/lib/intel64/libopenvino_intel_gpu_plugin.so \
+        /opt/intel/openvino/runtime/lib/intel64/cache.json \
+        /opt/intel/openvino/runtime/lib/intel64/libopenvino_ir_frontend.so.* \
+        /opt/intel/openvino/runtime/3rdparty/tbb/lib/libtbb.so.12* \
+        /out/openvino/lib/ \
+    && cp -a /opt/intel/openvino/docs/licensing /out/openvino/licensing
+
 FROM ubuntu:26.04
 
-# Runtime half of the same repo: the OpenVINO runtime, the IR frontend the
-# encoder model is read through, the Intel GPU plugin, and the NEO compute
-# runtime (intel-opencl-icd) that the plugin drives. The OpenVINO debs come
-# from Intel's repo; intel-opencl-icd comes from Ubuntu's own 26.04 archive
-# (26.05, Battlemage-capable). The repo is removed again once the debs are in.
-# libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
+# The NEO compute runtime (intel-opencl-icd, 26.05, Battlemage-capable) and
+# the OpenCL ICD loader come from Ubuntu's own 26.04 archive; the OpenVINO
+# GPU plugin drives the card through them, and ggml's OpenVINO backend
+# links the loader. The OpenVINO libraries themselves come from the build
+# stage. libgomp1: whisper.cpp's ggml CPU backend uses OpenMP.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gpg libgomp1 libcurl4t64 libssl3t64 \
-    && curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-        | gpg --dearmor -o /usr/share/keyrings/intel-openvino.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/intel-openvino.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu24 main" \
-        > /etc/apt/sources.list.d/intel-openvino.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libopenvino-2025.4.1 libopenvino-ir-frontend-2025.4.1 \
-        libopenvino-intel-gpu-plugin-2025.4.1 \
+        ca-certificates libgomp1 libcurl4t64 libssl3t64 \
         ocl-icd-libopencl1 intel-opencl-icd \
-    && apt-get purge -y curl gpg && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/intel-openvino.list \
-        /usr/share/keyrings/intel-openvino.gpg
+    && rm -rf /var/lib/apt/lists/*
 
+COPY --from=build /out/openvino/lib /opt/openvino/lib
+COPY --from=build /out/openvino/licensing /usr/share/doc/grpc-asr/openvino-licensing
 COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 
 # ffmpeg and ffprobe with their shared libraries, from the build stage:
@@ -107,7 +127,8 @@ COPY --from=build /out/grpc-asr-server /usr/local/bin/grpc-asr-server
 # scripts/smoke-test.sh checks the label, NOTICE and that the build is not
 # a GPL one.
 COPY --from=build /opt/ffmpeg /opt/ffmpeg
-RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf && ldconfig \
+RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/grpc-asr-ffmpeg.conf \
+    && echo /opt/openvino/lib > /etc/ld.so.conf.d/grpc-asr-openvino.conf && ldconfig \
     && install -d -o 65532 -g 65532 /var/cache/openvino
 COPY NOTICE /usr/share/doc/grpc-asr/NOTICE
 COPY --from=build /out/openh264-copyright /usr/share/doc/grpc-asr/openh264-copyright

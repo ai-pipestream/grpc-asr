@@ -1,0 +1,85 @@
+From acd83920aaf6faf01ab6994f23f1a552873159f3 Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Tue, 17 Nov 2026 00:19:48 -0500
+Subject: [PATCH 2/3] openvino: recompile when whisper.cpp replaces a flat KV
+ buffer
+
+whisper.cpp keeps its KV caches as flat [N, 1, 1, 1] buffers. The
+backend compiles such a buffer as an input of static shape, and the
+offset of every layer's view into it is fixed in the graph. When a
+decode needs more decoders than the state has room for, whisper.cpp
+frees kv_self and allocates a larger one (whisper_full_with_state,
+"recreating KV cache"): for beam search, and for the temperature
+fallback of a greedy decode, which samples with best_of decoders.
+
+Each backend instance remembers the last graph it computed under
+graph_key (node count, leaf count, first and last node name). The
+decoder graph before and after the reallocation has the same key, and
+can_reuse_dynamically() only compares rope parameters and recurrent
+slots, so when the two graphs run back to back the request compiled for
+the small buffer is reused and OpenVINO rejects the larger tensor:
+
+  Can't set the input tensor with index: 4, because the model input
+  (shape=[1,1,1,786432]) and the tensor (shape=(1.1.1.5505024)) are
+  incompatible
+
+whisper_full then fails with "failed to decode". Beam search does not
+hit this, because the conv, encoder and cross graphs run between the
+two decoder graphs and evict the entry. A greedy decode that falls back
+to a higher temperature on a state that has only used one decoder does,
+on the CPU device and on GPU: set logprob_thold and no_speech_thold
+above 1 to force the fallback.
+
+ModelParams now records the element counts of the flat KV buffers the
+attention layers read, and both reuse checks compare them. A change
+takes the cold path, where compiled_graph_key already covers every
+tensor shape and the identity of the weight buffers.
+---
+ ggml/src/ggml-openvino/ggml-decoder.cpp |  1 +
+ ggml/src/ggml-openvino/ggml-decoder.h   | 10 ++++++++--
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/ggml/src/ggml-openvino/ggml-decoder.cpp b/ggml/src/ggml-openvino/ggml-decoder.cpp
+index 9339a86..daa49d6 100644
+--- a/ggml/src/ggml-openvino/ggml-decoder.cpp
++++ b/ggml/src/ggml-openvino/ggml-decoder.cpp
+@@ -893,6 +893,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
+             case 5: {
+                 // whisper: K is a direct VIEW_3D of the KV buffer, no PERMUTE node
+                 auto * cache_k_view = node->src[1];  // VIEW_3D of kv_self.k or kv_cross.k`
++                model_params.flat_kv_sizes.push_back(ggml_nelements(cache_k_view->view_src));
+                 compute_params.token_len_per_seq = node->src[0]->ne[1];
+                 if (attention_pattern_case == 4) {
+                     compute_params.attention_size = cache_k_view->ne[1];
+diff --git a/ggml/src/ggml-openvino/ggml-decoder.h b/ggml/src/ggml-openvino/ggml-decoder.h
+index a614d29..1ea9800 100644
+--- a/ggml/src/ggml-openvino/ggml-decoder.h
++++ b/ggml/src/ggml-openvino/ggml-decoder.h
+@@ -41,6 +41,12 @@ struct ModelParams {
+ 
+     std::vector<std::string> kv_names;
+     size_t kv_buffer_ctx_id = 0;
++    // Element counts of the flat KV buffers ([N, 1, 1, 1], whisper.cpp), in the order the
++    // attention layers use them. A flat buffer is compiled with a static shape and the layers'
++    // views into it have fixed offsets (see get_graph_input_shape), and whisper.cpp replaces
++    // kv_self with a larger buffer when a decode needs more decoders. A compiled model is only
++    // reusable while these are unchanged.
++    std::vector<int64_t> flat_kv_sizes;
+ 
+     bool same_rope_params(const ModelParams & other) const {
+         return mixed_rope_params == other.mixed_rope_params &&
+@@ -49,12 +55,12 @@ struct ModelParams {
+ 
+     bool can_reuse_dynamically(const ModelParams & other) const {
+         return same_rope_params(other) && n_rs_slots == other.n_rs_slots &&
+-               has_rs_rollback == other.has_rs_rollback;
++               has_rs_rollback == other.has_rs_rollback && flat_kv_sizes == other.flat_kv_sizes;
+     }
+ 
+     bool can_reuse_statically(const ModelParams & other) const {
+         return same_rope_params(other) && ctx == other.ctx && n_rs_slots == other.n_rs_slots &&
+-               has_rs_rollback == other.has_rs_rollback;
++               has_rs_rollback == other.has_rs_rollback && flat_kv_sizes == other.flat_kv_sizes;
+     }
+ 
+     bool kv_buffer_changed(const ModelParams & other) const { return kv_buffer_ctx_id != other.kv_buffer_ctx_id; }
