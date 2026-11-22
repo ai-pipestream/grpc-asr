@@ -252,7 +252,7 @@ picks a subset, unset discovers all.
 | `GRPC_ASR_LISTEN_ADDRESS` | `0.0.0.0:50055` | listen address |
 | `GRPC_ASR_BACKEND` | `cuda` | `cuda` \| `openvino` \| `cpu`; never silently substituted |
 | `GRPC_ASR_CUDA_DEVICE` | `0` | CUDA device index |
-| `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the whisper encoder, e.g. `GPU.1` on a multi-GPU host; the OpenVINO image ships only the GPU plugin, and an unavailable device stops the boot |
+| `GRPC_ASR_OPENVINO_DEVICE` | `GPU` | OpenVINO device for the whisper encoder, e.g. `GPU.1` on a multi-GPU host; the OpenVINO image ships only the GPU plugin, an unavailable device stops the boot, and device lists (`AUTO:`, `HETERO:`, `MULTI:`, `BATCH:`) are refused because OpenVINO could move the encoder to CPU through them |
 | `GRPC_ASR_OPENVINO_CACHE_DIR` | `/tmp/grpc-asr-openvino-cache` | OpenVINO compiled-kernel cache directory; mount a persistent volume here to skip first-boot shader compilation across container restarts |
 | `GRPC_ASR_MODELS_DIR` | `/models` | read-only weight mount |
 | `GRPC_ASR_MODELS` | discover | comma list of model names to load |
