@@ -460,6 +460,77 @@ void verify_per_channel_labels(const std::string& jfk) {
     }
 }
 
+// An English-only model (tiny.en, base.en) has no language tokens and no
+// translate task. Asking it to detect the language reads logits that are
+// not language tokens, and asking it for German or for a translation is
+// ignored: either way the caller gets a transcript labelled with something
+// the model never did. The model's limits are checked, not guessed.
+void verify_english_only_model(const std::string& jfk) {
+    using asr::engine::resolve_language;
+    std::string resolved = "unset";
+
+    // What a multilingual model accepts: any language whisper knows, by
+    // code or by name, in any case, or none (detect it).
+    require(!resolve_language(true, "base", "", false, &resolved) && resolved.empty(),
+            "a multilingual model detects the language when none is given");
+    require(!resolve_language(true, "base", "auto", false, &resolved) && resolved.empty(),
+            "\"auto\" is the same as no language");
+    require(!resolve_language(true, "base", "de", true, &resolved) && resolved == "de",
+            "a multilingual model takes a language and translation");
+    require(!resolve_language(true, "base", "German", false, &resolved) && resolved == "de",
+            "a language name resolves to its code");
+    const auto unknown = resolve_language(true, "base", "xx", false, &resolved);
+    require(unknown.has_value() && unknown->contains("xx"),
+            "a language whisper does not know is refused by name");
+    require(resolve_language(true, "base", std::string("e\0n", 3), false, &resolved).has_value(),
+            "a language with an embedded NUL is refused");
+
+    // What an English-only model accepts: English, or nothing, and both
+    // mean English with no detection.
+    require(!resolve_language(false, "tiny.en", "", false, &resolved) && resolved == "en",
+            "an English-only model is given \"en\" when no language is named");
+    require(!resolve_language(false, "tiny.en", "auto", false, &resolved) && resolved == "en",
+            "an English-only model never detects");
+    require(!resolve_language(false, "tiny.en", "en", false, &resolved) && resolved == "en",
+            "English is accepted");
+    require(!resolve_language(false, "tiny.en", "English", false, &resolved) && resolved == "en",
+            "English by name is accepted");
+    const auto german = resolve_language(false, "tiny.en", "de", false, &resolved);
+    require(german.has_value() && german->contains("tiny.en") && german->contains("English-only"),
+            "another language names the model and why: " + german.value_or("(accepted)"));
+    const auto translate = resolve_language(false, "tiny.en", "en", true, &resolved);
+    require(translate.has_value() && translate->contains("translat"),
+            "translation is refused: " + translate.value_or("(accepted)"));
+
+    // The engine holds the same line for whoever calls it without asking
+    // first. g_ctx is the English-only test model.
+    require(whisper_is_multilingual(g_ctx) == 0, "the test model is English-only");
+    EngineOptions options;
+    options.window_seconds = 30;
+    options.language.clear();
+    Collected detected = run_over(jfk, options);
+    require(!detected.finals.empty(), "an unnamed language still transcribes");
+    for (const EngineSegment& segment : detected.finals) {
+        require(segment.language == "en",
+                "an English-only model reports English, got \"" + segment.language + "\"");
+    }
+    require(detected.result.language == "en", "and so does the result");
+
+    auto refused = [&](const EngineOptions& asked, const char* what) {
+        try {
+            run_over(jfk, asked);
+        } catch (const std::invalid_argument&) {
+            return;
+        }
+        throw std::runtime_error(std::string("FAIL: ") + what);
+    };
+    options.language = "de";
+    refused(options, "German on an English-only model is refused, not transcribed as English");
+    options.language = "en";
+    options.translate = true;
+    refused(options, "translation on an English-only model is refused, not ignored");
+}
+
 void verify_language_switch(const std::string& jfk) {
     // Issue #16: concatenate the ~11 s English fixture (padded to 10 s boundary)
     // with the committed Spanish fixture on the multilingual model using a 10 s
@@ -575,6 +646,7 @@ int main() {
         verify_stall_cut_default_window(jfk);
         verify_decoding_options(jfk);
         verify_per_channel_labels(jfk);
+        verify_english_only_model(jfk);
         verify_language_switch(jfk);
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

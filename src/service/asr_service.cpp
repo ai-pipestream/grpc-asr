@@ -901,6 +901,20 @@ grpc::Status AsrServiceImpl::Transcribe(
                            "model '" + resolved.model() + "' is not loaded (loaded: " + loaded +
                                ")"});
         }
+        // What the model cannot do is refused here, before any media is
+        // read: an English-only model asked for another language or for a
+        // translation would otherwise return a transcript that claims it.
+        // An unnamed language on such a model becomes "en", never a
+        // detection over a vocabulary with no language tokens.
+        std::string language;
+        if (const auto problem = engine::resolve_language(
+                pool_.multilingual(resolved.model()), resolved.model(), resolved.language(),
+                resolved.task() == asrv1::TASK_TRANSLATE, &language);
+            problem.has_value()) {
+            return reject(StreamEndResult::kInvalidMedia,
+                          {grpc::StatusCode::INVALID_ARGUMENT, *problem});
+        }
+        resolved.set_language(language);
         call.options = std::move(resolved);
     }
 

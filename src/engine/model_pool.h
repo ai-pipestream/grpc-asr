@@ -79,6 +79,11 @@ class ModelPool {
 
     bool has_model(const std::string& model) const;
 
+    // False for an English-only model (tiny.en, base.en, ...): it has no
+    // language tokens and no translate task. Read from the weights at load.
+    // The caller must have checked has_model first; unknown names throw.
+    bool multilingual(const std::string& model) const;
+
     // Blocks until a state for the model is free, the stream's stop fires
     // (throws Cancelled), or the deadline passes (throws QueueTimeout); the
     // default deadline waits as long as stop allows. The caller must have
