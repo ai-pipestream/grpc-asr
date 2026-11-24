@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ai/pipestream/asr/v1/asr_service.pb.h"
@@ -99,6 +100,26 @@ struct EngineResult {
     // went away); the trailer must not be sent.
     bool aborted = false;
 };
+
+// Checks the language and the task a request asks for against what the
+// model can do, and resolves the language whisper is given.
+//
+// An English-only model (tiny.en, base.en, ...) has no language tokens and
+// no translate task: detection on it reads logits that are not languages
+// and can name any, and a language or a translation asked of it is
+// ignored. So on such a model an unnamed language resolves to "en" with no
+// detection, and anything it cannot do is an error instead of a transcript
+// labelled with what it did not do.
+//
+// `language` is a whisper language code or name in any case ("de",
+// "German"); "" and "auto" both mean detect. Returns std::nullopt with
+// `*resolved` set to the code to give whisper ("" = detect, multilingual
+// only), or a human-readable INVALID_ARGUMENT reason: an unknown language,
+// or, when `multilingual` is false, translation or a language other than
+// English. `model` only names the model in that reason.
+std::optional<std::string> resolve_language(bool multilingual, std::string_view model,
+                                            const std::string& language, bool translate,
+                                            std::string* resolved);
 
 // Per-run knobs, resolved from TranscribeOptions plus server config.
 struct EngineOptions {

@@ -118,6 +118,7 @@ struct ModelPool::Entry {
     size_t registered_states = 0;
     std::string hash;
     whisper_context* ctx = nullptr;
+    bool multilingual = false;
     std::mutex mutex;
     // _any for the stop_token-aware waits in acquire.
     std::condition_variable_any available;
@@ -230,6 +231,7 @@ ModelPool::ModelPool(const Config& config) : backend_(config.backend), warmed_up
             throw std::runtime_error("loading model '" + name + "' from " + path.string() +
                                      " failed");
         }
+        entry->multilingual = whisper_is_multilingual(entry->ctx) != 0;
         if (openvino_full) {
             // Checked before the first state exists: ggml aborts the process
             // when a state is built over weights its backend cannot run.
@@ -360,6 +362,10 @@ ModelPool::Lease::~Lease() {
 
 bool ModelPool::has_model(const std::string& model) const {
     return entries_.contains(model);
+}
+
+bool ModelPool::multilingual(const std::string& model) const {
+    return entries_.at(model)->multilingual;
 }
 
 ModelPool::Lease ModelPool::acquire(const std::string& model, std::stop_token stop,

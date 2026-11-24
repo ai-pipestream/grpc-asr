@@ -54,12 +54,17 @@ message TranscribeOptions {
   // INVALID_ARGUMENT rather than triggering a download.
   string model = 1;
 
-  // ISO 639-1 hint for the spoken language, e.g. "en". Empty means
-  // autodetect.
+  // The spoken language: a code or a name whisper knows ("en", "German"),
+  // in any case. Empty or "auto" means detect it. A language whisper does
+  // not know fails with INVALID_ARGUMENT. An English-only model (tiny.en,
+  // base.en, ...) has no language tokens, so it never detects: empty means
+  // English, and any other language fails with INVALID_ARGUMENT instead
+  // of returning an English transcript labelled as that language.
   string language = 2;
 
   // Whether to transcribe in the source language or translate to
-  // English.
+  // English. TASK_TRANSLATE on an English-only model fails with
+  // INVALID_ARGUMENT: such a model cannot translate.
   Task task = 3;
 
   // When true, FinalSegment events carry per-word timings.

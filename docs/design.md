@@ -28,8 +28,11 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 
 Options on the first message: `model` (`tiny`, `small`, `medium`,
 `large-v3`, `distil-large-v3`, and the rest of the Whisper family),
-`language` (empty means detect), `task` / `task_raw` (`transcribe` by default, or
-`translate`), `word_timestamps`, `emit_keyframes` (video only),
+`language` (empty or `auto` means detect; an English-only model such as
+`tiny.en` never detects, so empty means English there, and another
+language, or a language whisper does not know, is `INVALID_ARGUMENT`),
+`task` / `task_raw` (`transcribe` by default, or `translate`, which an
+English-only model refuses with `INVALID_ARGUMENT`), `word_timestamps`, `emit_keyframes` (video only),
 `keyframe_interval_seconds`, `diarize` (speaker turns; a model without
 speaker-turn training never predicts one), `filename` (names the folded
 Document and provides extension fallback when magic sniffing is inconclusive),

@@ -812,6 +812,60 @@ void verify_queue_timeout(asr::Config config, asr::engine::ModelPool& pool,
     server->Shutdown();
 }
 
+// The model the suite loads is English-only. A request must not be able to
+// get a transcript out of it that claims another language or a translation
+// (see #36): what the model cannot do is INVALID_ARGUMENT before any media
+// is read, and a request that names no language is transcribed as English,
+// never "detected".
+void verify_english_only_model(const std::shared_ptr<grpc::Channel>& channel,
+                               const std::string& jfk) {
+    for (const char* unnamed : {"", "auto"}) {
+        asrv1::TranscribeOptions options = options_for("tiny.en");
+        options.set_language(unnamed);
+        StreamResult result = transcribe(channel, options, jfk);
+        require(result.status.ok(), std::string("language \"") + unnamed +
+                                        "\" transcribes: " + result.status.error_message());
+        require(result.complete.language() == "en",
+                "the trailer says English, got \"" + result.complete.language() + "\"");
+        require(result.complete.languages_size() == 1 && result.complete.languages(0) == "en",
+                "English is the only language seen");
+        require(!result.finals.empty(), "segments arrive");
+        for (const asrv1::Segment& segment : result.finals) {
+            require(segment.language() == "en",
+                    "every segment says English, got \"" + segment.language() + "\"");
+        }
+    }
+
+    asrv1::TranscribeOptions german = options_for("tiny.en");
+    german.set_language("de");
+    StreamResult result = transcribe(channel, german, jfk);
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "German on an English-only model is INVALID_ARGUMENT, got " +
+                std::to_string(result.status.error_code()) + " " +
+                result.status.error_message());
+    require(result.status.error_message().contains("tiny.en") &&
+                result.status.error_message().contains("English-only"),
+            "the status names the model and why: " + result.status.error_message());
+    require(result.finals.empty() && !result.got_complete,
+            "nothing is transcribed for a request the model cannot serve");
+
+    asrv1::TranscribeOptions translate = options_for("tiny.en");
+    translate.set_task(asrv1::TASK_TRANSLATE);
+    result = transcribe(channel, translate, jfk);
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "translation on an English-only model is INVALID_ARGUMENT, got " +
+                std::to_string(result.status.error_code()) + " " +
+                result.status.error_message());
+
+    asrv1::TranscribeOptions unknown = options_for("tiny.en");
+    unknown.set_language("xx");
+    result = transcribe(channel, unknown, jfk);
+    require(result.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                result.status.error_message().contains("xx"),
+            "a language whisper does not know is INVALID_ARGUMENT: " +
+                result.status.error_message());
+}
+
 void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel, asr::Config base_config,
                          asr::engine::ModelPool& pool) {
     StreamResult result =
@@ -1681,6 +1735,7 @@ int main() {
             verify_queue_timeout(config, pool, channel, hiss, jfk, metrics.port());
         }
         verify_error_matrix(channel, config, pool);
+        verify_english_only_model(channel, jfk);
         verify_byte_cap(config, pool);
         verify_service_info(channel);
         if (have_ffmpeg()) {

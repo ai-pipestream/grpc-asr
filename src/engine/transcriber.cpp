@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 #include "engine/window_cut.h"
@@ -219,10 +221,64 @@ std::optional<std::string> parse_decoding_options(
     return std::nullopt;
 }
 
+std::optional<std::string> resolve_language(bool multilingual, std::string_view model,
+                                            const std::string& language, bool translate,
+                                            std::string* resolved) {
+    resolved->clear();
+    // whisper takes the language as a C string: a NUL would cut it short
+    // and check a different language than the one sent.
+    if (language.find('\0') != std::string::npos) {
+        return "TranscribeOptions.language contains a NUL byte";
+    }
+    std::string wanted = language;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    const bool detect = wanted.empty() || wanted == "auto";
+    int id = -1;
+    if (!detect) {
+        // whisper_lang_id logs an unknown language itself; the reason
+        // returned here is what reaches the caller.
+        id = whisper_lang_id(wanted.c_str());
+        if (id < 0) {
+            return "TranscribeOptions.language '" + language +
+                   "' is not a language whisper knows (use an ISO 639-1 code such as \"en\")";
+        }
+    }
+    if (multilingual) {
+        if (!detect) {
+            *resolved = whisper_lang_str(id);
+        }
+        return std::nullopt;
+    }
+    const std::string name =
+        model.empty() ? std::string("the model") : "model '" + std::string(model) + "'";
+    if (translate) {
+        return name + " is English-only and cannot translate; TASK_TRANSLATE needs a "
+                      "multilingual model";
+    }
+    if (!detect && id != whisper_lang_id("en")) {
+        return name + " is English-only and cannot transcribe language '" + language +
+               "'; use a multilingual model";
+    }
+    // No detection: the vocabulary has no language tokens to detect with.
+    *resolved = "en";
+    return std::nullopt;
+}
+
 EngineResult Transcriber::run(whisper_context* ctx, whisper_state* state,
-                              const EngineOptions& options, const PcmRead& read,
+                              const EngineOptions& requested, const PcmRead& read,
                               const SegmentSink& sink, std::stop_token stop,
                               const PcmWait& wait_for_more) {
+    // The service checks this before it reads any media. It is checked
+    // again here, where the model is in hand, so no caller can get a
+    // transcript labelled with a language or a task the model did not do.
+    EngineOptions options = requested;
+    if (const auto problem =
+            resolve_language(whisper_is_multilingual(ctx) != 0, "", requested.language,
+                             requested.translate, &options.language)) {
+        throw std::invalid_argument(*problem);
+    }
     RunState run{.ctx = ctx, .options = &options, .sink = &sink, .stop = std::move(stop)};
 
     const whisper_sampling_strategy sampling =
