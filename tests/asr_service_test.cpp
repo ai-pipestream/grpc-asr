@@ -869,6 +869,67 @@ void verify_english_only_model(const std::shared_ptr<grpc::Channel>& channel,
                 result.status.error_message());
 }
 
+// #41 F10: a wav decodes to the end of its data chunk, and the upload can
+// still be going then (a trailing LIST chunk, a slow client). The Document
+// was folded at that moment with a binary hash of 0, which reads as a hash.
+// The fold now waits for the last byte, and the hash covers all of them.
+void verify_document_hash_waits_for_upload(const std::shared_ptr<grpc::Channel>& channel,
+                                           const std::string& jfk) {
+    std::string tail = "LIST";
+    const uint32_t tail_bytes = 4096;
+    for (int shift = 0; shift < 32; shift += 8) {
+        tail.push_back(static_cast<char>((tail_bytes >> shift) & 0xFF));
+    }
+    tail.append(tail_bytes, 'x');
+    const std::string wav = jfk + tail;
+
+    asrv1::TranscribeOptions options = options_for("tiny.en");
+    options.set_emit_document(true);
+    StreamResult whole = transcribe(channel, options, wav);
+    require(whole.status.ok() && whole.documents == 1,
+            "a wav with a trailing chunk transcribes: " + whole.status.error_message());
+    require(whole.document.origin().binary_hash() == content_hash(wav),
+            "the Document hash covers the trailing chunk too");
+
+    // Now the trailing chunk is held back until the audio is done.
+    StreamResult result;
+    auto stub = asrv1::AsrService::NewStub(channel);
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(60));
+    auto stream = stub->Transcribe(&context);
+    asrv1::TranscribeRequest request;
+    *request.mutable_options() = options;
+    stream->Write(request);
+    for (size_t offset = 0; offset < jfk.size(); offset += kChunk) {
+        request.Clear();
+        request.mutable_chunk()->set_data(jfk.substr(offset, std::min(kChunk, jfk.size() - offset)));
+        require(stream->Write(request), "the audio part uploads");
+    }
+    size_t events_seen = 0;
+    asrv1::TranscribeResponse response;
+    while (result.finals.size() < whole.finals.size() && stream->Read(&response)) {
+        consume_event(result, response, /*upload_done=*/false, events_seen++);
+    }
+    require(result.finals.size() == whole.finals.size(), "every final arrives before the tail");
+    require(result.documents == 0, "no Document before the audio is done");
+    // Nothing is left to decode. A server that does not wait for the rest
+    // of the upload folds what it has within this pause.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    request.Clear();
+    request.mutable_chunk()->set_data(tail);
+    stream->Write(request);
+    stream->WritesDone();
+    while (stream->Read(&response)) {
+        consume_event(result, response, /*upload_done=*/true, events_seen++);
+    }
+    result.status = stream->Finish();
+    require(result.status.ok(), "the held-back upload completes: " + result.status.error_message());
+    require(result.documents == 1 && result.got_complete, "one Document, then the trailer");
+    require(result.document.origin().binary_hash() == content_hash(wav),
+            "the Document hash covers every uploaded byte, got " +
+                std::to_string(result.document.origin().binary_hash()));
+}
+
 // The trailer's warning with this code, null when there is none. Fails when
 // a code appears twice: per-channel runs decode the same media once per
 // channel and must not repeat themselves.
@@ -1900,6 +1961,7 @@ int main() {
         verify_wav(channel, jfk);
         verify_streaming_during_upload(channel, jfk);
         verify_document(channel, jfk);
+        verify_document_hash_waits_for_upload(channel, jfk);
         verify_silence(channel);
         verify_per_channel_stereo(channel, config, jfk);
         verify_window_stall_and_clamping(config, pool, jfk);

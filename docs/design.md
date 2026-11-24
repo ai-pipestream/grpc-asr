@@ -193,7 +193,7 @@ and emits the Document immediately before the `TranscriptComplete` trailer.
 | keyframe | `PictureItem` plus `ImageRef{mimetype, size, uri: "keyframe:<timestamp_ms>"}`, a pointer at the typed event. PNG bytes are never embedded, so the Document stays one bounded message. Its `prov[0].time` is the true instant, a zero-length span |
 | language | `TextItemBase.meta.language` per segment; `body.meta.language` (`code` enum, `code_raw`, `created_by`) and `Document.source_meta.language` when the transcript has at most one language (left unset when `TranscriptComplete.languages` has two or more) |
 | MediaInfo / trailer | `Document.media{duration_ms, codec}` for the typed facts, `body.meta` `asr.*` custom fields for the rest |
-| source identity | `Document.name` and `DocumentOrigin{filename, mimetype, binary_hash}` from `TranscribeOptions.filename` (basename; a name derived from the sniffed container when absent), the sniffed family, and the incremental FNV-1a content hash of the upload |
+| source identity | `Document.name` and `DocumentOrigin{filename, mimetype, binary_hash}` from `TranscribeOptions.filename` (basename; a name derived from the sniffed container when absent), the sniffed family, and the incremental FNV-1a content hash of the whole upload: the fold waits for the last uploaded byte even when the decoder was done sooner (a wav ends at its data chunk whatever follows), so the hash is never a placeholder |
 | VTT | not produced here; the sink renders it from segment timestamps |
 
 Every item carries `CollectorSource{collector: "asr", model: <whisper model

@@ -4,6 +4,10 @@
 #include "service.h"
 #include "worker.h"
 namespace asr {
+// Counts what the streaming handlers report as unexpected failures in this
+// process's metrics, as grpc_asr_streaming_unexpected_failures_total{handler}.
+// The runtime installs it; it is a function of its own so a test can too.
+void count_streaming_failures_in_metrics();
 // Lifetime owner for the additional typed streaming interfaces.
 class StreamingRuntime {
  public:

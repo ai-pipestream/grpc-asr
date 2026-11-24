@@ -306,6 +306,12 @@ HTTP/1.1 listener serving Prometheus text exposition at `GET /metrics`:
   `outcome="ok"|"rejected"|"exec_failed"|"inactivity_killed"|"cancelled"`),
   `grpc_asr_decode_warnings_total{code}` (`decoder_errors`,
   `shorter_than_declared`: transcripts that ended OK with that warning),
+  `grpc_asr_streaming_unexpected_failures_total{handler}` (`pull`,
+  `ingest_processing`, `ingest_finalization`, `subscribe`, `speech_worker`: a
+  streaming handler answered `INTERNAL` with its fixed message because of an
+  exception it did not expect; the cause is one stderr line starting
+  `grpc-asr streaming:` with the handler and the stream id. Alert on any
+  increase),
   `grpc_asr_audio_seconds_total{model}`, `grpc_asr_keyframes_total`,
   `process_resident_memory_bytes`, `process_cpu_seconds_total`.
 

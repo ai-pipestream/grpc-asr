@@ -73,6 +73,14 @@ constexpr std::array<std::string_view, static_cast<size_t>(DecodeWarningKind::kC
         "shorter_than_declared",
 };
 
+// Handler label for grpc_asr_streaming_unexpected_failures_total{handler}:
+// a streaming handler answered INTERNAL with a fixed message because of an
+// exception it did not expect. In the order of media::FailureSite, which
+// streaming_runtime.cpp checks at compile time.
+inline constexpr std::array<std::string_view, 5> kStreamingFailureHandlerLabels = {
+    "pull", "ingest_processing", "ingest_finalization", "subscribe", "speech_worker",
+};
+
 // Ingest path label for grpc_asr_first_segment_seconds{model,path}.
 enum class FirstSegmentPath : size_t {
     kLive = 0,
@@ -138,6 +146,7 @@ void metrics_observe_realtime_factor(std::string_view model, std::string_view ba
 void metrics_record_stream_end(const StreamMetrics& stream);
 void metrics_record_tool_run(ToolKind tool, ToolOutcome outcome);
 void metrics_record_decode_warning(DecodeWarningKind kind);
+void metrics_record_streaming_failure(size_t handler_index);
 
 // Snapshot and Prometheus text exposition renderer.
 MetricsSummary metrics_summary();
