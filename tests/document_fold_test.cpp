@@ -194,12 +194,25 @@ void verify_fold() {
     require(meta.language().code_raw() == "en" && meta.language().created_by() == "asr",
             "raw code and producer kept alongside");
     require(document.source_meta().language() == "en", "document meta names the language too");
-    require(meta.custom_fields().at("asr.audio_codec").string_value() == "wav" &&
-                meta.custom_fields().at("asr.has_video").bool_value() &&
-                meta.custom_fields().at("asr.duration_ms").number_value() == 11000.0,
-            "media facts in body custom fields");
-    require(document.media().duration_ms() == 11000.0 && document.media().codec() == "wav",
-            "typed media meta carries the decoded duration and codec");
+    // Every media fact has a typed slot on Document.media (#40): none of
+    // them goes into the untyped custom_fields bag, under any key.
+    const docv1::MediaMeta& media = document.media();
+    require(media.codec() == "wav" && media.has_sample_rate_hz() &&
+                media.sample_rate_hz() == 16000 && media.has_channels() && media.channels() == 1,
+            "the audio stream's codec, rate and channels are typed media facts");
+    require(media.has_has_video() && media.has_video() && media.video_codec() == "h264",
+            "so are the video flag and the video codec");
+    require(media.has_declared_duration_ms() && media.declared_duration_ms() == 11000.0,
+            "the duration the container states has its own slot");
+    require(media.has_duration_ms() && media.duration_ms() == 11000.0,
+            "duration_ms is what the trailer says was decoded");
+    require(media.has_token_count() && media.token_count() == 20,
+            "the trailer's token count is typed too");
+    require(meta.custom_fields().empty(),
+            "no media fact is left in body custom fields, got " +
+                std::to_string(meta.custom_fields().size()) + " key(s)" +
+                (meta.custom_fields().empty() ? "" : ", first " +
+                                                         meta.custom_fields().begin()->first));
     require(document.media().speakers_size() == 0, "no speakers registered without diarization");
 }
 
@@ -229,23 +242,120 @@ void verify_unprobed_media_facts_are_left_out() {
     for (const asrv1::MediaProbeState unknown :
          {asrv1::MEDIA_PROBE_STATE_NOT_PROBED, asrv1::MEDIA_PROBE_STATE_UNSPECIFIED}) {
         const docv1::Document unprobed = fold_of(unknown);
-        const auto& fields = unprobed.body().meta().custom_fields();
-        for (const char* made_up : {"asr.sample_rate_hz", "asr.channels", "asr.has_video",
-                                    "asr.video_codec"}) {
-            require(!fields.contains(made_up),
-                    std::string(made_up) + " is not written for media that was not probed");
-        }
-        require(fields.at("asr.audio_codec").string_value() == "opus" &&
-                    unprobed.media().codec() == "opus",
-                "the sniffed codec is still a fact and still recorded");
+        const docv1::MediaMeta& media = unprobed.media();
+        require(!media.has_sample_rate_hz() && !media.has_channels() && !media.has_has_video() &&
+                    !media.has_video_codec(),
+                "stream facts are not written for media that was not probed");
+        require(media.codec() == "opus", "the sniffed codec is still a fact and still recorded");
+        require(!media.has_declared_duration_ms(),
+                "a container that stated no duration leaves the declared slot unset");
+        require(unprobed.body().meta().custom_fields().empty(),
+                "and nothing about the media is in body custom fields");
     }
 
     const docv1::Document probed = fold_of(asrv1::MEDIA_PROBE_STATE_PROBED);
-    const auto& fields = probed.body().meta().custom_fields();
-    require(fields.at("asr.sample_rate_hz").number_value() == 48000.0 &&
-                fields.at("asr.channels").number_value() == 2.0 &&
-                fields.contains("asr.has_video") && !fields.at("asr.has_video").bool_value(),
+    const docv1::MediaMeta& media = probed.media();
+    require(media.sample_rate_hz() == 48000 && media.channels() == 2 && media.has_has_video() &&
+                !media.has_video(),
             "probed media keeps its facts, a real false included");
+    require(!media.has_video_codec(), "audio-only media names no video codec");
+    require(probed.body().meta().custom_fields().empty(),
+            "probed media leaves nothing in body custom fields either");
+}
+
+// duration_ms is the decoded length and nothing else. The container's own
+// claim has declared_duration_ms, so a trailer that decoded nothing must
+// not leave the claim standing in the decoded slot. A token count of zero
+// beside transcript text is a count nobody took (a remote endpoint that
+// returned no token lists), and is left unset instead of written as 0.
+void verify_media_measurements_are_not_made_up() {
+    asrv1::TranscribeResponse trailer = complete_event();
+    trailer.mutable_complete()->set_duration_ms(0);
+    trailer.mutable_complete()->set_token_count(0);
+
+    asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+    fold.consume(media_info_event());
+    fold.consume(segment_event(/*final=*/true, 0, 0, 5000, " hello", -0.25F));
+    fold.consume(trailer);
+    const docv1::Document document = fold.take();
+    require(document.media().declared_duration_ms() == 11000.0,
+            "the declared duration is recorded as declared");
+    require(!document.media().has_duration_ms(),
+            "the declared duration does not stand in for a decoded one");
+    require(!document.media().has_token_count(),
+            "zero tokens beside transcript text is not a count");
+
+    asr::doc::AsrDocumentFold silent("tiny.en", "1.2.3");
+    silent.consume(media_info_event());
+    silent.consume(trailer);
+    const docv1::Document nothing_said = silent.take();
+    require(nothing_said.media().has_token_count() && nothing_said.media().token_count() == 0,
+            "a transcript with no text really has zero tokens");
+}
+
+// What TranscriptComplete.decode_warnings says about the media is also a
+// fact about the Document folded from it: a transcript with a hole in it
+// must not arrive downstream looking whole. Each warning becomes one typed
+// CollectorWarning attributed to this collector.
+void verify_decode_warnings_fold_into_document_warnings() {
+    asrv1::TranscribeResponse trailer = complete_event();
+    asrv1::DecodeWarning* errors = trailer.mutable_complete()->add_decode_warnings();
+    errors->set_code(asrv1::DECODE_WARNING_CODE_DECODER_ERRORS);
+    errors->set_error_count(3);
+    errors->set_message("[matroska,webm] Read error");
+    asrv1::DecodeWarning* cut = trailer.mutable_complete()->add_decode_warnings();
+    cut->set_code(asrv1::DECODE_WARNING_CODE_SHORTER_THAN_DECLARED);
+    cut->set_declared_duration_ms(22000);
+    cut->set_decoded_duration_ms(11000);
+    cut->set_message("decoded 11000 ms of audio where the media states 22000 ms");
+
+    asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+    fold.consume(media_info_event());
+    fold.consume(segment_event(/*final=*/true, 0, 0, 5000, " hello", -0.25F));
+    fold.consume(trailer);
+    const docv1::Document document = fold.take();
+    require(document.warnings_size() == 2,
+            "one Document warning per decode warning, got " +
+                std::to_string(document.warnings_size()));
+
+    const docv1::CollectorWarning& malformed = document.warnings(0);
+    require(malformed.code() == docv1::WARNING_CODE_SOURCE_STRUCTURE_MALFORMED,
+            "decoder errors are a source that breaks its own format");
+    require(malformed.has_count() && malformed.count() == 3,
+            "the entry stands for every error line the decoder printed");
+    require(malformed.message().find("[matroska,webm] Read error") != std::string::npos,
+            "the decoder's own first complaint stays in the words: " + malformed.message());
+    require(malformed.source().collector() == "asr" && malformed.source().model() == "tiny.en" &&
+                malformed.source().version() == "1.2.3",
+            "the warning names the collector that raised it");
+    require(!malformed.has_page_no() && !malformed.has_item_ref(),
+            "media has no page, and the warning is about no single item");
+
+    const docv1::CollectorWarning& incomplete = document.warnings(1);
+    require(incomplete.code() == docv1::WARNING_CODE_SOURCE_INPUT_INCOMPLETE,
+            "audio shorter than the media states is an incomplete source");
+    require(!incomplete.has_count(), "one finding, so no count");
+    require(incomplete.message() == cut->message(), "the service's own words are kept");
+    require(incomplete.source().collector() == "asr", "attributed to this collector as well");
+
+    // A code this build does not know still arrives, with its words and no
+    // typed meaning claimed for it.
+    asrv1::TranscribeResponse newer = complete_event();
+    asrv1::DecodeWarning* unknown = newer.mutable_complete()->add_decode_warnings();
+    unknown->set_code(static_cast<asrv1::DecodeWarningCode>(99));
+    unknown->set_message("something a later server learned to say");
+    asr::doc::AsrDocumentFold later("tiny.en", "1.2.3");
+    later.consume(newer);
+    const docv1::Document passed_on = later.take();
+    require(passed_on.warnings_size() == 1 &&
+                passed_on.warnings(0).code() == docv1::WARNING_CODE_UNSPECIFIED &&
+                passed_on.warnings(0).message() == "something a later server learned to say",
+            "an unknown decode warning keeps its words under WARNING_CODE_UNSPECIFIED");
+
+    asr::doc::AsrDocumentFold clean("tiny.en", "1.2.3");
+    clean.consume(media_info_event());
+    clean.consume(complete_event());
+    require(clean.take().warnings_size() == 0, "a clean decode folds to no warnings");
 }
 
 void verify_word_provenance() {
@@ -592,6 +702,8 @@ int main() {
     try {
         verify_fold();
         verify_unprobed_media_facts_are_left_out();
+        verify_media_measurements_are_not_made_up();
+        verify_decode_warnings_fold_into_document_warnings();
         verify_word_provenance();
         verify_word_provenance_can_be_turned_off();
         verify_speaker_registry();

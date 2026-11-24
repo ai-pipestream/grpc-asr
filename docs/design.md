@@ -49,8 +49,9 @@ Events, in order:
    `MEDIA_PROBE_STATE_PROBED` (a decoded audio header, or ffprobe). On the
    live pipe path and for a remote endpoint nothing reads the streams, so
    the state is `MEDIA_PROBE_STATE_NOT_PROBED`, those fields stay at their
-   zero values, and the folded Document leaves `asr.sample_rate_hz`,
-   `asr.channels` and `asr.has_video` out rather than recording zeros.
+   zero values, and the folded Document leaves `Document.media`'s
+   `sample_rate_hz`, `channels` and `has_video` unset rather than
+   recording zeros.
 2. `PartialSegment` / `FinalSegment`: index, start_ms, end_ms, text,
    optional words, avg logprob, `no_speech_prob`, `suppressed`, `channel`,
    `speaker_id`, `language`
@@ -192,7 +193,8 @@ and emits the Document immediately before the `TranscriptComplete` trailer.
 | segment confidence | `CollectorSource.confidence` (`exp(avg_logprob)`, a rescaled decoder score) plus `CollectorSource.raw_score` carrying the avg logprob verbatim, with `raw_score_kind = "avg_logprob"` naming it. A segment that scored no token claims none of the three and no sentinel is written for the absence; a score of 0 is a value, not a gap |
 | keyframe | `PictureItem` plus `ImageRef{mimetype, size, uri: "keyframe:<timestamp_ms>"}`, a pointer at the typed event. PNG bytes are never embedded, so the Document stays one bounded message. Its `prov[0].time` is the true instant, a zero-length span |
 | language | `TextItemBase.meta.language` per segment; `body.meta.language` (`code` enum, `code_raw`, `created_by`) and `Document.source_meta.language` when the transcript has at most one language (left unset when `TranscriptComplete.languages` has two or more) |
-| MediaInfo / trailer | `Document.media{duration_ms, codec}` for the typed facts, `body.meta` `asr.*` custom fields for the rest |
+| MediaInfo / trailer | typed fields of `Document.media`, each set only when it is known: `codec` (audio), `sample_rate_hz`, `channels`, `has_video`, `video_codec` (the four stream facts only when `probe_state` is `PROBED`), `declared_duration_ms` (what the container states), `duration_ms` (what was decoded, from the trailer) and `token_count` (left unset when the trailer counts zero tokens beside transcript text, which is a count nobody took). Nothing about the media is written to `body.meta.custom_fields` |
+| decode warnings | one `Document.warnings` entry per `TranscriptComplete.decode_warnings` entry, with `source.collector = "asr"`: `DECODER_ERRORS` as `WARNING_CODE_SOURCE_STRUCTURE_MALFORMED` (`count` = error lines, message = the decoder's first complaint), `SHORTER_THAN_DECLARED` as `WARNING_CODE_SOURCE_INPUT_INCOMPLETE`; a code this build does not know keeps its words under `WARNING_CODE_UNSPECIFIED` |
 | source identity | `Document.name` and `DocumentOrigin{filename, mimetype, binary_hash}` from `TranscribeOptions.filename` (basename; a name derived from the sniffed container when absent), the sniffed family, and the incremental FNV-1a content hash of the whole upload: the fold waits for the last uploaded byte even when the decoder was done sooner (a wav ends at its data chunk whatever follows), so the hash is never a placeholder |
 | VTT | not produced here; the sink renders it from segment timestamps |
 
