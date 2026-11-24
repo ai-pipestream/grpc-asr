@@ -336,6 +336,11 @@ void verify_decode_warnings_fold_into_document_warnings() {
             "audio shorter than the media states is an incomplete source");
     require(!incomplete.has_count(), "one finding, so no count");
     require(incomplete.message() == cut->message(), "the service's own words are kept");
+    require(incomplete.has_duration_kept_ms() && incomplete.duration_kept_ms() == 11000 &&
+                incomplete.has_duration_total_ms() && incomplete.duration_total_ms() == 22000,
+            "the cut is typed: what was decoded and what the media states");
+    require(!malformed.has_duration_kept_ms() && !malformed.has_duration_total_ms(),
+            "decoder errors measure no cut, so they state no durations");
     require(incomplete.source().collector() == "asr", "attributed to this collector as well");
 
     // A code this build does not know still arrives, with its words and no
@@ -382,6 +387,7 @@ void verify_word_provenance() {
     const int32_t ends[] = {4, 9, 12, 15};
     const std::string words[] = {"Café", "über", "sí", "sí"};
     const double word_starts[] = {1000.0, 1500.0, 2200.0, 3000.0};
+    const float probabilities[] = {0.91F, 0.72F, 0.63F, 0.55F};
     for (int i = 0; i < 4; i++) {
         const docv1::ProvenanceItem& prov = base.prov(i + 1);
         require(prov.has_time() && prov.time().start_ms() == word_starts[i],
@@ -392,7 +398,29 @@ void verify_word_provenance() {
                 "word " + words[i] + " charspan in code points");
         require(code_point_slice(trimmed, prov.charspan()) == words[i],
                 "charspan slices back to " + words[i]);
+        require(prov.has_confidence() &&
+                    std::abs(prov.confidence() - static_cast<double>(probabilities[i])) < 1e-6,
+                "word " + words[i] + " carries the recognizer's probability for it");
     }
+    require(!base.prov(0).has_confidence(),
+            "the segment entry states no per-word confidence: its score is the item's");
+}
+
+// Word.probability is 0 when the engine gave none (a remote endpoint that
+// times its words without scoring them). That is no measurement, so the
+// Document states no confidence for the word rather than a zero.
+void verify_word_without_probability_states_no_confidence() {
+    asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+    asrv1::TranscribeResponse event =
+        segment_event(/*final=*/true, 0, 0, 2000, " one two", -0.2F);
+    add_word(event, " one", 0, 900, 0.0F);
+    add_word(event, " two", 900, 2000, 0.8F);
+    fold.consume(event);
+    const docv1::TextItemBase& base = fold.document().texts(0).text().base();
+    require(base.prov_size() == 3, "one segment entry plus one per word");
+    require(!base.prov(1).has_confidence(), "an unscored word has no confidence, not zero");
+    require(base.prov(2).has_confidence() && std::abs(base.prov(2).confidence() - 0.8) < 1e-6,
+            "a scored word beside it keeps its own");
 }
 
 void verify_word_provenance_can_be_turned_off() {
@@ -705,6 +733,7 @@ int main() {
         verify_media_measurements_are_not_made_up();
         verify_decode_warnings_fold_into_document_warnings();
         verify_word_provenance();
+        verify_word_without_probability_states_no_confidence();
         verify_word_provenance_can_be_turned_off();
         verify_speaker_registry();
         verify_language_slots();

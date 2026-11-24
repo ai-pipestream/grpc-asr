@@ -175,14 +175,16 @@ transcript.
 - The trailer's `decode_warnings` are also `Document.warnings`, from
   collector `asr`: decoder errors as
   `WARNING_CODE_SOURCE_STRUCTURE_MALFORMED` with a `count`, audio shorter
-  than the media states as `WARNING_CODE_SOURCE_INPUT_INCOMPLETE`. A
-  Document folded from cut or damaged media says so itself.
+  than the media states as `WARNING_CODE_SOURCE_INPUT_INCOMPLETE` with
+  `duration_kept_ms` and `duration_total_ms`. A Document folded from cut
+  or damaged media says so itself.
 - Keyframes become picture items whose `ImageRef.uri` is
   `keyframe:<timestamp_ms>`, a pointer back at the typed event rather than
   embedded PNG bytes, so the Document stays one bounded message; the frame's
   true instant is its own zero-length time span.
 
-The typed event stream remains the lossless wire: per-word probabilities,
+A word's probability is its provenance entry's `confidence`, unset when
+the engine gave none. The typed event stream remains the lossless wire:
 segment indexes, suppressed hallucinations, and the trailer's counts stay
 there. The document schema is vendored verbatim from gRParse
 (`proto/ai/pipestream/document/v1/document.proto`); do not edit it here.

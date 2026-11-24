@@ -207,6 +207,12 @@ void AsrDocumentFold::add_word_provenance(docv1::TextItemBase* base, const asrv1
     for (const asrv1::Word& word : segment.words()) {
         docv1::ProvenanceItem* prov = base->add_prov();
         time_span(prov, word.start_ms(), word.end_ms(), segment.speaker_id());
+        // Word.probability is 0 when the engine gave none; that is no
+        // measurement, so no confidence is stated for the word.
+        if (word.probability() > 0.0F) {
+            prov->set_confidence(
+                std::clamp(static_cast<double>(word.probability()), 0.0, 1.0));
+        }
         const std::string needle = trimmed(word.text());
         if (needle.empty()) {
             continue;
@@ -401,6 +407,13 @@ void AsrDocumentFold::add_decode_warning(const asrv1::DecodeWarning& warning) {
         case asrv1::DECODE_WARNING_CODE_SHORTER_THAN_DECLARED:
             out->set_code(docv1::WARNING_CODE_SOURCE_INPUT_INCOMPLETE);
             out->set_message(warning.message());
+            // The cut as numbers: what was decoded and transcribed, and
+            // what the media states. This code is only raised when the
+            // media states a length, so the total is known.
+            out->set_duration_kept_ms(warning.decoded_duration_ms());
+            if (warning.declared_duration_ms() != 0) {
+                out->set_duration_total_ms(warning.declared_duration_ms());
+            }
             return;
         default:
             // A code a later server learned: passed on with its words and
