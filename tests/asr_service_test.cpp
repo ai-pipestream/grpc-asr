@@ -1025,6 +1025,9 @@ void verify_decode_warnings(const std::shared_ptr<grpc::Channel>& channel, const
         require(result.document.media().declared_duration_ms() >
                     result.document.media().duration_ms() + 1000.0,
                 "and its typed durations show the gap: declared against decoded");
+        require(incomplete.has_duration_kept_ms() && incomplete.has_duration_total_ms() &&
+                    incomplete.duration_total_ms() > incomplete.duration_kept_ms() + 1000,
+                "the warning itself states the cut: kept against total, in milliseconds");
     }
     {
         // Per channel: both channels read the same cut file, one warning.

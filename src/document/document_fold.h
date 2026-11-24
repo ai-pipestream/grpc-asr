@@ -59,8 +59,12 @@ struct FoldOptions {
 // warnings become Document.warnings, attributed to this collector, so a
 // Document folded from cut or damaged media says so itself.
 //
-// What still stays on the typed stream: per-word probabilities (the
-// schema has no per-word confidence slot), the segment index, and the
+// A word's probability is its provenance entry's confidence, when the
+// engine gave one (Word.probability is 0 when it did not, and then no
+// confidence is stated). A warning about audio shorter than the media
+// states carries the cut as duration_kept_ms and duration_total_ms.
+//
+// What still stays on the typed stream: the segment index, and the
 // trailer's segment and keyframe counts.
 class AsrDocumentFold {
   public:
