@@ -153,10 +153,22 @@ Validation and endpoint authorization run before any media byte is decoded:
   within one poll interval (`CANCELLED`). Request headers (such as
   `Authorization`) are never logged or echoed in error messages. Upstream
   responses above 16 MiB fail `RESOURCE_EXHAUSTED`, timeouts fail
-  `DEADLINE_EXCEEDED`, HTTP 4xx payloads naming an invalid request field fail
-  `INVALID_ARGUMENT`, and other non-2xx or transport errors fail `UNAVAILABLE`.
+  `DEADLINE_EXCEEDED`, HTTP 400, 404, 413, 415 and 422 payloads naming an
+  invalid request field fail `INVALID_ARGUMENT`, and other non-2xx (a 401, 403
+  or 429 whatever field its body mentions) or transport errors fail
+  `UNAVAILABLE`.
   `verbose_json` segments and words map onto `FinalSegment` and
   `TranscriptComplete`, feeding `AsrDocumentFold` identically to local Whisper.
+- **A 2xx is a transcript only when it has the shape of one.** The reply must
+  be a JSON object with `segments` (an array) or `text` (a string); every
+  segment must be an object with a numeric `start` and `end` and its `text`;
+  every entry of a `words` array must be an object with its text and a numeric
+  `start` and `end`. Anything else (an error object sent with 200, a segment
+  without times) fails `UNAVAILABLE` "malformed response" naming the position
+  and the key, never the reply's own text, and no segment of it is emitted: a
+  missing time is never read as 0 ms and no entry is skipped. `null` counts as
+  absent. Text with no segment to carry it (`response_format=json`, or an
+  empty `segments` beside it) becomes one segment spanning the media.
 
 ## 4. Mapping to Document (implemented in-repo)
 
