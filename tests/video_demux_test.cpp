@@ -208,6 +208,102 @@ void verify_decode_report() {
     }
 }
 
+// A stand-in ffmpeg that writes one second of PCM, says `stderr_text` and
+// exits 0: what ffmpeg prints is then exactly what the test chose.
+asr::media::AudioDecodeReport report_of_stderr(const std::string& stderr_text) {
+    std::string said = "/tmp/grpc-asr-said-XXXXXX";
+    const int said_fd = mkstemp(said.data());
+    require(said_fd >= 0, "temp stderr text path");
+    require(::write(said_fd, stderr_text.data(), stderr_text.size()) ==
+                static_cast<ssize_t>(stderr_text.size()),
+            "stderr text written");
+    ::close(said_fd);
+    std::string tool = "/tmp/grpc-asr-talking-tool-XXXXXX";
+    const int tool_fd = mkstemp(tool.data());
+    require(tool_fd >= 0, "temp tool path");
+    const std::string script =
+        "#!/bin/sh\nhead -c 64000 /dev/zero\ncat " + said + " >&2\nexit 0\n";
+    require(::write(tool_fd, script.data(), script.size()) ==
+                static_cast<ssize_t>(script.size()),
+            "tool script written");
+    ::close(tool_fd);
+    require(::chmod(tool.c_str(), 0700) == 0, "tool script executable");
+
+    const std::string media = "not read by the stand-in";
+    VideoDemux demux(reinterpret_cast<const uint8_t*>(media.data()), media.size(), tool,
+                     "ffprobe", std::chrono::seconds(10));
+    demux.open_audio();
+    std::vector<float> pcm(16000);
+    size_t total = 0;
+    while (true) {
+        const size_t got = demux.read_audio(pcm.data(), pcm.size());
+        if (got == 0) {
+            break;
+        }
+        total += got;
+    }
+    const asr::media::AudioDecodeReport report = demux.close_audio();
+    ::unlink(tool.c_str());
+    ::unlink(said.c_str());
+    require(total == 16000, "the stand-in's second of PCM was read whole");
+    return report;
+}
+
+// The raw PCM muxer writes no timestamps, so when libavformat's timestamp
+// check complains on its behalf the packet is written all the same: every
+// sample is there. An AMR file read by an ffmpeg built without the AMR
+// parser gets one such line per packet, and so does any recording whose
+// clock restarts. Those lines say nothing about the audio, and counting
+// them reported whole media as damaged.
+void verify_output_timestamp_notes_are_not_decode_errors() {
+    const std::string note_a =
+        "[f32le @ 0x5618e67f5e00] Application provided invalid, non monotonically "
+        "increasing dts to muxer in stream 0: 9888 >= 288\n";
+    const std::string note_b =
+        "[f32le @ 0x5618e67f5e00] Application provided invalid, non monotonically "
+        "increasing dts to muxer in stream 0: 9888 >= 608\n";
+    const std::string note_c = "[f32le @ 0x5618e67f5e00] pts (288) < dts (608) in stream 0\n";
+    const std::string real =
+        "[opus @ 0x55d0c1e2f940] Error parsing the packet header.\n";
+    {
+        const asr::media::AudioDecodeReport report = report_of_stderr(note_a + note_b + note_c);
+        require(report.error_lines == 0 && report.first_error.empty(),
+                "timestamp notes from the raw PCM muxer are not decode errors, got " +
+                    std::to_string(report.error_lines) + " line(s): " + report.first_error);
+    }
+    {
+        // A real complaint among them still counts, once, and it is the
+        // one kept: not the note that happened to be printed first.
+        const asr::media::AudioDecodeReport report =
+            report_of_stderr(note_a + real + note_b + real);
+        require(report.error_lines == 2,
+                "decoder errors between the notes are counted, got " +
+                    std::to_string(report.error_lines));
+        require(report.first_error == "[opus] Error parsing the packet header.",
+                "the first error kept is the decoder's, got: " + report.first_error);
+    }
+    {
+        // The same words from anything but the raw PCM muxer are not this
+        // case: a muxer that does write timestamps drops the packet.
+        const asr::media::AudioDecodeReport report = report_of_stderr(
+            "[matroska @ 0x1] Application provided invalid, non monotonically increasing "
+            "dts to muxer in stream 0: 9888 >= 288\n");
+        require(report.error_lines == 1,
+                "only the raw PCM muxer's timestamp notes are set aside");
+    }
+    {
+        // A last line with no newline is still a line, and a long first
+        // line is still cut at the bound.
+        const asr::media::AudioDecodeReport report =
+            report_of_stderr("[aac @ 0x2] " + std::string(2000, 'x'));
+        require(report.error_lines == 1 && report.first_error.size() == 512 &&
+                    report.first_error.starts_with("[aac] xxx"),
+                "an unterminated long line counts once and is bounded, got " +
+                    std::to_string(report.error_lines) + " line(s), " +
+                    std::to_string(report.first_error.size()) + " bytes");
+    }
+}
+
 // No ffmpeg child may outlive the call that started it: once every child
 // was reaped, waitpid has nobody left to report.
 bool no_children_left() {
@@ -759,6 +855,7 @@ int main() {
         verify_keyframes_stop(media);
         verify_audio_cancel(media);
         verify_decode_report();
+        verify_output_timestamp_notes_are_not_decode_errors();
         verify_stop_reaches_a_silent_child(media);
         verify_stop_before_start(media);
         verify_stop_mid_audio(media);
