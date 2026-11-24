@@ -869,6 +869,136 @@ void verify_english_only_model(const std::shared_ptr<grpc::Channel>& channel,
                 result.status.error_message());
 }
 
+// The trailer's warning with this code, null when there is none. Fails when
+// a code appears twice: per-channel runs decode the same media once per
+// channel and must not repeat themselves.
+const asrv1::DecodeWarning* warning_of(const StreamResult& result, asrv1::DecodeWarningCode code,
+                                       const std::string& label) {
+    const asrv1::DecodeWarning* found = nullptr;
+    for (const asrv1::DecodeWarning& warning : result.complete.decode_warnings()) {
+        require(warning.code() != asrv1::DECODE_WARNING_CODE_UNSPECIFIED,
+                label + ": every decode warning carries a code");
+        if (warning.code() == code) {
+            require(found == nullptr, label + ": one decode warning per code");
+            found = &warning;
+        }
+    }
+    return found;
+}
+
+// #38: media cut short or corrupt in the middle used to come back as a
+// shorter transcript with OK and nothing else. The readable part is still
+// transcribed, and the trailer now says what was lost, in typed fields.
+void verify_decode_warnings(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk,
+                            const char* jfk_path) {
+    const auto shorter = asrv1::DECODE_WARNING_CODE_SHORTER_THAN_DECLARED;
+    const auto errors = asrv1::DECODE_WARNING_CODE_DECODER_ERRORS;
+    auto require_shorter = [&](const StreamResult& result, const std::string& label,
+                               uint64_t declared_low, uint64_t declared_high) {
+        require(result.status.ok(), label + " still transcribes: " + result.status.error_message());
+        require(result.got_complete, label + " ends with a trailer");
+        const asrv1::DecodeWarning* warning = warning_of(result, shorter, label);
+        require(warning != nullptr, label + " reports SHORTER_THAN_DECLARED");
+        require(warning->declared_duration_ms() > declared_low &&
+                    warning->declared_duration_ms() < declared_high,
+                label + " states what the media declared, got " +
+                    std::to_string(warning->declared_duration_ms()));
+        require(warning->decoded_duration_ms() == result.complete.duration_ms(),
+                label + " states what was decoded, got " +
+                    std::to_string(warning->decoded_duration_ms()) + " against a trailer of " +
+                    std::to_string(result.complete.duration_ms()));
+        require(warning->decoded_duration_ms() + 1000 < warning->declared_duration_ms(),
+                label + " decoded materially less than declared");
+        require(!warning->message().empty(), label + " explains itself");
+        require(warning->error_count() == 0, label + " counts no decoder errors in this warning");
+    };
+
+    {
+        // The clean fixture: nothing to report.
+        StreamResult result = transcribe(channel, options_for("tiny.en"), jfk);
+        require(result.status.ok() && result.complete.decode_warnings_size() == 0,
+                "a clean wav reports no decode warnings, got " +
+                    std::to_string(result.complete.decode_warnings_size()));
+    }
+    {
+        // The 11 s wav with its second half missing. The header still says
+        // 11 s; whether the upload finished before the decoder opened used
+        // to decide whether anyone could tell.
+        StreamResult result =
+            transcribe(channel, options_for("tiny.en"), jfk.substr(0, jfk.size() / 2));
+        require_shorter(result, "a cut wav", 10000, 12000);
+        require(warning_of(result, errors, "a cut wav") == nullptr,
+                "a cut wav has no decoder errors to report");
+        require(!result.finals.empty(), "the readable half of a cut wav is transcribed");
+    }
+    {
+        // Per channel: both channels read the same cut file, one warning.
+        const std::string stereo = make_stereo_jfk_both_wav(jfk);
+        asrv1::TranscribeOptions options = options_for("tiny.en");
+        options.set_channel_mode(asrv1::CHANNEL_MODE_PER_CHANNEL);
+        StreamResult result = transcribe(channel, options, stereo.substr(0, stereo.size() / 2));
+        require_shorter(result, "a cut stereo wav per channel", 10000, 12000);
+    }
+    if (jfk_path == nullptr) {
+        return;
+    }
+    const std::string source = jfk_path;
+    {
+        // flac states its length in its first block and decodes in process.
+        const std::string flac = generate_media("-i " + source + " -c:a flac", ".flac");
+        StreamResult clean = transcribe(channel, options_for("tiny.en"), flac);
+        require(clean.status.ok() && clean.complete.decode_warnings_size() == 0,
+                "a clean flac reports no decode warnings: " + clean.status.error_message());
+        StreamResult result =
+            transcribe(channel, options_for("tiny.en"), flac.substr(0, flac.size() / 2));
+        require_shorter(result, "a cut flac", 10000, 12000);
+    }
+    const std::string webm = generate_media("-i " + source + " -c:a libopus", ".webm");
+    {
+        // Through the live pipe: ffmpeg says the file ended early and exits 0.
+        StreamResult result =
+            transcribe(channel, options_for("tiny.en"), webm.substr(0, webm.size() * 6 / 10));
+        require(result.status.ok(),
+                "a cut webm still transcribes: " + result.status.error_message());
+        const asrv1::DecodeWarning* warning = warning_of(result, errors, "a cut webm");
+        require(warning != nullptr, "a cut webm reports DECODER_ERRORS");
+        require(warning->error_count() >= 1, "a cut webm counts ffmpeg's error lines");
+        require(!warning->message().empty() &&
+                    warning->message().find(" @ 0x") == std::string::npos,
+                "a cut webm carries ffmpeg's first error line: " + warning->message());
+        require(warning->declared_duration_ms() == 0 && warning->decoded_duration_ms() == 0,
+                "DECODER_ERRORS carries no durations");
+        require(!result.finals.empty(), "the readable part of a cut webm is transcribed");
+    }
+    {
+        // Garbage over a fifth of the file, mid-stream.
+        std::string corrupt = webm;
+        for (size_t i = corrupt.size() / 2; i < corrupt.size() / 2 + corrupt.size() / 5; ++i) {
+            corrupt[i] = static_cast<char>(0xA5 ^ (i * 31));
+        }
+        StreamResult result = transcribe(channel, options_for("tiny.en"), corrupt);
+        require(result.status.ok(),
+                "a webm with a corrupt middle still transcribes: " + result.status.error_message());
+        const asrv1::DecodeWarning* warning = warning_of(result, errors, "a corrupt webm");
+        require(warning != nullptr && warning->error_count() >= 1,
+                "a webm with a corrupt middle reports DECODER_ERRORS");
+    }
+    {
+        // A fast-start mp4 with its tail cut, probed (the per-channel path):
+        // ffmpeg complains and the audio stream's stated 11 s is not met, so
+        // both warnings are there, once each though two channels decoded.
+        const std::string mp4 = generate_media(
+            "-i " + source + " -ac 2 -c:a aac -movflags +faststart", ".mp4");
+        asrv1::TranscribeOptions options = options_for("tiny.en");
+        options.set_channel_mode(asrv1::CHANNEL_MODE_PER_CHANNEL);
+        StreamResult result = transcribe(channel, options, mp4.substr(0, mp4.size() * 6 / 10));
+        require_shorter(result, "a cut mp4", 10000, 12000);
+        const asrv1::DecodeWarning* warning = warning_of(result, errors, "a cut mp4");
+        require(warning != nullptr && warning->error_count() >= 1,
+                "a cut mp4 reports DECODER_ERRORS too");
+    }
+}
+
 void verify_error_matrix(const std::shared_ptr<grpc::Channel>& channel, asr::Config base_config,
                          asr::engine::ModelPool& pool) {
     StreamResult result =
@@ -1390,6 +1520,8 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
         require(res.status.ok(),
                 std::string(c.label) + " live pipe stream completed OK: " +
                     res.status.error_message());
+        require(res.complete.decode_warnings_size() == 0,
+                std::string(c.label) + " is whole and reports no decode warnings");
         require(res.media_info.audio_codec() == c.expected_codec,
                 std::string(c.label) + " MediaInfo.audio_codec expected " + c.expected_codec +
                     ", got '" + res.media_info.audio_codec() + "'");
@@ -1420,6 +1552,8 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
     StreamResult trailing_res = transcribe(channel, options_for("tiny.en"), trailing_mp4);
     require(trailing_res.status.ok(),
             "trailing-moov mp4 transcribes OK: " + trailing_res.status.error_message());
+    require(trailing_res.complete.decode_warnings_size() == 0,
+            "a whole probed mp4 decodes what its audio track states: no decode warnings");
     require(trailing_res.media_info.audio_codec() == "aac",
             "trailing-moov mp4 MediaInfo.audio_codec matches fast-start ('aac')");
     require(trailing_res.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_PROBED &&
@@ -1490,6 +1624,13 @@ void verify_new_container_families(const std::shared_ptr<grpc::Channel>& channel
                 std::string(c.label) + " transcribes OK: " + res.status.error_message());
         require(res.media_info.container() == c.expected_container,
                 std::string(c.label) + " reports expected MediaInfo.container");
+        // Whole files of every family: a duration ffprobe measured or
+        // estimated must never be held against the decode (#38).
+        require(res.complete.decode_warnings_size() == 0,
+                std::string(c.label) + " is whole and reports no decode warnings, got: " +
+                    (res.complete.decode_warnings_size() == 0
+                         ? std::string()
+                         : res.complete.decode_warnings(0).message()));
         require(lower(final_text(res)).find("country") != std::string::npos,
                 std::string(c.label) + " transcript contains 'country', got: " +
                     final_text(res));
@@ -1599,6 +1740,10 @@ void verify_prometheus_metrics(uint16_t metrics_port) {
     expect_ge("grpc_asr_windows_total", 1.0);
     expect_ge("grpc_asr_audio_seconds_total{model=\"tiny.en\"}", 1.0);
     expect_ge("grpc_asr_warmup_seconds", 0.0);
+    // The cut wav and the cut stereo wav of verify_decode_warnings; the
+    // ffmpeg cases only run where ffmpeg is installed.
+    expect_ge("grpc_asr_decode_warnings_total{code=\"shorter_than_declared\"}", 2.0);
+    expect_ge("grpc_asr_decode_warnings_total{code=\"decoder_errors\"}", 0.0);
 }
 
 std::string run_server_until_listening(const std::string& binary, const std::string& models_dir,
@@ -1772,6 +1917,7 @@ int main() {
         }
         verify_error_matrix(channel, config, pool);
         verify_english_only_model(channel, jfk);
+        verify_decode_warnings(channel, jfk, have_ffmpeg() ? sample : nullptr);
         verify_byte_cap(config, pool);
         verify_service_info(channel);
         if (have_ffmpeg()) {

@@ -59,6 +59,20 @@ constexpr std::array<std::string_view, static_cast<size_t>(ToolOutcome::kCount)>
         "ok", "rejected", "exec_failed", "inactivity_killed", "cancelled",
 };
 
+// Code label for grpc_asr_decode_warnings_total{code}: a transcript that
+// ended OK with a DecodeWarning of that code on its trailer.
+enum class DecodeWarningKind : size_t {
+    kDecoderErrors = 0,
+    kShorterThanDeclared,
+    kCount,
+};
+
+constexpr std::array<std::string_view, static_cast<size_t>(DecodeWarningKind::kCount)>
+    kDecodeWarningKindLabels = {
+        "decoder_errors",
+        "shorter_than_declared",
+};
+
 // Ingest path label for grpc_asr_first_segment_seconds{model,path}.
 enum class FirstSegmentPath : size_t {
     kLive = 0,
@@ -123,6 +137,7 @@ void metrics_observe_realtime_factor(std::string_view model, std::string_view ba
                                      double audio_seconds_per_wall_second);
 void metrics_record_stream_end(const StreamMetrics& stream);
 void metrics_record_tool_run(ToolKind tool, ToolOutcome outcome);
+void metrics_record_decode_warning(DecodeWarningKind kind);
 
 // Snapshot and Prometheus text exposition renderer.
 MetricsSummary metrics_summary();

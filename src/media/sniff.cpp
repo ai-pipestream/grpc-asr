@@ -62,6 +62,17 @@ bool decodes_in_process(MediaFamily family) {
     }
 }
 
+bool states_audio_duration(MediaFamily family) {
+    switch (family) {
+        case MediaFamily::kWav:
+        case MediaFamily::kFlac:
+        case MediaFamily::kMp4:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool demuxes_with_ffmpeg(MediaFamily family) {
     switch (family) {
         case MediaFamily::kOgg:

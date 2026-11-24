@@ -592,6 +592,49 @@ message TranscriptComplete {
   // Every distinct language seen across the final segments, in first
   // appearance order; `language` stays the first one.
   repeated string languages = 8;
+  // What the decoder met that did not stop the transcript but means it
+  // may not cover the whole recording: errors the decoder skipped over,
+  // or less audio than the media says it holds. Empty when the media
+  // decoded cleanly from end to end. At most one entry per code. A
+  // stream cut at a clean frame boundary in a container that states no
+  // length of its own (ogg, mpeg-ts, mpeg-ps, mp3) leaves no trace and
+  // is not reported.
+  repeated DecodeWarning decode_warnings = 9;
+}
+
+// Why a transcript that ended with OK may be missing part of the
+// recording.
+enum DecodeWarningCode {
+  // Unset. Never sent.
+  DECODE_WARNING_CODE_UNSPECIFIED = 0;
+  // The decoder reported errors in the media and carried on: typically
+  // corrupt packets it skipped, or a file that ended inside a frame. The
+  // audio around each error may be missing from the transcript.
+  DECODE_WARNING_CODE_DECODER_ERRORS = 1;
+  // The media states how much audio it holds and less than that was
+  // decoded: the usual sign of a file cut short. Checked for wav, flac
+  // and mp4/mov, whose headers state the length; other containers have
+  // theirs measured from the bytes present and cannot show it.
+  DECODE_WARNING_CODE_SHORTER_THAN_DECLARED = 2;
+}
+
+// One reason the transcript may be incomplete.
+message DecodeWarning {
+  // What kind of loss this is.
+  DecodeWarningCode code = 1;
+  // Detail for a person reading logs. For DECODER_ERRORS the first error
+  // line the decoder printed. Not for parsing: the code and the numbers
+  // below carry the facts.
+  string message = 2;
+  // DECODER_ERRORS: how many error lines the decoder printed. Zero for
+  // other codes.
+  uint32 error_count = 3;
+  // SHORTER_THAN_DECLARED: the audio length the media states, in
+  // milliseconds. Zero for other codes.
+  uint64 declared_duration_ms = 4;
+  // SHORTER_THAN_DECLARED: the audio length that was decoded and
+  // transcribed, in milliseconds. Zero for other codes.
+  uint64 decoded_duration_ms = 5;
 }
 
 // Request for GetServiceInfo. Empty by design.

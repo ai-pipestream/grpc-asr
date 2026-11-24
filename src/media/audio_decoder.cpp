@@ -59,19 +59,19 @@ ma_result stream_seek(ma_decoder* decoder, ma_int64 offset, ma_seek_origin origi
                 static_cast<int64_t>(cursor.position) + offset);
             return MA_SUCCESS;
         case ma_seek_origin_end:
-            // Only meaningful once the total size is known. While the
-            // upload is still in flight, FAIL the seek instead of waiting:
-            // dr_wav only end-seeks to clamp a lying data-chunk size
-            // against the real file size and skips the clamp gracefully
-            // when the seek fails — whereas blocking here deadlocks the
-            // live path (server waits for the tail, client waits for a
-            // segment).
-            if (!cursor.stream->is_complete()) {
-                return MA_ERROR;
-            }
-            cursor.position = static_cast<uint64_t>(
-                static_cast<int64_t>(cursor.stream->size()) + offset);
-            return MA_SUCCESS;
+            // Always refused. The decoders seek to the end only to ask
+            // where that is, and ma_decoder has no tell callback to answer
+            // with, so a seek that succeeds buys nothing: dr_wav and
+            // dr_mp3 both carry on without the file size. It does cost
+            // something: dr_wav counts a data chunk of "unknown" size
+            // (0xFFFFFFFF, what a streaming writer leaves) by reading
+            // from where the cursor is, and after a successful end seek
+            // that is the end, so a fully uploaded streamed wav decoded
+            // to no audio at all and still ended OK. Refusing here is
+            // also what an upload still in flight always did (waiting
+            // for its tail would deadlock the live path), so both now
+            // decode the same way.
+            return MA_ERROR;
         default:
             return MA_ERROR;
     }
@@ -131,12 +131,19 @@ AudioDecoder::AudioDecoder(ByteStream& stream, bool header_declares_duration,
 
     // Asking for the length of an mp3 means scanning every frame, which
     // would block the live path until the upload ends. Only ask when the
-    // header declares it (wav) or the bytes are already all here.
+    // header declares it (wav, flac) or the bytes are already all here.
     if (header_declares_duration || stream.is_complete()) {
         ma_uint64 total_frames = 0;
         if (ma_decoder_get_length_in_pcm_frames(&impl_->decoder, &total_frames) == MA_SUCCESS) {
             info_.duration_ms = total_frames * 1000ULL / kModelSampleRate;
         }
+    }
+    // A length read from the header is a claim the decode can be held to;
+    // one found by scanning (mp3) is only a measurement of what is there.
+    // A wav of "unknown" size is counted from its bytes by dr_wav, so its
+    // claim is what it holds.
+    if (header_declares_duration) {
+        info_.declared_duration_ms = info_.duration_ms;
     }
 }
 

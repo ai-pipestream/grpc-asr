@@ -169,6 +169,20 @@ void verify_family_kinds_and_proto() {
         require(asr::media::family_mimetype(family) != "application/octet-stream",
                 std::string(asr::media::family_name(family)) + " has specific mimetype");
     }
+    // #38: only a header that states the audio's length can show a cut.
+    // ffprobe measures or estimates every other family's duration.
+    for (MediaFamily family : {MediaFamily::kWav, MediaFamily::kFlac, MediaFamily::kMp4}) {
+        require(asr::media::states_audio_duration(family),
+                std::string(asr::media::family_name(family)) + " states its audio length");
+    }
+    for (MediaFamily family :
+         {MediaFamily::kUnknown, MediaFamily::kMp3, MediaFamily::kOgg, MediaFamily::kMkv,
+          MediaFamily::kAvi, MediaFamily::kAsf, MediaFamily::kAmr, MediaFamily::kMpegPs,
+          MediaFamily::kMpegTs, MediaFamily::kAac}) {
+        require(!asr::media::states_audio_duration(family),
+                std::string(asr::media::family_name(family)) +
+                    " has no stated audio length to hold a decode to");
+    }
     require(!decodes_in_process(MediaFamily::kUnknown) &&
                 !demuxes_with_ffmpeg(MediaFamily::kUnknown) &&
                 to_proto_container(MediaFamily::kUnknown) == asrv1::CONTAINER_FAMILY_UNSPECIFIED &&
