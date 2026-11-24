@@ -51,6 +51,15 @@ enum class StreamLayout {
 // True for families the in-process decoder (miniaudio) handles: wav, mp3, flac.
 bool decodes_in_process(MediaFamily family);
 
+// True for families whose header states how much audio the stream holds,
+// so that decoding less means the media was cut short: wav (the data chunk
+// size), flac (the STREAMINFO sample count) and mp4/mov (the audio track's
+// sample table). Every other family has its duration measured or estimated
+// from the bytes that are present (ogg, avi, asf, mpeg-ps/ts, raw aac, amr,
+// mp3) or states one for the file as a whole only (mkv/webm), and a cut
+// file cannot be told from a short one that way.
+bool states_audio_duration(MediaFamily family);
+
 // True for families demuxed and decoded through an ffmpeg child.
 bool demuxes_with_ffmpeg(MediaFamily family);
 

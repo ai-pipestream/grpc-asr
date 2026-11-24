@@ -130,6 +130,84 @@ void verify_keyframes(const std::string& media) {
             "keyframe count matches the interval, got " + std::to_string(count));
 }
 
+// Reads the audio to the end and returns what ffmpeg said on the way.
+asr::media::AudioDecodeReport decode_report(const std::string& media, size_t* samples = nullptr) {
+    VideoDemux demux = open(media);
+    demux.open_audio();
+    std::vector<float> pcm(16000);
+    size_t total = 0;
+    while (true) {
+        const size_t got = demux.read_audio(pcm.data(), pcm.size());
+        if (got == 0) {
+            break;
+        }
+        total += got;
+    }
+    if (samples != nullptr) {
+        *samples = total;
+    }
+    return demux.close_audio();
+}
+
+// #38: ffmpeg skips what it cannot read, says so on stderr and exits 0.
+// What it said used to be read and dropped, so a file cut short or corrupt
+// in the middle came back as a clean, shorter decode.
+void verify_decode_report() {
+    const std::string webm = generate_media(
+        "-f lavfi -i sine=frequency=440:duration=8 -c:a libopus", ".webm");
+    {
+        const asr::media::AudioDecodeReport report = decode_report(webm);
+        require(report.error_lines == 0 && report.first_error.empty(),
+                "a clean decode reports nothing, got " + std::to_string(report.error_lines) +
+                    " line(s): " + report.first_error);
+    }
+    {
+        size_t samples = 0;
+        const asr::media::AudioDecodeReport report =
+            decode_report(webm.substr(0, webm.size() * 6 / 10), &samples);
+        require(samples > asr::media::kModelSampleRate,
+                "the readable part of a cut webm is still decoded");
+        require(report.error_lines >= 1, "a cut webm reports ffmpeg's error lines");
+        require(!report.first_error.empty(), "the first error line is kept");
+        require(report.first_error.find(" @ 0x") == std::string::npos,
+                "the context address is dropped: " + report.first_error);
+        require(report.first_error.find('\n') == std::string::npos &&
+                    report.first_error.size() <= 512,
+                "the first error is one bounded line");
+    }
+    {
+        // Garbage over the middle of the file: many packets are lost, and
+        // every line is counted though only the first is kept.
+        std::string corrupt = webm;
+        for (size_t i = corrupt.size() / 2; i < corrupt.size() / 2 + corrupt.size() / 5; ++i) {
+            corrupt[i] = static_cast<char>(0xA5 ^ (i * 31));
+        }
+        size_t samples = 0;
+        const asr::media::AudioDecodeReport report = decode_report(corrupt, &samples);
+        require(samples > asr::media::kModelSampleRate,
+                "the readable part of a corrupt webm is still decoded");
+        require(report.error_lines >= 1,
+                "a webm with a corrupt middle reports ffmpeg's error lines");
+        require(!report.first_error.empty(), "the first error line of a corrupt webm is kept");
+    }
+    {
+        // A fast-start mp4 keeps its index when its tail is cut: the audio
+        // stream still says 8 s, which is what the decode is held against.
+        const std::string mp4 = generate_media(
+            "-f lavfi -i sine=frequency=440:duration=8 -c:a aac -movflags +faststart", ".mp4");
+        const std::string cut = mp4.substr(0, mp4.size() * 6 / 10);
+        VideoDemux demux = open(cut);
+        const asr::media::ProbeInfo info = demux.probe();
+        require(info.audio_duration_ms > 7900 && info.audio_duration_ms < 8200,
+                "a cut mp4 still states its audio stream's 8 s, got " +
+                    std::to_string(info.audio_duration_ms));
+        size_t samples = 0;
+        const asr::media::AudioDecodeReport report = decode_report(cut, &samples);
+        require(samples < 7 * asr::media::kModelSampleRate, "the cut mp4 decodes less than 8 s");
+        require(report.error_lines >= 1, "a cut mp4 reports ffmpeg's error lines");
+    }
+}
+
 // No ffmpeg child may outlive the call that started it: once every child
 // was reaped, waitpid has nobody left to report.
 bool no_children_left() {
@@ -680,6 +758,7 @@ int main() {
         verify_keyframes(media);
         verify_keyframes_stop(media);
         verify_audio_cancel(media);
+        verify_decode_report();
         verify_stop_reaches_a_silent_child(media);
         verify_stop_before_start(media);
         verify_stop_mid_audio(media);

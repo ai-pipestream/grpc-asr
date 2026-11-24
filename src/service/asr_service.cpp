@@ -40,6 +40,12 @@ namespace {
 // a passed deadline before its stop is requested.
 constexpr std::chrono::milliseconds kCallWatchInterval{100};
 
+// How far short of the length a container states a decode may fall before
+// the trailer reports it. Encoder priming and padding, a last partial
+// frame and resampler latency account for tens of milliseconds; a second
+// is past all of them and still a loss worth knowing about.
+constexpr uint64_t kDeclaredDurationSlackMs = 1000;
+
 // gRPC stream Write is not thread-safe; transcription workers and the
 // keyframe thread share the stream through this lock. write() returning
 // false means the client is gone and the producer should stop. The same
@@ -281,6 +287,20 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         info->set_container(media::to_proto_container(family));
 
         engine::EngineResult result;
+        // What the decode lost short of failing (#38). The audio length the
+        // media itself states, 0 when it states none that can be held
+        // against the decode; and what ffmpeg complained about before
+        // exiting 0, the worst of the channels when each decoded the same
+        // media. Both become typed warnings on the trailer.
+        uint64_t declared_audio_ms = 0;
+        std::mutex decode_report_mu;
+        media::AudioDecodeReport decode_report;
+        auto note_decode_report = [&](media::AudioDecodeReport report) {
+            std::lock_guard<std::mutex> lock(decode_report_mu);
+            if (report.error_lines > decode_report.error_lines) {
+                decode_report = std::move(report);
+            }
+        };
         std::vector<uint32_t> segment_count_by_channel;
         std::atomic<uint32_t> keyframe_count{0};
         std::atomic<bool> observed_first_segment{false};
@@ -348,15 +368,18 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             }
         } else if (!used_extension_fallback && media::decodes_in_process(family)) {
             first_segment_path = FirstSegmentPath::kLive;
-            const bool wav_like = family == media::MediaFamily::kWav;
+            // wav and flac state their length up front; mp3 would have to
+            // be scanned for it.
+            const bool header_declares = media::states_audio_duration(family);
             if (!per_channel) {
-                media::AudioDecoder decoder(upload, wav_like, /*preserve_channels=*/false);
+                media::AudioDecoder decoder(upload, header_declares, /*preserve_channels=*/false);
                 if (decoder.info().duration_ms > max_duration_ms) {
                     telemetry->result = StreamEndResult::kDurationCap;
                     return {grpc::StatusCode::RESOURCE_EXHAUSTED,
                             "media duration exceeds GRPC_ASR_MAX_DURATION_SECONDS=" +
                                 std::to_string(config_.max_duration_seconds)};
                 }
+                declared_audio_ms = decoder.info().declared_duration_ms;
                 info->set_duration_ms(decoder.info().duration_ms);
                 info->set_audio_codec(std::string(media::family_name(family)));
                 info->set_sample_rate_hz(decoder.info().sample_rate_hz);
@@ -385,9 +408,11 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 uint64_t duration_ms = 0;
                 uint32_t sample_rate_hz = 0;
                 {
-                    media::AudioDecoder header_probe(upload, wav_like, /*preserve_channels=*/true);
+                    media::AudioDecoder header_probe(upload, header_declares,
+                                                     /*preserve_channels=*/true);
                     channels = header_probe.info().channels;
                     duration_ms = header_probe.info().duration_ms;
+                    declared_audio_ms = header_probe.info().declared_duration_ms;
                     sample_rate_hz = header_probe.info().sample_rate_hz;
                 }
                 if (channels == 0) {
@@ -432,7 +457,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                             try {
                                 std::stop_token token = group_stop.get_token();
                                 engine::ModelPool::Lease lease = acquire_state(token);
-                                media::AudioDecoder ch_decoder(upload, wav_like,
+                                media::AudioDecoder ch_decoder(upload, header_declares,
                                                                /*preserve_channels=*/true);
                                 engine::EngineOptions ch_opts = base_engine_options;
                                 ch_opts.channel = ch;
@@ -545,7 +570,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 if (result.aborted) {
                     demux.cancel_audio();
                 } else {
-                    demux.close_audio();
+                    note_decode_report(demux.close_audio());
                 }
                 // Wait for any trailing container footer bytes on the upload
                 // before hashing for the Document fold.
@@ -583,6 +608,12 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                     return {grpc::StatusCode::RESOURCE_EXHAUSTED,
                             "media duration exceeds GRPC_ASR_MAX_DURATION_SECONDS=" +
                                 std::to_string(config_.max_duration_seconds)};
+                }
+                // Only a container whose index states the track's length
+                // is held to it, and only when the bytes said what container
+                // this is: ffprobe measures or estimates the others.
+                if (!used_extension_fallback && media::states_audio_duration(family)) {
+                    declared_audio_ms = probe.audio_duration_ms;
                 }
                 info->set_duration_ms(probe.duration_ms);
                 info->set_audio_codec(probe.audio_codec);
@@ -653,7 +684,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                         demux.cancel_audio();
                         keyframe_thread.request_stop();
                     } else {
-                        demux.close_audio();
+                        note_decode_report(demux.close_audio());
                     }
                 } else {
                     start_keyframes_if_requested();
@@ -694,7 +725,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                                         ch_demux.cancel_audio();
                                         group_stop.request_stop();
                                     } else {
-                                        ch_demux.close_audio();
+                                        note_decode_report(ch_demux.close_audio());
                                     }
                                 } catch (...) {
                                     std::lock_guard<std::mutex> lock(err_mu);
@@ -753,9 +784,33 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         for (const std::string& lang : result.languages) {
             complete->add_languages(lang);
         }
+        if (decode_report.error_lines > 0) {
+            asrv1::DecodeWarning* warning = complete->add_decode_warnings();
+            warning->set_code(asrv1::DECODE_WARNING_CODE_DECODER_ERRORS);
+            warning->set_error_count(decode_report.error_lines);
+            warning->set_message(decode_report.first_error.empty()
+                                     ? "the decoder reported errors and carried on"
+                                     : decode_report.first_error);
+        }
+        if (declared_audio_ms > result.duration_ms + kDeclaredDurationSlackMs) {
+            asrv1::DecodeWarning* warning = complete->add_decode_warnings();
+            warning->set_code(asrv1::DECODE_WARNING_CODE_SHORTER_THAN_DECLARED);
+            warning->set_declared_duration_ms(declared_audio_ms);
+            warning->set_decoded_duration_ms(result.duration_ms);
+            warning->set_message("decoded " + std::to_string(result.duration_ms) +
+                                 " ms of audio where the media states " +
+                                 std::to_string(declared_audio_ms) +
+                                 " ms: it was probably cut short");
+        }
         if (!writer.finish(trailer)) {
             telemetry->result = StreamEndResult::kCancelled;
             return cancelled;
+        }
+        for (const asrv1::DecodeWarning& warning : complete->decode_warnings()) {
+            metrics_record_decode_warning(
+                warning.code() == asrv1::DECODE_WARNING_CODE_DECODER_ERRORS
+                    ? DecodeWarningKind::kDecoderErrors
+                    : DecodeWarningKind::kShorterThanDeclared);
         }
 
         if (!call.remote_policy.has_value() && result.duration_ms > 0 &&

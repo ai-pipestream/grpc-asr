@@ -173,6 +173,96 @@ void verify_bad_input() {
     require(threw, "torn wav header throws DecodeError");
 }
 
+// Decodes to the end, returning how many samples came out.
+size_t decoded_samples(AudioDecoder& decoder) {
+    std::vector<float> pcm(4096);
+    size_t total = 0;
+    while (true) {
+        const size_t got = decoder.read(pcm.data(), pcm.size());
+        if (got == 0) {
+            return total;
+        }
+        total += got;
+    }
+}
+
+// #38: a wav whose data chunk is shorter than its header says decodes to
+// the end of what is there and reports no error, so the header's claim has
+// to stay readable beside it, the same whether or not the upload had
+// finished when the decoder opened.
+void verify_declared_duration() {
+    const std::string wav = make_wav(4.0, 440.0);
+    // Header plus 1.5 s of 16-bit mono at 16 kHz.
+    const std::string cut = wav.substr(0, 44 + 3 * kModelSampleRate);
+    auto close_to = [](size_t samples, double seconds) {
+        const double got = static_cast<double>(samples) / kModelSampleRate;
+        return got > seconds - 0.05 && got < seconds + 0.05;
+    };
+    {
+        ByteStream stream;
+        fill(stream, cut);
+        AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+        require(decoder.info().declared_duration_ms == 4000,
+                "a cut wav still declares 4 s once fully uploaded, got " +
+                    std::to_string(decoder.info().declared_duration_ms));
+        require(close_to(decoded_samples(decoder), 1.5), "the cut wav decodes its 1.5 s");
+    }
+    {
+        ByteStream stream;
+        stream.append(cut.data(), cut.size());
+        AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+        require(decoder.info().declared_duration_ms == 4000,
+                "a cut wav declares 4 s while still uploading, got " +
+                    std::to_string(decoder.info().declared_duration_ms));
+        stream.complete();
+        require(close_to(decoded_samples(decoder), 1.5),
+                "the cut wav decodes its 1.5 s when the upload ends early");
+    }
+    {
+        ByteStream stream;
+        fill(stream, wav);
+        AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+        require(decoder.info().declared_duration_ms == 4000,
+                "a whole wav declares what it holds, got " +
+                    std::to_string(decoder.info().declared_duration_ms));
+        require(close_to(decoded_samples(decoder), 4.0), "the whole wav decodes its 4 s");
+    }
+    {
+        // A resampled source: the claim is in time, not in source frames.
+        ByteStream stream;
+        fill(stream, make_wav(2.0, 440.0, 44100));
+        AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+        require(decoder.info().declared_duration_ms == 2000,
+                "a 44.1 kHz wav declares 2 s, got " +
+                    std::to_string(decoder.info().declared_duration_ms));
+    }
+    {
+        // 0xFFFFFFFF is how a streaming writer says "length unknown": that
+        // is no claim to hold the file to, so what is there is the answer.
+        // Fully uploaded, such a wav used to decode to nothing at all.
+        std::string streamed = wav;
+        for (size_t offset : {size_t{4}, size_t{40}}) {
+            streamed.replace(offset, 4, "\xFF\xFF\xFF\xFF", 4);
+        }
+        ByteStream stream;
+        fill(stream, streamed);
+        AudioDecoder decoder(stream, /*header_declares_duration=*/true);
+        require(decoder.info().declared_duration_ms == 4000,
+                "a wav of unknown length declares what it holds, got " +
+                    std::to_string(decoder.info().declared_duration_ms));
+        require(close_to(decoded_samples(decoder), 4.0),
+                "a fully uploaded wav of unknown length decodes its 4 s");
+    }
+    {
+        // No claim is asked of a container that would have to be scanned.
+        ByteStream stream;
+        fill(stream, wav);
+        AudioDecoder decoder(stream, /*header_declares_duration=*/false);
+        require(decoder.info().declared_duration_ms == 0,
+                "no declared duration without a header that states one");
+    }
+}
+
 void verify_stereo_channel_isolation() {
     // Stereo 44.1 kHz WAV with 440 Hz on left (ch 0) and 880 Hz on right (ch 1):
     // preserve_channels must resample to 16 kHz while keeping the two channels
@@ -219,6 +309,7 @@ int main() {
         verify_silence();
         verify_non_finite_samples_scrubbed();
         verify_bad_input();
+        verify_declared_duration();
         verify_stereo_channel_isolation();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());

@@ -96,7 +96,11 @@ the first request message carries `TranscribeOptions` (`model`, `language`,
 (including `ContainerFamily`), then `PartialSegment` and `FinalSegment`
 events (finals replace partials by index), optional `Keyframe` PNGs, and a
 `TranscriptComplete` trailer with counts, effective `window_seconds`,
-per-channel segment counts, and distinct detected `languages`.
+per-channel segment counts, distinct detected `languages`, and
+`decode_warnings`: media cut short or corrupt in the middle is transcribed
+as far as it reads and the trailer says, in typed fields, that the decoder
+skipped errors (`DECODER_ERRORS`, with a count) or that less audio came
+out than the media states (`SHORTER_THAN_DECLARED`, with both lengths).
 
 - **Local decoding options (`TranscribeOptions.decoding`):** `initial_prompt`
   (<= 1024 UTF-8 bytes), `SamplingStrategy` (`GREEDY` or `BEAM_SEARCH`),
@@ -300,6 +304,8 @@ HTTP/1.1 listener serving Prometheus text exposition at `GET /metrics`:
   `invalid_media`, `unknown_container`, `tool_error`, `internal`),
   `grpc_asr_tool_runs_total{tool,outcome}` (`tool="ffmpeg"|"ffprobe"`,
   `outcome="ok"|"rejected"|"exec_failed"|"inactivity_killed"|"cancelled"`),
+  `grpc_asr_decode_warnings_total{code}` (`decoder_errors`,
+  `shorter_than_declared`: transcripts that ended OK with that warning),
   `grpc_asr_audio_seconds_total{model}`, `grpc_asr_keyframes_total`,
   `process_resident_memory_bytes`, `process_cpu_seconds_total`.
 

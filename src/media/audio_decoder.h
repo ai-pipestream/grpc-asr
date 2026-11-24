@@ -39,11 +39,16 @@ class AudioDecoder {
         uint32_t sample_rate_hz = 0;
         // Source channel count before downmix.
         uint32_t channels = 0;
+        // How much audio the header says the stream holds, whatever is
+        // really there; 0 when the header makes no claim and the
+        // duration above, if any, was measured by scanning. Decoding
+        // less than this means the media was cut short.
+        uint64_t declared_duration_ms = 0;
     };
 
     // Opens the stream, blocking until enough header bytes exist.
     // `header_declares_duration` marks containers whose duration is declared in
-    // the header (wav), so it is safe to query before the upload completes.
+    // the header (wav, flac), so it is safe to query before the upload completes.
     // When `preserve_channels` is true, output frames stay interleaved across
     // all source channels instead of mixing down to mono.
     AudioDecoder(ByteStream& stream, bool header_declares_duration,

@@ -34,10 +34,27 @@ struct ProbeInfo {
     uint32_t sample_rate_hz = 0;
     // Audio channel count, 0 without audio.
     uint32_t channels = 0;
+    // The first audio stream's own duration, 0 when the container gives
+    // none for the stream. Whether it is a statement of the container or
+    // a measurement of the bytes present depends on the container: see
+    // states_audio_duration() in sniff.h.
+    uint64_t audio_duration_ms = 0;
     // True when the container has at least one video stream.
     bool has_video = false;
     // Video codec name ("h264", "vp9", ...), empty without video.
     std::string video_codec;
+};
+
+// What ffmpeg said while decoding audio it nevertheless finished with exit
+// code 0. It skips what it cannot read (a corrupt packet, a frame the file
+// ends inside), prints an error line and carries on, so the PCM it produced
+// may be missing the audio around every line counted here.
+struct AudioDecodeReport {
+    // Error lines ffmpeg printed. 0 when the decode was clean.
+    uint32_t error_lines = 0;
+    // The first of them, without ffmpeg's "@ 0x..." context address,
+    // printable ASCII only, bounded. Empty when the decode was clean.
+    std::string first_error;
 };
 
 // Demuxes a media container held in memory through ffmpeg without ever touching
@@ -92,7 +109,11 @@ class VideoDemux {
     // Blocks up to `timeout` until stdout has PCM bytes (or EOF/stop) ready.
     bool wait_for_audio(std::chrono::milliseconds timeout, std::stop_token stop = {}) const;
 
-    void close_audio();
+    // Reaps the audio child once its PCM has been read to the end. Throws
+    // DecodeError when ffmpeg rejected the media (non-zero exit); what it
+    // complained about on the way to a zero exit comes back in the report.
+    // With no child open it is a no-op and the report is empty.
+    AudioDecodeReport close_audio();
     void cancel_audio();
 
     // Extracts one PNG still roughly every interval_seconds from the memfd.

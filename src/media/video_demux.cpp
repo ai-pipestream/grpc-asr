@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <string_view>
@@ -250,6 +251,9 @@ class ToolProcess {
             ::waitpid(pid_, &status, 0);
         }
         reaped_ = true;
+        // The first drain ran while the child could still be writing: what
+        // it said between then and its exit is read now, to end of file.
+        drain_stderr();
         const int code = WIFSIGNALED(status) ? -WTERMSIG(status) : WEXITSTATUS(status);
         if (code == 0) {
             record_outcome(ToolOutcome::kOk);
@@ -262,6 +266,14 @@ class ToolProcess {
     }
 
     const std::string& stderr_tail() const { return stderr_tail_; }
+
+    // The first bytes the tool wrote to stderr, where the tail keeps the
+    // last: the first complaint names the place the trouble started.
+    const std::string& stderr_head() const { return stderr_head_; }
+
+    // Non-empty lines the tool wrote to stderr so far, including one still
+    // open. At "-v error" every line is an error.
+    uint32_t stderr_lines() const { return stderr_lines_ + (stderr_in_line_ ? 1U : 0U); }
 
   private:
     void record_outcome(ToolOutcome outcome) {
@@ -290,9 +302,23 @@ class ToolProcess {
                 break;
             }
             got = true;
-            stderr_tail_.append(buf, static_cast<size_t>(n));
-            if (stderr_tail_.size() > 4096) {
-                stderr_tail_.erase(0, stderr_tail_.size() - 4096);
+            const std::string_view chunk(buf, static_cast<size_t>(n));
+            for (const char c : chunk) {
+                if (c != '\n' && c != '\r') {
+                    stderr_in_line_ = true;
+                } else if (stderr_in_line_) {
+                    stderr_in_line_ = false;
+                    if (stderr_lines_ < std::numeric_limits<uint32_t>::max() - 1) {
+                        ++stderr_lines_;
+                    }
+                }
+            }
+            if (stderr_head_.size() < kStderrKeptBytes) {
+                stderr_head_.append(chunk.substr(0, kStderrKeptBytes - stderr_head_.size()));
+            }
+            stderr_tail_.append(chunk);
+            if (stderr_tail_.size() > kStderrKeptBytes) {
+                stderr_tail_.erase(0, stderr_tail_.size() - kStderrKeptBytes);
             }
         }
         ::fcntl(err_fd_, F_SETFL, flags);
@@ -306,7 +332,11 @@ class ToolProcess {
     bool reaped_ = false;
     bool recorded_outcome_ = false;
     std::string tool_;
+    static constexpr size_t kStderrKeptBytes = 4096;
+    std::string stderr_head_;
     std::string stderr_tail_;
+    uint32_t stderr_lines_ = 0;
+    bool stderr_in_line_ = false;
     std::chrono::milliseconds inactivity_timeout_;
     std::stop_token stop_;
 };
@@ -330,6 +360,37 @@ std::string collect_output(ToolProcess& tool, size_t cap = 1 << 20) {
 std::string first_line(const std::string& text) {
     const size_t end = text.find_first_of("\r\n");
     return end == std::string::npos ? text : text.substr(0, end);
+}
+
+// One line of ffmpeg's stderr made fit for a proto string field and for a
+// person: the first non-empty line, without the "@ 0x55d0c1e2f940" that
+// follows the component name and differs on every run, bytes outside
+// printable ASCII replaced (ffmpeg quotes metadata, which need not be
+// text), and cut at a bound.
+std::string printable_first_line(std::string_view text) {
+    constexpr size_t kMaxBytes = 512;
+    const size_t begin = text.find_first_not_of("\r\n");
+    if (begin == std::string_view::npos) {
+        return {};
+    }
+    text.remove_prefix(begin);
+    text = text.substr(0, text.find_first_of("\r\n"));
+    std::string line;
+    line.reserve(std::min(text.size(), kMaxBytes));
+    size_t pos = 0;
+    if (text.starts_with('[')) {
+        const size_t close = text.find(']');
+        const size_t at = text.find(" @ 0x");
+        if (close != std::string_view::npos && at < close) {
+            line.append(text.substr(0, at));
+            pos = close;
+        }
+    }
+    for (; pos < text.size() && line.size() < kMaxBytes; ++pos) {
+        const unsigned char c = static_cast<unsigned char>(text[pos]);
+        line.push_back(c >= 0x20 && c < 0x7F ? static_cast<char>(c) : '?');
+    }
+    return line;
 }
 
 uint32_t read_be32(const uint8_t* p) {
@@ -476,14 +537,18 @@ ProbeInfo VideoDemux::probe(std::stop_token stop) {
         info.duration_ms = static_cast<uint64_t>(std::stod(duration) * 1000.0);
     }
 
+    // ffprobe prints the fields in its own order whatever order they are
+    // asked for in: codec_name, sample_rate, channels, duration.
     const std::string audio = first_line(run_query(
         {impl_->ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
-         "stream=codec_name,sample_rate,channels", "-of", "csv=p=0", kMediaPath}));
+         "stream=codec_name,sample_rate,channels,duration", "-of", "csv=p=0", kMediaPath}));
     if (!audio.empty()) {
         info.has_audio = true;
         const size_t first_comma = audio.find(',');
         const size_t second_comma = audio.find(',', first_comma + 1);
-        if (first_comma == std::string::npos || second_comma == std::string::npos) {
+        const size_t third_comma = audio.find(',', second_comma + 1);
+        if (first_comma == std::string::npos || second_comma == std::string::npos ||
+            third_comma == std::string::npos) {
             throw ToolError("unexpected ffprobe audio output: " + audio);
         }
         info.audio_codec = audio.substr(0, first_comma);
@@ -492,9 +557,17 @@ ProbeInfo VideoDemux::probe(std::stop_token stop) {
         if (!rate_str.empty() && rate_str != "N/A") {
             info.sample_rate_hz = static_cast<uint32_t>(std::stoul(rate_str));
         }
-        const std::string ch_str = audio.substr(second_comma + 1);
+        const std::string ch_str =
+            audio.substr(second_comma + 1, third_comma - second_comma - 1);
         if (!ch_str.empty() && ch_str != "N/A") {
             info.channels = static_cast<uint32_t>(std::stoul(ch_str));
+        }
+        const std::string stream_duration = audio.substr(third_comma + 1);
+        if (!stream_duration.empty() && stream_duration != "N/A") {
+            const double seconds = std::stod(stream_duration);
+            if (seconds > 0.0) {
+                info.audio_duration_ms = static_cast<uint64_t>(seconds * 1000.0);
+            }
         }
     }
 
@@ -626,17 +699,20 @@ bool VideoDemux::wait_for_audio(std::chrono::milliseconds timeout,
     return impl_->audio->wait_for_stdout(timeout, std::move(stop));
 }
 
-void VideoDemux::close_audio() {
+AudioDecodeReport VideoDemux::close_audio() {
     if (!impl_->audio) {
         if (impl_->feeder.joinable()) {
             impl_->feeder_stop.request_stop();
             impl_->feeder.join();
         }
-        return;
+        return {};
     }
     impl_->feeder_stop.request_stop();
     const int code = impl_->audio->wait_exit();
     const std::string tail = first_line(impl_->audio->stderr_tail());
+    AudioDecodeReport report;
+    report.error_lines = impl_->audio->stderr_lines();
+    report.first_error = printable_first_line(impl_->audio->stderr_head());
     impl_->audio.reset();
     if (impl_->feeder.joinable()) {
         impl_->feeder.join();
@@ -647,6 +723,9 @@ void VideoDemux::close_audio() {
     if (code != 0) {
         throw DecodeError("ffmpeg audio demux failed: " + tail);
     }
+    // Exit 0 is not "nothing went wrong": ffmpeg skips what it cannot read
+    // and says so only here.
+    return report;
 }
 
 void VideoDemux::cancel_audio() {

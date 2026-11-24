@@ -59,7 +59,32 @@ Events, in order:
    `emit_document`)
 5. `TranscriptComplete`: primary `language`, distinct `languages`, duration,
    segment/token/keyframe counts, effective `window_seconds`,
-   `segment_count_by_channel`
+   `segment_count_by_channel`, and `decode_warnings`
+
+Media that is cut short or corrupt in the middle is still transcribed as
+far as it can be read, and the stream still ends OK: the readable part is
+worth having. What was lost is on the trailer as typed `DecodeWarning`
+entries, at most one per code, never as an OK with nothing said:
+
+- `DECODE_WARNING_CODE_DECODER_ERRORS`: ffmpeg runs without `-xerror`, so
+  it skips a corrupt packet or a frame the file ends inside, prints one
+  error line each and exits 0. `error_count` is how many lines it printed
+  and `message` is the first of them. (`-xerror` was not the fix: it stops
+  at the first decoder error and drops everything after it, and it does
+  not see container errors such as "File ended prematurely" at all.)
+- `DECODE_WARNING_CODE_SHORTER_THAN_DECLARED`: the media states how much
+  audio it holds and more than a second less was decoded.
+  `declared_duration_ms` and `decoded_duration_ms` are the two lengths.
+  Checked where the header states a length: wav (data chunk size), flac
+  (STREAMINFO) and probed mp4/mov (the audio track's own duration). Other
+  containers have their duration measured or estimated by ffprobe from the
+  bytes that are present, which cannot show a cut and would report false
+  ones (a raw AAC estimate is off by several percent on a whole file).
+
+A stream cut at a clean frame boundary in a container that states no length
+(ogg, mpeg-ts, mpeg-ps, mp3) leaves nothing to detect and is not reported.
+`grpc_asr_decode_warnings_total{code}` counts the transcripts that ended
+with each warning.
 
 ### 3a. Consolidated media and worker APIs
 
@@ -221,7 +246,9 @@ implement those transport protocols.
 
 A fixture wav with a known transcript (assert substring plus timestamp
 monotonicity). Silence produces an empty transcript and success. A
-truncated mp3 is `INVALID_ARGUMENT`. The video fixture asserts audio
+truncated mp3 is `INVALID_ARGUMENT`. A wav, a flac, a webm and an mp4 cut
+short, and a webm with a corrupt middle, still transcribe and carry the
+matching `decode_warnings`; the clean fixtures carry none. The video fixture asserts audio
 segments are present and the keyframe count matches the interval when
 enabled, zero when not. A missing backend makes the process exit at
 startup, not on the first RPC.
