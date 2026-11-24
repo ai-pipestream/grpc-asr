@@ -29,6 +29,7 @@ asrv1::TranscribeResponse media_info_event() {
     info->set_channels(1);
     info->set_has_video(true);
     info->set_video_codec("h264");
+    info->set_probe_state(asrv1::MEDIA_PROBE_STATE_PROBED);
     return event;
 }
 
@@ -200,6 +201,51 @@ void verify_fold() {
     require(document.media().duration_ms() == 11000.0 && document.media().codec() == "wav",
             "typed media meta carries the decoded duration and codec");
     require(document.media().speakers_size() == 0, "no speakers registered without diarization");
+}
+
+// Media that was never probed has no sample rate, channel count or video
+// flag to report. The fold must not write the zeros MediaInfo carries in
+// their place into the Document as if they were facts (#37): a stereo call
+// recording is not "0 channels", and a video is not "has_video: false".
+void verify_unprobed_media_facts_are_left_out() {
+    auto fold_of = [](asrv1::MediaProbeState state) {
+        asrv1::TranscribeResponse event;
+        asrv1::MediaInfo* info = event.mutable_media_info();
+        info->set_audio_codec("opus");
+        info->set_container(asrv1::CONTAINER_FAMILY_MATROSKA);
+        info->set_probe_state(state);
+        if (state == asrv1::MEDIA_PROBE_STATE_PROBED) {
+            info->set_sample_rate_hz(48000);
+            info->set_channels(2);
+        }
+        asr::doc::AsrDocumentFold fold("tiny.en", "1.2.3");
+        fold.set_source("call.webm", "video/webm", 0x1234ULL);
+        fold.consume(event);
+        fold.consume(segment_event(/*final=*/true, 0, 0, 5000, " hello", -0.25F));
+        fold.consume(complete_event());
+        return fold.take();
+    };
+
+    for (const asrv1::MediaProbeState unknown :
+         {asrv1::MEDIA_PROBE_STATE_NOT_PROBED, asrv1::MEDIA_PROBE_STATE_UNSPECIFIED}) {
+        const docv1::Document unprobed = fold_of(unknown);
+        const auto& fields = unprobed.body().meta().custom_fields();
+        for (const char* made_up : {"asr.sample_rate_hz", "asr.channels", "asr.has_video",
+                                    "asr.video_codec"}) {
+            require(!fields.contains(made_up),
+                    std::string(made_up) + " is not written for media that was not probed");
+        }
+        require(fields.at("asr.audio_codec").string_value() == "opus" &&
+                    unprobed.media().codec() == "opus",
+                "the sniffed codec is still a fact and still recorded");
+    }
+
+    const docv1::Document probed = fold_of(asrv1::MEDIA_PROBE_STATE_PROBED);
+    const auto& fields = probed.body().meta().custom_fields();
+    require(fields.at("asr.sample_rate_hz").number_value() == 48000.0 &&
+                fields.at("asr.channels").number_value() == 2.0 &&
+                fields.contains("asr.has_video") && !fields.at("asr.has_video").bool_value(),
+            "probed media keeps its facts, a real false included");
 }
 
 void verify_word_provenance() {
@@ -545,6 +591,7 @@ void verify_per_channel_arrival_permutation_determinism() {
 int main() {
     try {
         verify_fold();
+        verify_unprobed_media_facts_are_left_out();
         verify_word_provenance();
         verify_word_provenance_can_be_turned_off();
         verify_speaker_registry();

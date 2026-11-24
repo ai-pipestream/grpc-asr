@@ -509,6 +509,9 @@ void verify_wav(const std::shared_ptr<grpc::Channel>& channel, const std::string
     require(result.media_info.duration_ms() > 10000 && result.media_info.duration_ms() < 12000,
             "MediaInfo duration close to 11s");
     require(!result.media_info.has_video(), "wav has no video");
+    require(result.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_PROBED &&
+                result.media_info.sample_rate_hz() == 16000 && result.media_info.channels() == 1,
+            "a wav's header is read: its stream facts are probed facts");
     require(!result.partials.empty(), "partials streamed");
     require(!result.finals.empty(), "finals streamed");
     require(lower(final_text(result)).find("country") != std::string::npos,
@@ -1393,6 +1396,14 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
         require(res.document.media().codec() == c.expected_codec,
                 std::string(c.label) + " Document.media.codec expected " + c.expected_codec +
                     ", got '" + res.document.media().codec() + "'");
+        // The live path never probes, and says so instead of reporting 0 Hz,
+        // 0 channels and no video as facts (#37).
+        require(res.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_NOT_PROBED,
+                std::string(c.label) + " MediaInfo says the media was not probed");
+        for (const char* made_up : {"asr.sample_rate_hz", "asr.channels", "asr.has_video"}) {
+            require(!res.document.body().meta().custom_fields().contains(made_up),
+                    std::string(c.label) + " Document carries no made-up " + made_up);
+        }
         require(lower(final_text(res)).find("country") != std::string::npos,
                 std::string(c.label) + " transcript contains 'country'");
     }
@@ -1411,6 +1422,31 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
             "trailing-moov mp4 transcribes OK: " + trailing_res.status.error_message());
     require(trailing_res.media_info.audio_codec() == "aac",
             "trailing-moov mp4 MediaInfo.audio_codec matches fast-start ('aac')");
+    require(trailing_res.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_PROBED &&
+                trailing_res.media_info.sample_rate_hz() > 0 &&
+                trailing_res.media_info.channels() > 0,
+            "the same audio through ffprobe is probed and reports its real rate and channels");
+
+    // A video sent without keyframes takes the live path too. It must not
+    // be reported as having no video: it was simply never looked at.
+    const std::string video_webm = generate_media(
+        "-f lavfi -i testsrc2=duration=11:size=160x120:rate=5 -i " + jfk_path +
+            " -shortest -c:v mpeg4 -c:a aac",
+        ".mkv");
+    require(asr::media::sniff_stream_layout(
+                asr::media::MediaFamily::kMkv,
+                reinterpret_cast<const uint8_t*>(video_webm.data()), video_webm.size(),
+                /*stream_complete=*/true) == asr::media::StreamLayout::kPipeable,
+            "the mkv video fixture is pipeable");
+    asrv1::TranscribeOptions video_opts = options_for("tiny.en");
+    video_opts.set_emit_document(true);
+    StreamResult video_res = transcribe(channel, video_opts, video_webm);
+    require(video_res.status.ok(), "mkv video without keyframes transcribes OK: " +
+                                       video_res.status.error_message());
+    require(video_res.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_NOT_PROBED,
+            "a video on the live path is marked not probed, not as having no video");
+    require(!video_res.document.body().meta().custom_fields().contains("asr.has_video"),
+            "and its Document does not say has_video: false");
     require(lower(final_text(trailing_res)).find("country") != std::string::npos,
             "trailing-moov mp4 transcript contains 'country'");
 }

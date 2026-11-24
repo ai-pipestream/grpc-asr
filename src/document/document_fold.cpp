@@ -181,11 +181,17 @@ void AsrDocumentFold::register_speaker(const std::string& speaker) {
 void AsrDocumentFold::on_media_info(const asrv1::MediaInfo& info) {
     auto* fields = document_.mutable_body()->mutable_meta()->mutable_custom_fields();
     set_string(fields, "asr.audio_codec", info.audio_codec());
-    set_number(fields, "asr.sample_rate_hz", static_cast<double>(info.sample_rate_hz()));
-    set_number(fields, "asr.channels", static_cast<double>(info.channels()));
-    (*fields)["asr.has_video"].set_bool_value(info.has_video());
-    if (info.has_video()) {
-        set_string(fields, "asr.video_codec", info.video_codec());
+    // The stream facts are written only when the media was probed. On
+    // unprobed media (the live pipe path, a remote endpoint) MediaInfo
+    // carries zeros in their place, and a zero written here would read as
+    // "0 channels" and "no video" to everything downstream.
+    if (info.probe_state() == asrv1::MEDIA_PROBE_STATE_PROBED) {
+        set_number(fields, "asr.sample_rate_hz", static_cast<double>(info.sample_rate_hz()));
+        set_number(fields, "asr.channels", static_cast<double>(info.channels()));
+        (*fields)["asr.has_video"].set_bool_value(info.has_video());
+        if (info.has_video()) {
+            set_string(fields, "asr.video_codec", info.video_codec());
+        }
     }
     if (info.duration_ms() != 0) {
         set_number(fields, "asr.declared_duration_ms", static_cast<double>(info.duration_ms()));

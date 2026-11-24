@@ -44,7 +44,13 @@ and `remote` (allowlisted outbound OpenAI-compatible transcription).
 Events, in order:
 
 1. `MediaInfo`: duration, codec, sample rate, channels, video present,
-   `ContainerFamily`
+   `ContainerFamily`, and `probe_state`. The sample rate, the channel
+   count and the video flag are facts only when `probe_state` is
+   `MEDIA_PROBE_STATE_PROBED` (a decoded audio header, or ffprobe). On the
+   live pipe path and for a remote endpoint nothing reads the streams, so
+   the state is `MEDIA_PROBE_STATE_NOT_PROBED`, those fields stay at their
+   zero values, and the folded Document leaves `asr.sample_rate_hz`,
+   `asr.channels` and `asr.has_video` out rather than recording zeros.
 2. `PartialSegment` / `FinalSegment`: index, start_ms, end_ms, text,
    optional words, avg logprob, `no_speech_prob`, `suppressed`, `channel`,
    `speaker_id`, `language`
@@ -179,6 +185,9 @@ still in flight, skipping `ffprobe`, extracting `MediaInfo.audio_codec` from
 the container's leading header boxes (Ogg BOS, AMR magic, Matroska/WebM EBML
 `Tracks`, and ISO BMFF `moov/.../stsd`), and allocating zero memfds so
 `MediaInfo` and committed segments arrive before the client half-closes.
+That `MediaInfo` carries `probe_state: MEDIA_PROBE_STATE_NOT_PROBED`: the
+codec and the container are known from the header, the rate, the channels
+and whether there is video are not.
 
 **Seekable layouts and single-copy memfd.** Containers that require random
 access (trailing-`moov` MP4, AVI, ASF/WMA/WMV), extension-fallback inputs,
