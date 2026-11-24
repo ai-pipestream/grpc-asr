@@ -1,5 +1,7 @@
 #include "service/streaming_runtime.h"
 #include <grpcpp/server_builder.h>
+#include "failure_report.h"
+#include "metrics.h"
 #include "parakeet_model.h"
 #include <cstdlib>
 #include <fstream>
@@ -21,8 +23,17 @@ std::string weights(const std::string& path, size_t cap) {
   return data;
 }
 }
+void count_streaming_failures_in_metrics() {
+  // The metric's labels are the streaming library's handler names, by index.
+  static_assert(kStreamingFailureHandlerLabels.size() == ::media::failure_site_names.size());
+  static_assert(kStreamingFailureHandlerLabels == ::media::failure_site_names);
+  ::media::set_failure_observer([](::media::FailureSite site) noexcept {
+    metrics_record_streaming_failure(static_cast<size_t>(site));
+  });
+}
 StreamingRuntime::StreamingRuntime(engine::ModelPool& pool, const Config& config)
     : registry_({}, env("GRPC_ASR_MACHINE_ID")) {
+  count_streaming_failures_in_metrics();
   const auto kind = env("GRPC_ASR_STREAM_BACKEND", "whisper");
   if (kind == "whisper") {
     const auto id = env("GRPC_ASR_STREAM_MODEL", pool.model_names().front());

@@ -107,6 +107,7 @@ struct GlobalTelemetry {
         tool_runs{};
     std::array<std::atomic<uint64_t>, static_cast<size_t>(DecodeWarningKind::kCount)>
         decode_warnings{};
+    std::array<std::atomic<uint64_t>, kStreamingFailureHandlerLabels.size()> streaming_failures{};
 };
 
 GlobalTelemetry& telemetry() {
@@ -376,6 +377,13 @@ void metrics_record_decode_warning(DecodeWarningKind kind) {
     }
 }
 
+void metrics_record_streaming_failure(size_t handler_index) {
+    GlobalTelemetry& t = telemetry();
+    if (handler_index < t.streaming_failures.size()) {
+        t.streaming_failures[handler_index].fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 MetricsSummary metrics_summary() {
     GlobalTelemetry& t = telemetry();
     MetricsSummary out;
@@ -518,6 +526,15 @@ std::string render_prometheus_metrics() {
     for (size_t kind = 0; kind < kDecodeWarningKindLabels.size(); ++kind) {
         out << "grpc_asr_decode_warnings_total{code=\"" << kDecodeWarningKindLabels[kind]
             << "\"} " << t.decode_warnings[kind].load(std::memory_order_relaxed) << '\n';
+    }
+
+    out << "# HELP grpc_asr_streaming_unexpected_failures_total Streaming handlers that answered "
+           "INTERNAL because of an exception they did not expect; the cause is on stderr.\n"
+           "# TYPE grpc_asr_streaming_unexpected_failures_total counter\n";
+    for (size_t handler = 0; handler < kStreamingFailureHandlerLabels.size(); ++handler) {
+        out << "grpc_asr_streaming_unexpected_failures_total{handler=\""
+            << kStreamingFailureHandlerLabels[handler] << "\"} "
+            << t.streaming_failures[handler].load(std::memory_order_relaxed) << '\n';
     }
 
     out << "# HELP grpc_asr_audio_seconds_total Transcribed audio duration in seconds by model.\n"

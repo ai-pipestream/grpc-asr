@@ -1,4 +1,7 @@
 #include "engine/stream_backend.h"
+#include "failure_report.h"
+#include "metrics.h"
+#include "service/streaming_runtime.h"
 #include "worker.h"
 #include "fixture.h"
 #include <chrono>
@@ -6,6 +9,20 @@
 #include <print>
 #include <grpcpp/grpcpp.h>
 int main() {
+  // #41 F9: what a streaming handler reports as an unexpected failure is in
+  // this process's metrics under the handler's name. Needs no model.
+  asr::count_streaming_failures_in_metrics();
+  const auto series = [](const char* handler, int count) {
+    return std::string("grpc_asr_streaming_unexpected_failures_total{handler=\"") + handler + "\"} " +
+           std::to_string(count) + "\n";
+  };
+  if (asr::render_prometheus_metrics().find(series("speech_worker", 0)) == std::string::npos) return 10;
+  ::media::report_unexpected_failure(::media::FailureSite::SpeechWorker, "stream", std::runtime_error("cause"));
+  ::media::report_unexpected_failure(::media::FailureSite::Subscribe, {}, std::runtime_error("cause"));
+  const std::string metrics = asr::render_prometheus_metrics();
+  if (metrics.find(series("speech_worker", 1)) == std::string::npos ||
+      metrics.find(series("subscribe", 1)) == std::string::npos ||
+      metrics.find(series("pull", 0)) == std::string::npos) return 11;
   const char* path = env_or_null("GRPC_ASR_TEST_MODEL");
   if (!path || !std::filesystem::exists(path)) return 77;
   asr::Config config;

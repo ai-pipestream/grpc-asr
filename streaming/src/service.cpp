@@ -1,5 +1,6 @@
 #include "service.h"
 #include "decoder.h"
+#include "failure_report.h"
 
 #include <openssl/evp.h>
 
@@ -56,6 +57,7 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
 
 grpc::Status Service::Pull(grpc::ServerContext* context, const mediapb::PullRequest* request,
                            grpc::ServerWriter<mediapb::PullResponse>* wire) {
+  std::string stream_id;
   try {
     if (!request->has_open() || !request->open().has_http())
       throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "Pull requires an HTTP source");
@@ -64,6 +66,7 @@ grpc::Status Service::Pull(grpc::ServerContext* context, const mediapb::PullRequ
     HttpInput input(request->open().http().url(), http_, [&] { return context->IsCancelled(); });
     auto accepted = request->open();
     if (accepted.stream_id().empty()) accepted.set_stream_id(uuid());
+    stream_id = accepted.stream_id();
     bool opened = false, described = false;
     uint64_t count = 0, bytes = 0;
     auto describe = [&] {
@@ -98,7 +101,10 @@ grpc::Status Service::Pull(grpc::ServerContext* context, const mediapb::PullRequ
       mediapb::PullResponse output; *output.mutable_event() = response.event(); return wire->Write(output);
     }, true);
   } catch (const Failure& error) { return {error.code, error.what()}; }
-    catch (const std::exception&) { return {grpc::StatusCode::INTERNAL, "HTTP pull initialization failed"}; }
+    catch (const std::exception& error) {
+      report_unexpected_failure(FailureSite::Pull, stream_id, error);
+      return {grpc::StatusCode::INTERNAL, "HTTP pull initialization failed"};
+    }
 }
 
 grpc::Status Service::process(grpc::ServerContext* context,
@@ -191,7 +197,8 @@ grpc::Status Service::process(grpc::ServerContext* context,
       if (processing) processing->finish();
     } catch (const Failure& error) {
       status = {error.code, error.what()};
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      report_unexpected_failure(FailureSite::IngestProcessing, id, error);
       status = {grpc::StatusCode::INTERNAL, "ingress processing failed"};
     }
     if (id.empty()) return status;
@@ -212,7 +219,8 @@ grpc::Status Service::process(grpc::ServerContext* context,
     if (!write(response) && status.ok())
       return {grpc::StatusCode::CANCELLED, "terminal response disconnected"};
     return status;
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    report_unexpected_failure(FailureSite::IngestFinalization, id, error);
     return {grpc::StatusCode::INTERNAL, "ingress finalization failed"};
   }
 }
@@ -232,7 +240,10 @@ grpc::Status Service::Subscribe(grpc::ServerContext* context, const mediapb::Sub
     return {grpc::StatusCode::CANCELLED, "subscription disconnected"};
   } catch (const Failure& error) {
     return {error.code, error.what()};
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    // A subscription can span many streams or all of them: there is no one
+    // stream to name.
+    report_unexpected_failure(FailureSite::Subscribe, {}, error);
     return {grpc::StatusCode::INTERNAL, "subscription failed"};
   }
 }

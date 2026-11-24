@@ -325,7 +325,8 @@ endif()
 
 if(BUILD_TESTING)
   set(STREAM_TEST_TARGETS reconcile_tests http_tests ggml_depthwise_tests
-      pipeline_policy_tests windowing_tests decoder_tests media_tests stream-backend-test)
+      pipeline_policy_tests failure_report_tests windowing_tests decoder_tests media_tests
+      stream-backend-test)
   add_dependencies(grpc-asr-tests ${STREAM_TEST_TARGETS} speech_tests parakeet_tests
       speech_window_probe vad_tests translation_tests pipeline_tests pipeline_cancellation_tests)
   set_tests_properties(stream-backend-test PROPERTIES LABELS "asr;streaming")

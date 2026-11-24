@@ -1,4 +1,5 @@
 #include "worker.h"
+#include "failure_report.h"
 #include <bit>
 #include <condition_variable>
 #include <limits>
@@ -72,6 +73,7 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech worker stream limit reached"};
   }
   struct Release { std::atomic<unsigned>& streams; ~Release() { streams.fetch_sub(1); } } release{streams_};
+  std::string stream_id;
   try {
     auto read = [&](mediapb::TranscribeRequest* request) {
       ReadDeadline deadline(*context, input_idle_timeout_);
@@ -81,6 +83,7 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     require(read(&request) && request.has_open(), "first worker message must open a track");
     auto accepted = request.open();
     require(valid_uuid(accepted.stream_id()), "invalid source stream UUID");
+    stream_id = accepted.stream_id();
     require(!accepted.options().has_windowing(), "worker accepts pre-cut windows, not a windowing policy");
     model_.validate_options(accepted.options());
     if (accepted.options().task() == mediapb::SPEECH_TASK_UNSPECIFIED)
@@ -151,6 +154,11 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     }
     return {grpc::StatusCode::CANCELLED, "worker input ended without explicit finish"};
   } catch (const Failure& error) { return {error.code, error.what()}; }
-    catch (const std::exception&) { return {grpc::StatusCode::INTERNAL, "speech worker failed"}; }
+    catch (const std::exception& error) {
+      // The client gets a fixed message; the cause (an inference error, an
+      // allocation failing on the device) is said here or nowhere.
+      report_unexpected_failure(FailureSite::SpeechWorker, stream_id, error);
+      return {grpc::StatusCode::INTERNAL, "speech worker failed"};
+    }
 }
 }  // namespace media

@@ -765,9 +765,19 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
         }
 
         if (writer.folding()) {
+            // The Document's binary hash is of every uploaded byte, and a
+            // decoder can be done before the upload is: a wav ends at its
+            // data chunk whatever follows it. Folding then put 0 where the
+            // hash goes, which reads as a hash. Wait for the last byte; an
+            // upload that ends any other way is a stream that went away.
+            upload.wait_complete();
+            if (gone() || !upload.is_complete()) {
+                telemetry->result = StreamEndResult::kCancelled;
+                return cancelled;
+            }
             writer.set_source(source_filename(options.filename(), family),
                               std::string(media::family_mimetype(family)),
-                              upload.is_complete() ? upload.content_hash() : 0);
+                              upload.content_hash());
         }
 
         asrv1::TranscribeResponse trailer;
