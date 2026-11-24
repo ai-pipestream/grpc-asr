@@ -267,15 +267,31 @@ class ToolProcess {
 
     const std::string& stderr_tail() const { return stderr_tail_; }
 
-    // The first bytes the tool wrote to stderr, where the tail keeps the
-    // last: the first complaint names the place the trouble started.
-    const std::string& stderr_head() const { return stderr_head_; }
+    // Sets aside stderr lines that are not complaints about the media: a
+    // line `ignore` returns true for is neither counted nor kept as the
+    // first. Set before the first read.
+    void set_stderr_line_filter(bool (*ignore)(std::string_view line)) { ignore_line_ = ignore; }
 
-    // Non-empty lines the tool wrote to stderr so far, including one still
+    // The first counted line the tool wrote to stderr, where the tail keeps
+    // the last bytes: the first complaint names the place the trouble
+    // started. Only its first kStderrLineBytes are kept.
+    std::string first_stderr_line() const {
+        if (!first_line_.empty() || !counts(open_line_)) {
+            return first_line_;
+        }
+        return open_line_;
+    }
+
+    // Counted lines the tool wrote to stderr so far, including one still
     // open. At "-v error" every line is an error.
-    uint32_t stderr_lines() const { return stderr_lines_ + (stderr_in_line_ ? 1U : 0U); }
+    uint32_t stderr_lines() const { return stderr_lines_ + (counts(open_line_) ? 1U : 0U); }
 
   private:
+    // Whether a stderr line is one to count: not empty, and not set aside.
+    bool counts(std::string_view line) const {
+        return !line.empty() && (ignore_line_ == nullptr || !ignore_line_(line));
+    }
+
     void record_outcome(ToolOutcome outcome) {
         if (!recorded_outcome_) {
             recorded_outcome_ = true;
@@ -305,16 +321,20 @@ class ToolProcess {
             const std::string_view chunk(buf, static_cast<size_t>(n));
             for (const char c : chunk) {
                 if (c != '\n' && c != '\r') {
-                    stderr_in_line_ = true;
-                } else if (stderr_in_line_) {
-                    stderr_in_line_ = false;
+                    if (open_line_.size() < kStderrLineBytes) {
+                        open_line_.push_back(c);
+                    }
+                    continue;
+                }
+                if (counts(open_line_)) {
                     if (stderr_lines_ < std::numeric_limits<uint32_t>::max() - 1) {
                         ++stderr_lines_;
                     }
+                    if (first_line_.empty()) {
+                        first_line_ = open_line_;
+                    }
                 }
-            }
-            if (stderr_head_.size() < kStderrKeptBytes) {
-                stderr_head_.append(chunk.substr(0, kStderrKeptBytes - stderr_head_.size()));
+                open_line_.clear();
             }
             stderr_tail_.append(chunk);
             if (stderr_tail_.size() > kStderrKeptBytes) {
@@ -333,10 +353,14 @@ class ToolProcess {
     bool recorded_outcome_ = false;
     std::string tool_;
     static constexpr size_t kStderrKeptBytes = 4096;
-    std::string stderr_head_;
+    // The start of a line is enough to tell what it is and to quote it.
+    static constexpr size_t kStderrLineBytes = 1024;
     std::string stderr_tail_;
+    // The line being read, the first counted line, and how many counted.
+    std::string open_line_;
+    std::string first_line_;
     uint32_t stderr_lines_ = 0;
-    bool stderr_in_line_ = false;
+    bool (*ignore_line_)(std::string_view) = nullptr;
     std::chrono::milliseconds inactivity_timeout_;
     std::stop_token stop_;
 };
@@ -391,6 +415,25 @@ std::string printable_first_line(std::string_view text) {
         line.push_back(c >= 0x20 && c < 0x7F ? static_cast<char>(c) : '?');
     }
     return line;
+}
+
+// Lines ffmpeg prints at error level that say nothing about the audio it
+// decoded. libavformat checks every packet's timestamps on the way into a
+// muxer and logs a backwards or inconsistent one as an error, but for a
+// muxer that writes no timestamps (AVFMT_NOTIMESTAMPS, which raw PCM is)
+// it then writes the packet all the same: no sample is lost. An AMR file
+// read by an ffmpeg built without the AMR parser draws one such line per
+// packet, and so does a recording whose clock restarts part way through.
+// Counting them reported whole media as damaged. Only these two messages
+// from the raw PCM muxer are set aside; the same words from a muxer that
+// does write timestamps mean a dropped packet and still count.
+bool is_output_timestamp_note(std::string_view line) {
+    if (!line.starts_with("[f32le @ ")) {
+        return false;
+    }
+    return line.find("non monotonically increasing dts to muxer") != std::string_view::npos ||
+           (line.find("] pts (") != std::string_view::npos &&
+            line.find(") < dts (") != std::string_view::npos);
 }
 
 uint32_t read_be32(const uint8_t* p) {
@@ -590,6 +633,7 @@ void VideoDemux::open_audio(std::stop_token stop, std::optional<uint32_t> channe
     impl_->audio = std::make_unique<ToolProcess>(
         ToolKind::kFfmpeg, build_audio_argv(impl_->ffmpeg, kMediaPath, channel), impl_->media_fd,
         -1, impl_->inactivity_timeout, std::move(stop));
+    impl_->audio->set_stderr_line_filter(is_output_timestamp_note);
     impl_->partial_sample.clear();
 }
 
@@ -613,6 +657,7 @@ void VideoDemux::open_audio_from_pipe(ByteStream& stream, std::stop_token stop,
         throw;
     }
     ::close(in_pipe[0]);
+    impl_->audio->set_stderr_line_filter(is_output_timestamp_note);
     impl_->partial_sample.clear();
 
     const int write_fd = in_pipe[1];
@@ -712,7 +757,7 @@ AudioDecodeReport VideoDemux::close_audio() {
     const std::string tail = first_line(impl_->audio->stderr_tail());
     AudioDecodeReport report;
     report.error_lines = impl_->audio->stderr_lines();
-    report.first_error = printable_first_line(impl_->audio->stderr_head());
+    report.first_error = printable_first_line(impl_->audio->first_stderr_line());
     impl_->audio.reset();
     if (impl_->feeder.joinable()) {
         impl_->feeder.join();
