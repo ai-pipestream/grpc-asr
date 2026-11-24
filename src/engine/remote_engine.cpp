@@ -649,27 +649,89 @@ std::string normalize_language_code(const std::string& raw) {
     return lowered;
 }
 
-EngineWord parse_word_object(const JsonValue& w) {
-    EngineWord word;
-    if (const auto* t = w.find("word"); t != nullptr && t->is_string()) {
-        word.text = t->as_string();
-    } else if (const auto* t2 = w.find("text"); t2 != nullptr && t2->is_string()) {
-        word.text = t2->as_string();
+// A JSON member that is there: null counts as absent, as OpenAI-compatible
+// servers write "words": null for what they did not compute.
+const JsonValue* present(const JsonValue& object, std::string_view key) {
+    const JsonValue* value = object.find(key);
+    return value != nullptr && !std::holds_alternative<std::nullptr_t>(value->data) ? value
+                                                                                    : nullptr;
+}
+
+// A numeric member, or nullopt when it is absent or anything but a number.
+// A time that is missing must never read as 0 ms.
+std::optional<double> number_member(const JsonValue& object, std::string_view key) {
+    const JsonValue* value = present(object, key);
+    return value != nullptr && value->is_number() ? std::optional<double>(value->as_number())
+                                                  : std::nullopt;
+}
+
+// One entry of a `words` array. Returns why it is not a word, empty when
+// it is one: an object with its text and a numeric start and end.
+std::string parse_word(const JsonValue& w, EngineWord* word) {
+    if (!w.is_object()) {
+        return "is not an object";
     }
-    if (const auto* s = w.find("start"); s != nullptr && s->is_number()) {
-        word.start_ms = seconds_to_ms(s->as_number());
-    }
-    if (const auto* e = w.find("end"); e != nullptr && e->is_number()) {
-        word.end_ms = std::max(word.start_ms, seconds_to_ms(e->as_number()));
+    if (const auto* t = present(w, "word"); t != nullptr && t->is_string()) {
+        word->text = t->as_string();
+    } else if (const auto* t2 = present(w, "text"); t2 != nullptr && t2->is_string()) {
+        word->text = t2->as_string();
     } else {
-        word.end_ms = word.start_ms;
+        return "has no text";
     }
+    const std::optional<double> start = number_member(w, "start");
+    const std::optional<double> end = number_member(w, "end");
+    if (!start.has_value()) {
+        return "has no numeric start";
+    }
+    if (!end.has_value()) {
+        return "has no numeric end";
+    }
+    word->start_ms = seconds_to_ms(*start);
+    word->end_ms = std::max(word->start_ms, seconds_to_ms(*end));
     if (const auto* p = w.find("probability"); p != nullptr && p->is_number()) {
-        word.probability = static_cast<float>(std::clamp(p->as_number(), 0.0, 1.0));
+        word->probability = static_cast<float>(std::clamp(p->as_number(), 0.0, 1.0));
     } else if (const auto* sc = w.find("score"); sc != nullptr && sc->is_number()) {
-        word.probability = static_cast<float>(std::clamp(sc->as_number(), 0.0, 1.0));
+        word->probability = static_cast<float>(std::clamp(sc->as_number(), 0.0, 1.0));
     }
-    return word;
+    return {};
+}
+
+// A `words` member, absent or an array of words. Returns why it is
+// malformed, empty when it is not.
+std::string parse_words(const JsonValue& owner, std::vector<EngineWord>* words) {
+    const JsonValue* value = present(owner, "words");
+    if (value == nullptr) {
+        return {};
+    }
+    if (!value->is_array()) {
+        return "words is not an array";
+    }
+    size_t index = 0;
+    for (const JsonValue& w : value->as_array()) {
+        EngineWord word;
+        if (const std::string why = parse_word(w, &word); !why.empty()) {
+            return "word " + std::to_string(index) + " " + why;
+        }
+        words->push_back(std::move(word));
+        ++index;
+    }
+    return {};
+}
+
+// The statuses a bad request field produces. A 401, 403, 408 or 429 says
+// something else went wrong, whatever field names its body happens to
+// mention ("rate limit reached for model ...").
+bool status_blames_the_request(long http_status) {
+    switch (http_status) {
+        case 400:
+        case 404:
+        case 413:
+        case 415:
+        case 422:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool error_body_names_field(const std::string& body,
@@ -1033,7 +1095,7 @@ grpc::Status run_remote_transcription(const asrv1::RemoteTranscriptionOptions& o
                     curl_easy_strerror(curl_rc)};
     }
     if (http_status < 200 || http_status >= 300) {
-        if (http_status >= 400 && http_status < 500 &&
+        if (status_blames_the_request(http_status) &&
             error_body_names_field(transfer.response_body, options)) {
             return {grpc::StatusCode::INVALID_ARGUMENT,
                     "remote transcription rejected request field (HTTP " +
@@ -1050,7 +1112,32 @@ grpc::Status run_remote_transcription(const asrv1::RemoteTranscriptionOptions& o
                 "remote transcription endpoint returned malformed JSON"};
     }
 
-    result->decode_wall_ns = wall_ns;
+    // A 2xx is a transcript only when it has the shape of one. An error
+    // object sent with 200, or any object with neither `segments` nor
+    // `text`, used to come back OK with no segments; a segment without
+    // times was placed at 0 ms and an entry that was not an object was
+    // skipped. Everything is checked before the first segment is emitted,
+    // so nothing of a malformed reply reaches the caller. The reason names
+    // positions and keys only, never the reply's own text.
+    auto malformed = [](const std::string& why) {
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                            "remote transcription endpoint returned a malformed response: " + why);
+    };
+    const JsonValue* segs_val = present(*root, "segments");
+    const JsonValue* text_val = present(*root, "text");
+    if (segs_val != nullptr && !segs_val->is_array()) {
+        return malformed("segments is not an array");
+    }
+    if (text_val != nullptr && !text_val->is_string()) {
+        return malformed("text is not a string");
+    }
+    if (segs_val == nullptr && text_val == nullptr) {
+        return malformed(root->find("error") != nullptr
+                             ? "HTTP " + std::to_string(http_status) +
+                                   " with an error object and no transcript"
+                             : "neither segments nor text");
+    }
+
     std::string top_language;
     if (const auto* lang = root->find("language"); lang != nullptr && lang->is_string()) {
         top_language = normalize_language_code(lang->as_string());
@@ -1058,40 +1145,40 @@ grpc::Status run_remote_transcription(const asrv1::RemoteTranscriptionOptions& o
         top_language = normalize_language_code(options.language());
     }
 
+    uint64_t duration_ms = 0;
     if (const auto* dur = root->find("duration"); dur != nullptr && dur->is_number()) {
-        result->duration_ms = seconds_to_ms(dur->as_number());
+        duration_ms = seconds_to_ms(dur->as_number());
     }
 
     std::vector<EngineWord> top_words;
-    if (const auto* words_val = root->find("words");
-        words_val != nullptr && words_val->is_array()) {
-        for (const JsonValue& w : words_val->as_array()) {
-            if (w.is_object()) {
-                top_words.push_back(parse_word_object(w));
-            }
-        }
+    if (const std::string why = parse_words(*root, &top_words); !why.empty()) {
+        return malformed(why);
     }
 
     std::vector<EngineSegment> segments;
-    if (const auto* segs_val = root->find("segments");
-        segs_val != nullptr && segs_val->is_array()) {
+    if (segs_val != nullptr) {
         uint32_t idx = 0;
         for (const JsonValue& s : segs_val->as_array()) {
+            const std::string where = "segment " + std::to_string(idx);
             if (!s.is_object()) {
-                continue;
+                return malformed(where + " is not an object");
             }
             EngineSegment seg;
             seg.index = idx++;
-            if (const auto* st = s.find("start"); st != nullptr && st->is_number()) {
-                seg.start_ms = seconds_to_ms(st->as_number());
+            const std::optional<double> start = number_member(s, "start");
+            const std::optional<double> end = number_member(s, "end");
+            if (!start.has_value()) {
+                return malformed(where + " has no numeric start");
             }
-            if (const auto* en = s.find("end"); en != nullptr && en->is_number()) {
-                seg.end_ms = std::max(seg.start_ms, seconds_to_ms(en->as_number()));
-            } else {
-                seg.end_ms = seg.start_ms;
+            if (!end.has_value()) {
+                return malformed(where + " has no numeric end");
             }
-            if (const auto* tx = s.find("text"); tx != nullptr && tx->is_string()) {
+            seg.start_ms = seconds_to_ms(*start);
+            seg.end_ms = std::max(seg.start_ms, seconds_to_ms(*end));
+            if (const auto* tx = present(s, "text"); tx != nullptr && tx->is_string()) {
                 seg.text = tx->as_string();
+            } else {
+                return malformed(where + " has no text");
             }
             if (const auto* lp = s.find("avg_logprob"); lp != nullptr && lp->is_number()) {
                 seg.avg_logprob = static_cast<float>(lp->as_number());
@@ -1109,25 +1196,27 @@ grpc::Status run_remote_transcription(const asrv1::RemoteTranscriptionOptions& o
             } else {
                 seg.language = top_language;
             }
-            if (const auto* sw = s.find("words"); sw != nullptr && sw->is_array()) {
-                for (const JsonValue& w : sw->as_array()) {
-                    if (w.is_object()) {
-                        seg.words.push_back(parse_word_object(w));
-                    }
-                }
+            if (const std::string why = parse_words(s, &seg.words); !why.empty()) {
+                return malformed(where + ": " + why);
             }
             segments.push_back(std::move(seg));
         }
-    } else if (const auto* tx = root->find("text");
-               tx != nullptr && tx->is_string() && !tx->as_string().empty()) {
+    }
+    // Text with no segment to carry it (response_format=json, or an empty
+    // `segments` beside it) is one segment spanning the media. The text
+    // used to be dropped when an empty array came with it.
+    if (segments.empty() && text_val != nullptr && !text_val->as_string().empty()) {
         EngineSegment seg;
         seg.index = 0;
         seg.start_ms = 0;
-        seg.end_ms = result->duration_ms;
-        seg.text = tx->as_string();
+        seg.end_ms = duration_ms;
+        seg.text = text_val->as_string();
         seg.language = top_language;
         segments.push_back(std::move(seg));
     }
+
+    result->decode_wall_ns = wall_ns;
+    result->duration_ms = duration_ms;
 
     // Attach top-level words to segments when segments did not embed their own.
     if (!top_words.empty() && !segments.empty()) {

@@ -485,6 +485,155 @@ void verify_error_mapping_and_secret_redaction() {
     }
 }
 
+// One remote call against an endpoint that answers `status_line` with
+// `body`. Returns the status and what reached the segment sink.
+struct RemoteReply {
+    grpc::Status status;
+    std::vector<asr::engine::EngineSegment> segments;
+    asr::engine::EngineResult result;
+};
+
+RemoteReply remote_reply(const std::string& status_line, const std::string& body,
+                         const std::function<void(asrv1::RemoteTranscriptionOptions&)>& setup = {}) {
+    LoopbackHttpServer server([&](int fd, const RecordedHttpRequest&, std::atomic<bool>&) {
+        send_all(fd, "HTTP/1.1 " + status_line +
+                         "\r\nContent-Type: application/json\r\nContent-Length: " +
+                         std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+    });
+    asrv1::RemoteTranscriptionOptions opts;
+    opts.set_url(server.url());
+    opts.set_model("whisper-1");
+    if (setup) {
+        setup(opts);
+    }
+    asr::engine::RemoteEndpointPolicy policy;
+    require(asr::engine::authorize_remote_endpoint(opts.url(), {server.host_port()}, &policy).ok(),
+            "authorized");
+    asr::media::ByteStream upload;
+    const std::string wav = make_wav(0.2, 440.0);
+    upload.append(wav.data(), wav.size());
+    upload.complete();
+    RemoteReply reply;
+    reply.status = asr::engine::run_remote_transcription(
+        opts, policy, upload, "a.wav", "audio/wav",
+        [&](const asr::engine::EngineSegment& segment, bool) {
+            reply.segments.push_back(segment);
+            return true;
+        },
+        &reply.result);
+    return reply;
+}
+
+// #39: a 200 that is not a transcript used to be one anyway. An error
+// object, or any object without `segments` or `text`, came back OK with
+// no segments; a segment without times was placed at 0 ms; an entry that
+// was not an object was skipped. All of it is a malformed reply now, and
+// nothing of a malformed reply reaches the caller as a segment.
+void verify_malformed_replies_are_not_transcripts() {
+    struct Case {
+        const char* label;
+        const char* body;
+    };
+    const std::vector<Case> malformed = {
+        {"an error object", R"({"error":{"message":"model is still loading","type":"server_error"}})"},
+        {"an empty object", R"({})"},
+        {"an object with neither segments nor text", R"({"task":"transcribe","duration":3.0})"},
+        {"segments that are not an array", R"({"segments":"none"})"},
+        {"text that is not a string", R"({"text":5})"},
+        {"a segment that is not an object", R"({"text":"a","segments":[5]})"},
+        {"a segment without start",
+         R"({"segments":[{"start":0.0,"end":1.0,"text":"a"},{"end":2.0,"text":"b"}]})"},
+        {"a segment without end", R"({"segments":[{"start":0.0,"text":"a"}]})"},
+        {"a segment whose start is not a number",
+         R"({"segments":[{"start":"0.0","end":1.0,"text":"a"}]})"},
+        {"a segment without text", R"({"segments":[{"start":0.0,"end":1.0}]})"},
+        {"a word that is not an object",
+         R"({"segments":[{"start":0.0,"end":1.0,"text":"a","words":["a"]}]})"},
+        {"a word without times",
+         R"({"segments":[{"start":0.0,"end":1.0,"text":"a b","words":[{"word":"a","start":0.0,"end":0.5},{"word":"b"}]}]})"},
+        {"a top-level word without times",
+         R"({"text":"a","segments":[{"start":0.0,"end":1.0,"text":"a"}],"words":[{"word":"a","end":0.5}]})"},
+        {"a word without its text",
+         R"({"segments":[{"start":0.0,"end":1.0,"text":"a","words":[{"start":0.0,"end":0.5}]}]})"},
+    };
+    for (const Case& c : malformed) {
+        const RemoteReply reply = remote_reply("200 OK", c.body);
+        const std::string label = std::string("a 200 with ") + c.label;
+        require(reply.status.error_code() == grpc::StatusCode::UNAVAILABLE,
+                label + " is UNAVAILABLE, got code " +
+                    std::to_string(static_cast<int>(reply.status.error_code())) + " " +
+                    reply.status.error_message());
+        require(reply.status.error_message().find("malformed") != std::string::npos,
+                label + " is called malformed: " + reply.status.error_message());
+        require(reply.segments.empty(), label + " emits no segment");
+        require(reply.status.error_message().find("still loading") == std::string::npos,
+                label + " does not echo the reply body");
+    }
+
+    {
+        // Silence is a transcript: both keys there, nothing in them.
+        const RemoteReply reply = remote_reply("200 OK", R"({"text":"","segments":[]})");
+        require(reply.status.ok() && reply.segments.empty(),
+                "an empty transcript is OK with no segments: " + reply.status.error_message());
+    }
+    {
+        const RemoteReply reply = remote_reply("200 OK", R"({"text":""})");
+        require(reply.status.ok() && reply.segments.empty(),
+                "an empty text-only transcript is OK with no segments");
+    }
+    {
+        // response_format=json: text alone, spanning the media.
+        const RemoteReply reply = remote_reply("200 OK", R"({"text":"hello there","duration":2.5})");
+        require(reply.status.ok() && reply.segments.size() == 1 &&
+                    reply.segments[0].text == "hello there" && reply.segments[0].end_ms == 2500,
+                "a text-only transcript is one segment: " + reply.status.error_message());
+    }
+    for (const char* body : {R"({"text":"hello there","segments":[]})",
+                             R"({"text":"hello there","segments":null})"}) {
+        // The text used to be dropped when an empty segments array came
+        // with it.
+        const RemoteReply reply = remote_reply("200 OK", body);
+        require(reply.status.ok() && reply.segments.size() == 1 &&
+                    reply.segments[0].text == "hello there",
+                std::string("text beside no segments is kept: ") + body + " " +
+                    reply.status.error_message());
+    }
+    {
+        // Absent optional fields are fine; null counts as absent.
+        const RemoteReply reply = remote_reply(
+            "200 OK",
+            R"({"segments":[{"id":0,"start":0,"end":1.5,"text":" hi","words":null,"tokens":null}],"words":null})");
+        require(reply.status.ok() && reply.segments.size() == 1 &&
+                    reply.segments[0].start_ms == 0 && reply.segments[0].end_ms == 1500,
+                "a plain segment list is a transcript: " + reply.status.error_message());
+    }
+}
+
+// A 4xx blames the request only when the status is one a bad field
+// produces. The body of a 401 or a 429 mentions "model" as readily as a
+// 400 does ("rate limit reached for model ..."), and searching it for
+// field names made those the caller's INVALID_ARGUMENT.
+void verify_only_request_errors_blame_the_request() {
+    const std::string names_model = R"({"error":{"message":"Rate limit reached for model whisper-1"}})";
+    for (const char* status_line :
+         {"401 Unauthorized", "403 Forbidden", "408 Request Timeout", "429 Too Many Requests"}) {
+        const RemoteReply reply = remote_reply(status_line, names_model);
+        require(reply.status.error_code() == grpc::StatusCode::UNAVAILABLE,
+                std::string(status_line) + " is UNAVAILABLE whatever its body names, got " +
+                    reply.status.error_message());
+    }
+    for (const char* status_line : {"400 Bad Request", "404 Not Found", "413 Payload Too Large",
+                                    "415 Unsupported Media Type", "422 Unprocessable Entity"}) {
+        const RemoteReply reply = remote_reply(status_line, names_model);
+        require(reply.status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                std::string(status_line) + " naming a field is INVALID_ARGUMENT, got " +
+                    reply.status.error_message());
+    }
+    const RemoteReply reply = remote_reply("400 Bad Request", R"({"error":"nope"})");
+    require(reply.status.error_code() == grpc::StatusCode::UNAVAILABLE,
+            "a 400 that names no field stays UNAVAILABLE");
+}
+
 void verify_cancel_aborts_promptly() {
     std::atomic<bool> request_arrived{false};
     LoopbackHttpServer server([&](int /*fd*/, const RecordedHttpRequest&, std::atomic<bool>& stop) {
@@ -539,6 +688,8 @@ int main() {
         verify_allowlist_and_ssrf_policy();
         verify_multipart_and_verbose_json();
         verify_error_mapping_and_secret_redaction();
+        verify_malformed_replies_are_not_transcripts();
+        verify_only_request_errors_blame_the_request();
         verify_cancel_aborts_promptly();
     } catch (const std::exception& error) {
         std::println(stderr, "{}", error.what());
