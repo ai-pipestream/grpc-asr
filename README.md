@@ -163,9 +163,20 @@ transcript.
 - Each text item sets `TextItemBase.meta.language` from `Segment.language`.
   Document-level `body.meta.language` and `Document.source_meta.language` are
   populated when at most one language is present and left unset on
-  multi-language transcripts. The decoded duration and codec land in
-  `Document.media`; the filename, sniffed mimetype, and incremental FNV-1a
-  content hash in `Document.name` and `Document.origin`.
+  multi-language transcripts. The filename, sniffed mimetype, and
+  incremental FNV-1a content hash land in `Document.name` and
+  `Document.origin`.
+- Every media fact is a typed field of `Document.media`, set only when it
+  is known: `codec`, `sample_rate_hz`, `channels`, `has_video`,
+  `video_codec`, `declared_duration_ms` (what the container states),
+  `duration_ms` (what was decoded) and `token_count`. Nothing about the
+  media is written to `body.meta.custom_fields`, and unprobed media leaves
+  the stream facts unset instead of zero.
+- The trailer's `decode_warnings` are also `Document.warnings`, from
+  collector `asr`: decoder errors as
+  `WARNING_CODE_SOURCE_STRUCTURE_MALFORMED` with a `count`, audio shorter
+  than the media states as `WARNING_CODE_SOURCE_INPUT_INCOMPLETE`. A
+  Document folded from cut or damaged media says so itself.
 - Keyframes become picture items whose `ImageRef.uri` is
   `keyframe:<timestamp_ms>`, a pointer back at the typed event rather than
   embedded PNG bytes, so the Document stays one bounded message; the frame's

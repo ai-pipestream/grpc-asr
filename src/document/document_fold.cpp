@@ -44,16 +44,6 @@ bool is_spoken_text(const std::string& trimmed_text) {
     return true;
 }
 
-void set_number(google::protobuf::Map<std::string, google::protobuf::Value>* fields,
-                const std::string& key, double value) {
-    (*fields)[key].set_number_value(value);
-}
-
-void set_string(google::protobuf::Map<std::string, google::protobuf::Value>* fields,
-                const std::string& key, const std::string& value) {
-    (*fields)[key].set_string_value(value);
-}
-
 // Unicode code points in [from, to): every byte that is not a UTF-8
 // continuation byte starts one. Charspans are code point offsets, not byte
 // offsets, so a transcript with accents or CJK still highlights correctly.
@@ -178,33 +168,31 @@ void AsrDocumentFold::register_speaker(const std::string& speaker) {
     document_.mutable_media()->add_speakers(speaker);
 }
 
+// Every media fact goes into its typed slot on Document.media. Nothing is
+// written to body.meta.custom_fields: a consumer reads these by field, with
+// presence, and never by matching a key in an untyped bag.
 void AsrDocumentFold::on_media_info(const asrv1::MediaInfo& info) {
-    auto* fields = document_.mutable_body()->mutable_meta()->mutable_custom_fields();
-    set_string(fields, "asr.audio_codec", info.audio_codec());
-    // The stream facts are written only when the media was probed. On
-    // unprobed media (the live pipe path, a remote endpoint) MediaInfo
-    // carries zeros in their place, and a zero written here would read as
-    // "0 channels" and "no video" to everything downstream.
-    if (info.probe_state() == asrv1::MEDIA_PROBE_STATE_PROBED) {
-        set_number(fields, "asr.sample_rate_hz", static_cast<double>(info.sample_rate_hz()));
-        set_number(fields, "asr.channels", static_cast<double>(info.channels()));
-        (*fields)["asr.has_video"].set_bool_value(info.has_video());
-        if (info.has_video()) {
-            set_string(fields, "asr.video_codec", info.video_codec());
-        }
-    }
-    if (info.duration_ms() != 0) {
-        set_number(fields, "asr.declared_duration_ms", static_cast<double>(info.duration_ms()));
-    }
-    // The typed media facts the schema has slots for. The container's
-    // declared duration seeds it; the trailer replaces it with what was
-    // actually decoded, which is the authoritative number.
     docv1::MediaMeta* media = document_.mutable_media();
     if (!info.audio_codec().empty()) {
         media->set_codec(info.audio_codec());
     }
+    // The stream facts are written only when the media was probed. On
+    // unprobed media (the live pipe path, a remote endpoint) MediaInfo
+    // carries zeros in their place, and a zero written here would read as
+    // "0 channels" and "no video" to everything downstream. Left unset,
+    // the fields say what is true: nobody looked.
+    if (info.probe_state() == asrv1::MEDIA_PROBE_STATE_PROBED) {
+        media->set_sample_rate_hz(info.sample_rate_hz());
+        media->set_channels(info.channels());
+        media->set_has_video(info.has_video());
+        if (info.has_video() && !info.video_codec().empty()) {
+            media->set_video_codec(info.video_codec());
+        }
+    }
+    // What the container states, kept apart from duration_ms: that slot is
+    // for what was decoded, and only the trailer knows it.
     if (info.duration_ms() != 0) {
-        media->set_duration_ms(static_cast<double>(info.duration_ms()));
+        media->set_declared_duration_ms(static_cast<double>(info.duration_ms()));
     }
 }
 
@@ -387,6 +375,42 @@ void AsrDocumentFold::on_keyframe(const asrv1::Keyframe& keyframe) {
     insert_body_child(ref, keyframe.timestamp_ms(), /*is_text=*/false, /*channel=*/0U);
 }
 
+// A decode warning on the trailer is a fact about the Document too: the
+// transcript folded here has a hole wherever the decoder skipped audio, and
+// stops early when the media was cut. The shared schema has no code of its
+// own for either, so each maps to the one that says what a consumer can
+// rely on, and the service's finding stays in the message.
+void AsrDocumentFold::add_decode_warning(const asrv1::DecodeWarning& warning) {
+    docv1::CollectorWarning* out = document_.add_warnings();
+    docv1::CollectorSource* source = out->mutable_source();
+    source->set_collector(kCollector);
+    source->set_model(model_);
+    source->set_version(version_);
+    switch (warning.code()) {
+        case asrv1::DECODE_WARNING_CODE_DECODER_ERRORS:
+            // The decoder recovered from bytes that break the format; the
+            // audio around each error may be missing from the transcript.
+            out->set_code(docv1::WARNING_CODE_SOURCE_STRUCTURE_MALFORMED);
+            // The message is the decoder's first complaint; the count says
+            // how many it made.
+            out->set_message(warning.message());
+            if (warning.error_count() > 0) {
+                out->set_count(warning.error_count());
+            }
+            return;
+        case asrv1::DECODE_WARNING_CODE_SHORTER_THAN_DECLARED:
+            out->set_code(docv1::WARNING_CODE_SOURCE_INPUT_INCOMPLETE);
+            out->set_message(warning.message());
+            return;
+        default:
+            // A code a later server learned: passed on with its words and
+            // no typed meaning claimed for it.
+            out->set_code(docv1::WARNING_CODE_UNSPECIFIED);
+            out->set_message(warning.message());
+            return;
+    }
+}
+
 void AsrDocumentFold::on_complete(const asrv1::TranscriptComplete& complete) {
     canonicalize_arenas_and_speakers();
     docv1::BaseMeta* meta = document_.mutable_body()->mutable_meta();
@@ -405,11 +429,17 @@ void AsrDocumentFold::on_complete(const asrv1::TranscriptComplete& complete) {
             document_.mutable_source_meta()->set_language(doc_language);
         }
     }
-    auto* fields = meta->mutable_custom_fields();
-    set_number(fields, "asr.duration_ms", static_cast<double>(complete.duration_ms()));
-    set_number(fields, "asr.token_count", static_cast<double>(complete.token_count()));
+    docv1::MediaMeta* media = document_.mutable_media();
     if (complete.duration_ms() != 0) {
-        document_.mutable_media()->set_duration_ms(static_cast<double>(complete.duration_ms()));
+        media->set_duration_ms(static_cast<double>(complete.duration_ms()));
+    }
+    // Zero tokens beside transcript text is a count nobody took (a remote
+    // endpoint that returned no token lists), not a measurement of zero.
+    if (complete.token_count() != 0 || document_.texts_size() == 0) {
+        media->set_token_count(complete.token_count());
+    }
+    for (const asrv1::DecodeWarning& warning : complete.decode_warnings()) {
+        add_decode_warning(warning);
     }
     finished_ = true;
 }

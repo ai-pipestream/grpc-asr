@@ -45,6 +45,7 @@
 #include <google/protobuf/util/message_differencer.h>
 
 namespace asrv1 = ai::pipestream::asr::v1;
+namespace docv1 = ai::pipestream::document::v1;
 
 namespace {
 
@@ -532,7 +533,6 @@ void verify_wav(const std::shared_ptr<grpc::Channel>& channel, const std::string
 }
 
 void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::string& jfk) {
-    namespace docv1 = ai::pipestream::document::v1;
     asrv1::TranscribeOptions options = options_for("tiny.en");
     options.set_emit_document(true);
     options.set_word_timestamps(true);
@@ -630,6 +630,27 @@ void verify_document(const std::shared_ptr<grpc::Channel>& channel, const std::s
     require(document.source_meta().language() == "en", "and into the document meta");
     require(document.media().duration_ms() > 10000.0 && document.media().duration_ms() < 12000.0,
             "media meta carries the decoded duration");
+    // The media facts are typed (#40): the wav header was read, so its rate
+    // and channels are facts, and nothing about the media hides in the
+    // untyped custom_fields bag.
+    const docv1::MediaMeta& media = document.media();
+    require(media.codec() == result.media_info.audio_codec() && media.has_sample_rate_hz() &&
+                media.sample_rate_hz() == result.media_info.sample_rate_hz() &&
+                media.has_channels() && media.channels() == result.media_info.channels(),
+            "Document.media carries the codec, rate and channels MediaInfo reported");
+    require(media.has_has_video() && !media.has_video() && !media.has_video_codec(),
+            "a probed wav is typed as having no video");
+    require(media.has_declared_duration_ms() &&
+                media.declared_duration_ms() ==
+                    static_cast<double>(result.media_info.duration_ms()),
+            "the duration the header states is typed as declared");
+    require(media.has_token_count() && media.token_count() == result.complete.token_count() &&
+                media.token_count() > 0,
+            "the trailer's token count is typed");
+    require(document.body().meta().custom_fields().empty(),
+            "no asr.* key is left in body custom fields, got " +
+                std::to_string(document.body().meta().custom_fields().size()));
+    require(document.warnings_size() == 0, "a whole wav folds to a Document with no warnings");
 }
 
 void verify_streaming_during_upload(const std::shared_ptr<grpc::Channel>& channel,
@@ -985,12 +1006,25 @@ void verify_decode_warnings(const std::shared_ptr<grpc::Channel>& channel, const
         // The 11 s wav with its second half missing. The header still says
         // 11 s; whether the upload finished before the decoder opened used
         // to decide whether anyone could tell.
-        StreamResult result =
-            transcribe(channel, options_for("tiny.en"), jfk.substr(0, jfk.size() / 2));
+        asrv1::TranscribeOptions options = options_for("tiny.en");
+        options.set_emit_document(true);
+        StreamResult result = transcribe(channel, options, jfk.substr(0, jfk.size() / 2));
         require_shorter(result, "a cut wav", 10000, 12000);
         require(warning_of(result, errors, "a cut wav") == nullptr,
                 "a cut wav has no decoder errors to report");
         require(!result.finals.empty(), "the readable half of a cut wav is transcribed");
+        // The Document folded from a cut file says so itself: a consumer
+        // that only keeps the Document must not take it for the whole talk.
+        require(result.documents == 1 && result.document.warnings_size() == 1,
+                "the cut wav's Document carries one warning, got " +
+                    std::to_string(result.document.warnings_size()));
+        const docv1::CollectorWarning& incomplete = result.document.warnings(0);
+        require(incomplete.code() == docv1::WARNING_CODE_SOURCE_INPUT_INCOMPLETE &&
+                    incomplete.source().collector() == "asr" && !incomplete.message().empty(),
+                "typed as an incomplete source, from the asr collector");
+        require(result.document.media().declared_duration_ms() >
+                    result.document.media().duration_ms() + 1000.0,
+                "and its typed durations show the gap: declared against decoded");
     }
     {
         // Per channel: both channels read the same cut file, one warning.
@@ -1017,8 +1051,9 @@ void verify_decode_warnings(const std::shared_ptr<grpc::Channel>& channel, const
     const std::string webm = generate_media("-i " + source + " -c:a libopus", ".webm");
     {
         // Through the live pipe: ffmpeg says the file ended early and exits 0.
-        StreamResult result =
-            transcribe(channel, options_for("tiny.en"), webm.substr(0, webm.size() * 6 / 10));
+        asrv1::TranscribeOptions options = options_for("tiny.en");
+        options.set_emit_document(true);
+        StreamResult result = transcribe(channel, options, webm.substr(0, webm.size() * 6 / 10));
         require(result.status.ok(),
                 "a cut webm still transcribes: " + result.status.error_message());
         const asrv1::DecodeWarning* warning = warning_of(result, errors, "a cut webm");
@@ -1030,6 +1065,14 @@ void verify_decode_warnings(const std::shared_ptr<grpc::Channel>& channel, const
         require(warning->declared_duration_ms() == 0 && warning->decoded_duration_ms() == 0,
                 "DECODER_ERRORS carries no durations");
         require(!result.finals.empty(), "the readable part of a cut webm is transcribed");
+        require(result.documents == 1 && result.document.warnings_size() == 1,
+                "the cut webm's Document carries one warning, got " +
+                    std::to_string(result.document.warnings_size()));
+        const docv1::CollectorWarning& malformed = result.document.warnings(0);
+        require(malformed.code() == docv1::WARNING_CODE_SOURCE_STRUCTURE_MALFORMED &&
+                    malformed.count() == warning->error_count() &&
+                    malformed.source().collector() == "asr",
+                "typed as a malformed source, counting the same error lines as the trailer");
     }
     {
         // Garbage over a fifth of the file, mid-stream.
@@ -1593,10 +1636,12 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
         // 0 channels and no video as facts (#37).
         require(res.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_NOT_PROBED,
                 std::string(c.label) + " MediaInfo says the media was not probed");
-        for (const char* made_up : {"asr.sample_rate_hz", "asr.channels", "asr.has_video"}) {
-            require(!res.document.body().meta().custom_fields().contains(made_up),
-                    std::string(c.label) + " Document carries no made-up " + made_up);
-        }
+        require(!res.document.media().has_sample_rate_hz() &&
+                    !res.document.media().has_channels() &&
+                    !res.document.media().has_has_video(),
+                std::string(c.label) + " Document carries no made-up stream facts");
+        require(res.document.body().meta().custom_fields().empty(),
+                std::string(c.label) + " Document keeps no media fact in custom fields");
         require(lower(final_text(res)).find("country") != std::string::npos,
                 std::string(c.label) + " transcript contains 'country'");
     }
@@ -1640,7 +1685,7 @@ void verify_pipe_streaming_and_mp4_layouts(const std::shared_ptr<grpc::Channel>&
                                        video_res.status.error_message());
     require(video_res.media_info.probe_state() == asrv1::MEDIA_PROBE_STATE_NOT_PROBED,
             "a video on the live path is marked not probed, not as having no video");
-    require(!video_res.document.body().meta().custom_fields().contains("asr.has_video"),
+    require(!video_res.document.media().has_has_video(),
             "and its Document does not say has_video: false");
     require(lower(final_text(trailing_res)).find("country") != std::string::npos,
             "trailing-moov mp4 transcript contains 'country'");

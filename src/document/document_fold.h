@@ -52,6 +52,13 @@ struct FoldOptions {
 // segments are skipped (their finals supersede them). Media has no pages,
 // so page_no stays 0 and no bbox is invented.
 //
+// The media facts are typed fields of Document.media (codec, sample rate,
+// channels, video flag and codec, the duration the container declares, the
+// duration decoded, the token count), each present only when it is known.
+// None of them is written to body.meta.custom_fields. The trailer's decode
+// warnings become Document.warnings, attributed to this collector, so a
+// Document folded from cut or damaged media says so itself.
+//
 // What still stays on the typed stream: per-word probabilities (the
 // schema has no per-word confidence slot), the segment index, and the
 // trailer's segment and keyframe counts.
@@ -83,6 +90,7 @@ class AsrDocumentFold {
     void on_final_segment(const ai::pipestream::asr::v1::Segment& segment);
     void on_keyframe(const ai::pipestream::asr::v1::Keyframe& keyframe);
     void on_complete(const ai::pipestream::asr::v1::TranscriptComplete& complete);
+    void add_decode_warning(const ai::pipestream::asr::v1::DecodeWarning& warning);
 
     // Appends one ProvenanceItem per word of the segment, each located by
     // its media time span and by its charspan inside `text`.
