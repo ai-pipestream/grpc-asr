@@ -72,6 +72,11 @@ entries, at most one per code, never as an OK with nothing said:
   and `message` is the first of them. (`-xerror` was not the fix: it stops
   at the first decoder error and drops everything after it, and it does
   not see container errors such as "File ended prematurely" at all.)
+  Two lines are not counted: the raw PCM muxer's "non monotonically
+  increasing dts" and "pts < dts" notes. That muxer writes no timestamps,
+  so libavformat logs the complaint and writes the packet all the same;
+  no sample is lost, and a recording whose clock restarts draws one per
+  packet.
 - `DECODE_WARNING_CODE_SHORTER_THAN_DECLARED`: the media states how much
   audio it holds and more than a second less was decoded.
   `declared_duration_ms` and `decoded_duration_ms` are the two lengths.
