@@ -306,6 +306,10 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
             // via libcurl's read callback without copying it.
             first_segment_path = FirstSegmentPath::kFfmpeg;
             info->set_duration_ms(0);
+            // Nothing here reads the media's streams: the bytes go to the
+            // remote endpoint as they are. The rate, the channel count and
+            // the video flag are unknown, and MediaInfo says so.
+            info->set_probe_state(asrv1::MEDIA_PROBE_STATE_NOT_PROBED);
             if (family != media::MediaFamily::kUnknown) {
                 const auto codec = resolve_pipe_audio_codec(family, upload, prefix);
                 if (!codec.has_value()) {
@@ -358,6 +362,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 info->set_sample_rate_hz(decoder.info().sample_rate_hz);
                 info->set_channels(decoder.info().channels);
                 info->set_has_video(false);
+                info->set_probe_state(asrv1::MEDIA_PROBE_STATE_PROBED);
                 if (!writer.write(info_response)) {
                     telemetry->result = StreamEndResult::kCancelled;
                     return cancelled;
@@ -407,6 +412,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 info->set_sample_rate_hz(sample_rate_hz);
                 info->set_channels(channels);
                 info->set_has_video(false);
+                info->set_probe_state(asrv1::MEDIA_PROBE_STATE_PROBED);
                 if (!writer.write(info_response)) {
                     telemetry->result = StreamEndResult::kCancelled;
                     return cancelled;
@@ -506,9 +512,12 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                     return {grpc::StatusCode::CANCELLED, "upload aborted"};
                 }
                 info->set_audio_codec(*codec);
-                info->set_sample_rate_hz(0);
-                info->set_channels(0);
-                info->set_has_video(false);
+                // ffprobe is skipped on this path, so the source rate, the
+                // channel count and whether there is video are unknown.
+                // They stay unset and the state says why: zeros sent as
+                // facts made a stereo recording "0 channels" and a video
+                // "has_video: false", in the event and in the Document.
+                info->set_probe_state(asrv1::MEDIA_PROBE_STATE_NOT_PROBED);
                 if (!writer.write(info_response)) {
                     telemetry->result = StreamEndResult::kCancelled;
                     return cancelled;
@@ -581,6 +590,7 @@ grpc::Status process_stream(const Config& config_, engine::ModelPool& pool_,
                 info->set_channels(probe.channels);
                 info->set_has_video(probe.has_video);
                 info->set_video_codec(probe.video_codec);
+                info->set_probe_state(asrv1::MEDIA_PROBE_STATE_PROBED);
                 if (!writer.write(info_response)) {
                     telemetry->result = StreamEndResult::kCancelled;
                     return cancelled;

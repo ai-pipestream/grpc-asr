@@ -437,16 +437,44 @@ message MediaInfo {
   // "aac", "mp3".
   string audio_codec = 2;
   // Source sample rate in hertz, before resampling to the model rate.
+  // Meaningful only when probe_state is MEDIA_PROBE_STATE_PROBED.
   uint32 sample_rate_hz = 3;
-  // Number of audio channels in the source.
+  // Number of audio channels in the source. Meaningful only when
+  // probe_state is MEDIA_PROBE_STATE_PROBED.
   uint32 channels = 4;
-  // True when the container also has a video stream.
+  // True when the container also has a video stream. Meaningful only when
+  // probe_state is MEDIA_PROBE_STATE_PROBED: false on unprobed media does
+  // not mean there is no video.
   bool has_video = 5;
   // Video codec name when has_video is true, empty otherwise.
   string video_codec = 6;
   // Container family the server sniffed from the first bytes (or matched
   // from the filename extension fallback).
   ContainerFamily container = 7;
+  // Whether sample_rate_hz, channels, has_video and video_codec were read
+  // from the media. Read this before those four: when it is
+  // MEDIA_PROBE_STATE_NOT_PROBED they hold their zero values and say
+  // nothing about the media (a stereo recording still shows 0 channels, a
+  // video still shows has_video false).
+  MediaProbeState probe_state = 8;
+}
+
+// Whether a MediaInfo's stream facts were read from the media.
+enum MediaProbeState {
+  // Not set: a server older than this field, which filled the stream facts
+  // with zeros when it had not probed. Never emitted by this server.
+  MEDIA_PROBE_STATE_UNSPECIFIED = 0;
+  // The media was probed (the audio header was decoded, or ffprobe read
+  // the container): sample_rate_hz, channels, has_video and video_codec
+  // are what the media declares.
+  MEDIA_PROBE_STATE_PROBED = 1;
+  // The media was not probed: it is being transcribed as it streams in
+  // (ogg, mkv/webm, fast-start mp4, amr, mpeg-ps/ts and aac without
+  // keyframes or per-channel mode), or it went to a remote endpoint.
+  // sample_rate_hz, channels, has_video and video_codec are unknown and
+  // left at their zero values; audio_codec and container come from the
+  // first bytes and are still valid.
+  MEDIA_PROBE_STATE_NOT_PROBED = 2;
 }
 
 // Media container family recognized by the server.
